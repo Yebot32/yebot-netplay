@@ -42,6 +42,7 @@ target_sources(emu
         xe_android_message_box.cpp
         xe_android_text_input.cpp
         xe_android_util.cpp
+        xe_upnp_jni.cpp
         xe_opensles_audio_driver.cpp
         xe_opensles_audio_system.cpp
         xe_system_xendroid.cpp
