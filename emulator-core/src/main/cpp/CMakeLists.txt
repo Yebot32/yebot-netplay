@@ -123,6 +123,15 @@ target_include_directories(xenia-kernel PRIVATE
 )
 target_link_libraries(xenia-kernel PRIVATE libminiupnpc-static)
 
+# upnp.cc is added to the target from HERE rather than by editing
+# xenia/src/xenia/kernel/CMakeLists.txt. Both put the object in xenia-kernel;
+# only this way leaves no edit in the vendored tree for an upstream merge to
+# conflict with. The SOURCE still lives beside the rest of the kernel, because
+# a new file never conflicts - only a changed one does.
+target_sources(xenia-kernel PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/kernel/upnp.cc
+)
+
 target_include_directories(emu PRIVATE
         xenia
         xenia/src
