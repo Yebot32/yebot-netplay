@@ -16,6 +16,7 @@
 #include <string>
 
 #include "xenia/kernel/upnp.h"
+#include "xenia/kernel/util/network_adapter_manager.h"
 
 namespace {
 
@@ -73,6 +74,37 @@ Java_xendroid_compose_UPnPCheck_nativeTestMapping(JNIEnv* env, jclass clazz,
 JNIEXPORT void JNICALL
 Java_xendroid_compose_UPnPCheck_nativeShutdown(JNIEnv* env, jclass clazz) {
   upnp().Shutdown();
+}
+
+/*!
+ * Which interface netplay would present to the guest, as
+ * "name|ip|wanRouting|allNames".
+ *
+ * Exists so the adapter picker is checked against a real device rather than
+ * assumed: on a phone it must land on Wi-Fi and not on cellular, and "it
+ * compiles" says nothing about which one getifaddrs happened to list first.
+ * Packed as one delimited string rather than an object to avoid a second class
+ * for a diagnostic.
+ */
+JNIEXPORT jstring JNICALL
+Java_xendroid_compose_UPnPCheck_nativeAdapterSummary(JNIEnv* env, jclass clazz) {
+  static xe::kernel::NetworkAdapterManager manager;
+  manager.Initialize();
+
+  std::string all;
+  for (const auto& name : manager.GetAdaptersNames()) {
+    if (!all.empty()) {
+      all.push_back(',');
+    }
+    all.append(name);
+  }
+
+  const std::string summary =
+      manager.GetSelectedAdapterName() + "|" +
+      manager.GetSelectedAdapterLocalIPString() + "|" +
+      (manager.IsSelectedAdapterWANRouting() ? "wan" : "nat") + "|" + all;
+
+  return to_jstring(env, summary);
 }
 
 }  // extern "C"

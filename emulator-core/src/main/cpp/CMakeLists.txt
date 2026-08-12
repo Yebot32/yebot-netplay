@@ -134,6 +134,19 @@ target_sources(xenia-kernel PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/kernel/upnp.cc
 )
 
+# Netplay groundwork. net_utils is upstream's, unmodified and already
+# platform-clean; network_adapter_manager is a REWRITE rather than a port -
+# upstream's types its whole interface on IP_ADAPTER_ADDRESSES and calls
+# iphlpapi, so Android needed a getifaddrs implementation. See that header.
+#
+# The rest of the port (XLiveAPI, xsession, the json/ model) is NOT here and
+# does not compile against Edge yet; it is staged in docs/netplay-port/ with
+# the reasons. Read that before adding anything else to this list.
+target_sources(xenia-kernel PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/kernel/util/net_utils.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/kernel/util/network_adapter_manager.cc
+)
+
 target_include_directories(emu PRIVATE
         xenia
         xenia/src
