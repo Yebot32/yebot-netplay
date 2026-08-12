@@ -102,6 +102,27 @@ add_subdirectory(xenia EXCLUDE_FROM_ALL)
 
 add_subdirectory(xenia/third_party/libadrenotools EXCLUDE_FROM_ALL)
 
+# miniupnpc: UPnP IGD port mapping, for 360 netplay hosting. Wired from HERE
+# rather than from xenia/third_party/CMakeLists.txt so the vendored xenia tree
+# stays byte-identical to upstream and keeps merging cleanly - same reasoning
+# as libadrenotools above.
+#
+# Static only, and none of the tooling: the shared library, the upnpc/
+# listdevices sample binaries and the test suite are all dead weight in a
+# .so, and the samples pull in a main().
+set(UPNPC_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_STATIC ON  CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+add_subdirectory(xenia/third_party/miniupnpc EXCLUDE_FROM_ALL)
+
+# xenia-kernel is where upnp.cc will live, so it needs the headers directly;
+# linking only into emu would compile but not resolve includes.
+target_include_directories(xenia-kernel PRIVATE
+        xenia/third_party/miniupnpc/include
+)
+target_link_libraries(xenia-kernel PRIVATE libminiupnpc-static)
+
 target_include_directories(emu PRIVATE
         xenia
         xenia/src
