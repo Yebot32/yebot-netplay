@@ -364,6 +364,30 @@ void ProfileManager::Login(const uint64_t xuid, const uint8_t user_index,
   }
 
   auto& profile = accounts_[xuid];
+
+  // XENRA (360 netplay): make the signed-in account Xbox LIVE enabled.
+  //
+  // CreateAccount zero-initialises X_XAMACCOUNTINFO and only fills the
+  // gamertag, so reserved_flags has no kLiveEnabled and xuid_online is 0 - the
+  // account is offline BY CONSTRUCTION. Titles ask, and refuse: Minecraft 360
+  // answers "Gamer profile not online. This game has some features which
+  // require an Xbox LIVE enabled gamer profile" and will not open Play Game.
+  //
+  // Applied at login, in memory, rather than at creation, because every profile
+  // that already exists was created without it - a creation-time fix would
+  // leave existing users offline forever. Nothing is written back to disk, so
+  // this cannot corrupt a profile and reverts by removing these lines.
+  //
+  // The online XUID is DERIVED from the offline one so it is stable across
+  // boots: a title that caches it between sessions would otherwise see a
+  // different player each launch. 0x0009 is the real online-XUID prefix.
+  if (!profile.IsLiveEnabled()) {
+    profile.ToggleLiveFlag(true);
+  }
+  if (!profile.GetOnlineXUID()) {
+    profile.xuid_online = 0x0009000000000000ULL | (xuid & 0x0000FFFFFFFFFFFFULL);
+  }
+
   const uint8_t assigned_user_slot =
       user_index < XUserMaxUserCount ? user_index : FindFirstFreeProfileSlot();
 

@@ -53,7 +53,26 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
          XamGetLiveHiveValueA)
          - Return is Saved elsewhere and used here
       */
-      XELOGD("XLiveBaseLogonGetHR, implemented in netplay");
+      // XENRA (360 netplay): report the console as logged on when a LIVE
+      // enabled profile is signed in.
+      //
+      // This used to hard-return DISCONNECTED, which is why every title
+      // considered itself offline no matter what else worked. Titles cache
+      // this and gate their online menus on it.
+      //
+      // *** IT IS NOT A CLAIM THAT MATCHES WORK. *** XSessionCreate and its
+      // neighbours are still stubs, so a title will get past sign-in and then
+      // fail when it actually tries to host or join. That is deliberate
+      // sequencing - sign-in has to work before anything downstream of it can
+      // be built or tested - not an oversight. Do not put "online play" in
+      // release notes on the strength of this returning S_OK.
+      const auto profile =
+          kernel_state_->xam_state()->GetUserProfile(uint32_t(0));
+      if (profile && profile->IsLiveEnabled()) {
+        XELOGD("XLiveBaseLogonGetHR -> logged on");
+        return X_E_SUCCESS;
+      }
+      XELOGD("XLiveBaseLogonGetHR -> disconnected (no LIVE enabled profile)");
       return 0x001510F1;  // X_ONLINE_S_LOGON_DISCONNECTED
     }
     case 0x00058004: {
@@ -70,7 +89,16 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       // Buffer only set when online
       assert_true(!buffer_length || buffer_length == 4);
       XELOGD("XLiveBaseGetNatType({:08X})", buffer_ptr);
-      return 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
+      // XENRA (360 netplay): titles read this straight after logon and treat a
+      // failure as "not online", undoing the sign-in above. Reported as OPEN
+      // because UPnP port mapping is what backs hosting here and it is verified
+      // working on this network - see upnp.cc and the Netplay screen's network
+      // check. A title that cannot host will find out from the session layer,
+      // not from this.
+      if (buffer_length == 4) {
+        xe::store_and_swap<uint32_t>(buffer, 1);  // XONLINE_NAT_OPEN
+      }
+      return X_E_SUCCESS;
     }
     case 0x00058007: {
       // Occurs if title calls XOnlineGetServiceInfo, expects dwServiceId
