@@ -166,6 +166,9 @@ class VulkanFrameInspector {
   VkDeviceSize readback_used_ = 0;
 
   uint32_t pass_index_ = 0;
+  // Guest draws recorded this frame, for cross-checking the per-pass
+  // attribution against FrameDrawDelta's independent count.
+  uint32_t frame_draw_total_ = 0;
   std::vector<Capture> captures_;
   std::vector<PassRecord> passes_;
   std::vector<PreviousImage> previous_images_;

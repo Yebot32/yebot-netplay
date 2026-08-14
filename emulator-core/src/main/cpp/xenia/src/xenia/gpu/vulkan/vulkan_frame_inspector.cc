@@ -468,6 +468,7 @@ void VulkanFrameInspector::BeginCaptureFrame(uint64_t frame_index) {
 
   readback_used_ = 0;
   pass_index_ = 0;
+  frame_draw_total_ = 0;
   captures_.clear();
   passes_.clear();
   current_images_.clear();
@@ -488,6 +489,7 @@ void VulkanFrameInspector::RecordDraw(uint64_t vertex_shader_hash,
     passes_.push_back(std::move(record));
   }
   passes_.back().draws.emplace_back(vertex_shader_hash, pixel_shader_hash);
+  ++frame_draw_total_;
 }
 
 void VulkanFrameInspector::CapturePass() {
@@ -504,9 +506,11 @@ void VulkanFrameInspector::CapturePass() {
   const VulkanRenderTargetCache::Framebuffer* const framebuffer =
       render_target_cache.last_update_framebuffer();
   if (!attachment_count || !framebuffer) {
-    // A pass with no guest render targets - a transfer or resolve pass of our
-    // own. Nothing to show, and counting it would misalign the pass indices
-    // against the draws that were recorded into them.
+    // A pass with no guest render targets. Nothing to capture, but the index
+    // still has to advance: draws are attributed to whatever pass_index_ holds
+    // when they are recorded, so leaving it alone here would file the next
+    // pass's draws against this one.
+    ++pass_index_;
     return;
   }
 
@@ -518,21 +522,34 @@ void VulkanFrameInspector::CapturePass() {
   // reason for writing one. So the capture is cropped to the region the pass's
   // draws actually touched, falling back to the full extent when a pass
   // recorded nothing for it to measure.
-  // Cropping to the pass's drawn extent was tried and reverted: it measured 640
-  // wide on a 1280-wide target and cut the frame in half. The drawn extent is
-  // the union of the scissors, and a pass whose draws are scissored to part of
-  // the target legitimately reports less than the target's width - so it is not
-  // a safe crop, and a capture that quietly discards half the picture is worse
-  // than one that includes empty EDRAM. Capturing the full extent is always
-  // truthful; the height is dealt with when the depth range is computed.
+  // A host render target spans the whole EDRAM range for its pitch, so the
+  // target is ~2048 rows tall while the guest draws a 720-row frame into the
+  // top of it - measured on this device as a 1280x2048 target with a 1280x720
+  // drawn extent. Capturing all of it wastes two thirds of the readback budget,
+  // and since the budget is what decides how many passes fit, that directly
+  // costs whole passes off the end of the frame.
+  //
+  // Only the HEIGHT is cropped. The drawn extent is the union of the pass's
+  // scissors, so a pass that scissors to part of the target reports less than
+  // the full width, and cropping to that would silently drop picture that the
+  // target legitimately holds - an earlier attempt did exactly that, cutting a
+  // 1280-wide frame to 640. Cropping height alone takes essentially the whole
+  // saving without that risk, because the wasted region is always below the
+  // frame rather than beside it.
   const uint32_t width = framebuffer->host_extent.width;
-  const uint32_t height = framebuffer->host_extent.height;
+  const uint32_t drawn_height =
+      command_processor_.deferred_command_buffer().pass_drawn_height();
+  const uint32_t height =
+      drawn_height ? std::min(drawn_height, framebuffer->host_extent.height)
+                   : framebuffer->host_extent.height;
   if (cvars::frame_inspector_log_extents) {
     XELOGI(
-        "FrameInspector: pass {} host extent {}x{}, drawn extent {}x{}",
-        pass_index_, width, height,
+        "FrameInspector: pass {} host extent {}x{}, drawn extent {}x{}, "
+        "capturing {}x{}",
+        pass_index_, framebuffer->host_extent.width,
+        framebuffer->host_extent.height,
         command_processor_.deferred_command_buffer().pass_drawn_width(),
-        command_processor_.deferred_command_buffer().pass_drawn_height());
+        drawn_height, width, height);
   }
 
   if (passes_.empty() || passes_.back().pass_index != pass_index_) {
@@ -719,8 +736,15 @@ void VulkanFrameInspector::FinishCaptureFrame() {
   invalidate_range.size = VK_WHOLE_SIZE;
   dfn.vkInvalidateMappedMemoryRanges(device, 1, &invalidate_range);
 
+  // The pass count includes the EDRAM ownership-transfer passes, not just the
+  // guest's own, so it is normally several times the guest pass count. The draw
+  // total is the number to sanity-check against FrameDrawDelta: if they
+  // disagree, the per-pass attribution below is not to be trusted.
   report_body_ += fmt::format(
-      "<h2 id=\"f{0}\">Guest frame {0}</h2>\n", current_frame_index_);
+      "<h2 id=\"f{0}\">Guest frame {0}</h2>\n"
+      "<p class=\"meta\">{1} guest draw(s) across {2} captured pass(es), "
+      "transfer passes included</p>\n",
+      current_frame_index_, frame_draw_total_, pass_index_);
 
   uint32_t reported_pass = UINT32_MAX;
   for (const Capture& capture : captures_) {
