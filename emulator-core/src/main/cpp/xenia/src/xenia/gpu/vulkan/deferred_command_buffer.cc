@@ -24,6 +24,7 @@
 #include "xenia/base/logging.h"
 
 DECLARE_bool(log_gpu_frame_time_breakdown);
+DECLARE_int32(log_artifact_draw_state);
 
 DEFINE_bool(vulkan_deferred_cmd_size_cursor, true,
             "Track the deferred command buffer's recorded length with a size "
@@ -55,6 +56,14 @@ void DeferredCommandBuffer::Reset() {
   pass_drawn_height_ = 0;
   pass_recorded_draws_ = 0;
   current_scissor_ = {};
+  track_graphics_descriptor_set_layouts_ = cvars::log_artifact_draw_state > 0;
+  // A fresh command buffer starts with nothing bound.
+  for (VkPipelineLayout& layout : graphics_descriptor_set_layouts_) {
+    layout = VK_NULL_HANDLE;
+  }
+  for (VkDescriptorSet& set : graphics_descriptor_sets_) {
+    set = VK_NULL_HANDLE;
+  }
 }
 
 void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
@@ -247,6 +256,17 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
             reinterpret_cast<const VkBufferImageCopy*>(
                 reinterpret_cast<const uint8_t*>(stream) +
                 xe::align(sizeof(ArgsVkCopyBufferToImage),
+                          alignof(VkBufferImageCopy))));
+      } break;
+
+      case Command::kVkCopyImageToBuffer: {
+        auto& args = *reinterpret_cast<const ArgsVkCopyImageToBuffer*>(stream);
+        dfn.vkCmdCopyImageToBuffer(
+            command_buffer, args.src_image, args.src_image_layout,
+            args.dst_buffer, args.region_count,
+            reinterpret_cast<const VkBufferImageCopy*>(
+                reinterpret_cast<const uint8_t*>(stream) +
+                xe::align(sizeof(ArgsVkCopyImageToBuffer),
                           alignof(VkBufferImageCopy))));
       } break;
 

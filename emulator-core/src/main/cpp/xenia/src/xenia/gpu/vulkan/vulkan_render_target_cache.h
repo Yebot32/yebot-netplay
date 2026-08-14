@@ -260,6 +260,30 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       xenos::ColorRenderTargetFormat format,
       bool* is_integer_out = nullptr) const;
 
+  // One render target attached to the last update, flattened for the frame
+  // inspector. VulkanRenderTarget is private to this class and the inspector
+  // only needs enough to copy the image out and label it, so it gets this
+  // rather than access to the render target objects themselves.
+  // RenderTargetKey is protected, so the guest-side description is flattened
+  // into the fields the report actually prints rather than passed as a key.
+  struct InspectorAttachment {
+    VkImage image;
+    // The layout the image is currently tracked as being in. The inspector
+    // barriers away from it and back to it, so this stays accurate.
+    VkImageLayout layout;
+    VkFormat format;
+    bool is_depth;
+    uint32_t base_tiles;
+    uint32_t pitch_tiles_at_32bpp;
+    uint32_t resource_format;
+    xenos::MsaaSamples msaa_samples;
+  };
+  // Fills attachments_out[0...4] - index 0 is depth, 1...4 are the colour
+  // attachments - leaving unused slots with a null image. Returns the number of
+  // slots that have one.
+  uint32_t GetLastUpdateInspectorAttachments(
+      InspectorAttachment* attachments_out) const;
+
  protected:
   bool IsGammaFormatHostStorageSeparate() const override;
 

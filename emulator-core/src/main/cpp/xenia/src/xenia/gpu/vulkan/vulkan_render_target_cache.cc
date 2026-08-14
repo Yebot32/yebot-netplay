@@ -36,6 +36,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(accurate_resolve_number_formats);
+DECLARE_bool(frame_inspector);
 DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
 
@@ -606,6 +607,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
             "pipeline layout or shaders, disabling in-pass resolves");
         disable_local_read();
       } else {
+        LogPipelineLayoutName(
+            "in-pass resolve", resolve_inpass_pipeline_layout_,
+            resolve_inpass_pipeline_layout_create_info.setLayoutCount);
         VkDescriptorPoolSize input_attachment_pool_size;
         input_attachment_pool_size.type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
         input_attachment_pool_size.descriptorCount = 1;
@@ -894,6 +898,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     Shutdown();
     return false;
   }
+  LogPipelineLayoutName("resolve copy", resolve_copy_pipeline_layout_,
+                        resolve_copy_pipeline_layout_create_info
+                            .setLayoutCount);
   if (draw_resolution_scaled) {
     // Second layout for fully native resolve copies.
     resolve_copy_push_constant_range.size =
@@ -1001,6 +1008,10 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     Shutdown();
     return false;
   }
+  LogPipelineLayoutName("direct host resolve (color)",
+                        direct_host_resolve_pipeline_layout_color_,
+                        direct_host_resolve_pipeline_layout_create_info
+                            .setLayoutCount);
   direct_host_resolve_pipeline_layout_create_info.pSetLayouts =
       direct_host_resolve_depth_descriptor_set_layouts;
   if (dfn.vkCreatePipelineLayout(
@@ -1199,6 +1210,14 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
         Shutdown();
         return false;
       }
+      if (cvars::log_artifact_draw_state > 0) {
+        char layout_name[64];
+        std::snprintf(layout_name, sizeof(layout_name),
+                      "render target ownership transfer #%u", unsigned(i));
+        LogPipelineLayoutName(
+            layout_name, transfer_pipeline_layouts_[i],
+            transfer_pipeline_layout_create_info.setLayoutCount);
+      }
     }
 
     // Dump pipeline layouts.
@@ -1235,6 +1254,9 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
       Shutdown();
       return false;
     }
+    LogPipelineLayoutName("render target dump (color)",
+                          dump_pipeline_layout_color_,
+                          dump_pipeline_layout_create_info.setLayoutCount);
     dump_pipeline_layout_descriptor_set_layouts[kDumpDescriptorSetSource] =
         descriptor_set_layout_sampled_image_x2_;
     if (dfn.vkCreatePipelineLayout(device, &dump_pipeline_layout_create_info,
@@ -1831,9 +1853,20 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
     }
     return false;
   };
-  if (!local_read_attachments_ || GetPath() != Path::kHostRenderTargets ||
-      IsDrawResolutionScaled() || resolve_info.IsCopyingDepth()) {
-    return false;
+  // Counted individually rather than as one silent early-out: when every
+  // attempt fails here the VkInPass counter reads "0/N ... refused 0" with no
+  // reason at all, which says nothing about which gate is closed.
+  if (!local_read_attachments_) {
+    return reject("no local-read attachments");
+  }
+  if (GetPath() != Path::kHostRenderTargets) {
+    return reject("not host render targets");
+  }
+  if (IsDrawResolutionScaled()) {
+    return reject("resolution scaled");
+  }
+  if (resolve_info.IsCopyingDepth()) {
+    return reject("depth copy");
   }
   if (!command_processor_.in_render_pass()) {
     return reject("no pass open");
@@ -2836,27 +2869,47 @@ bool VulkanRenderTargetCache::Resolve(
               inpass_store_refused_, inpass_refuse_pitch_,
               inpass_refuse_format_, inpass_refuse_bounds_);
           {
+            // Must be terminated up front: with an all-zero histogram the loop
+            // body never runs and the buffer would be logged uninitialized.
             char fmt_line[256];
-            int fmt_len = 0;
+            fmt_line[0] = '\0';
+            size_t fmt_len = 0;
             for (uint32_t fi = 0; fi < 16; ++fi) {
               if (!inpass_format_hist_[fi]) {
                 continue;
               }
-              fmt_len += std::snprintf(fmt_line + fmt_len,
-                                       sizeof(fmt_line) - fmt_len, "%u=%llu ",
-                                       fi,
-                                       (unsigned long long)inpass_format_hist_[fi]);
+              if (fmt_len >= sizeof(fmt_line) - 1) {
+                break;
+              }
+              int written = std::snprintf(
+                  fmt_line + fmt_len, sizeof(fmt_line) - fmt_len, "%u=%llu ",
+                  fi, (unsigned long long)inpass_format_hist_[fi]);
+              if (written < 0) {
+                break;
+              }
+              fmt_len += size_t(written);
             }
             XELOGI("VkInPassFmt: {}", fmt_line);
           }
           {
+            // Same here: with no reject reasons recorded yet - which is the
+            // case when every attempt bails out of TryInPassResolveCopy before
+            // the first reject() call - the loop body never runs.
             char rej_line[512];
-            int rej_len = 0;
+            rej_line[0] = '\0';
+            size_t rej_len = 0;
             for (uint32_t ri = 0; ri < inpass_reject_reason_count_; ++ri) {
-              rej_len += std::snprintf(
-                  rej_line + rej_len, sizeof(rej_line) - rej_len,
-                  "%s=%llu ", inpass_reject_reasons_[ri],
+              if (rej_len >= sizeof(rej_line) - 1) {
+                break;
+              }
+              int written = std::snprintf(
+                  rej_line + rej_len, sizeof(rej_line) - rej_len, "%s=%llu ",
+                  inpass_reject_reasons_[ri],
                   (unsigned long long)inpass_reject_counts_[ri]);
+              if (written < 0) {
+                break;
+              }
+              rej_len += size_t(written);
             }
             XELOGI("VkInPassReject: {}", rej_line);
           }
@@ -3892,6 +3945,41 @@ bool VulkanRenderTargetCache::FlushPendingDrawPassTransfers() {
   return true;
 }
 
+uint32_t VulkanRenderTargetCache::GetLastUpdateInspectorAttachments(
+    InspectorAttachment* attachments_out) const {
+  RenderPassKey key = last_update_render_pass_key_;
+  const RenderTarget* const* rts = last_update_accumulated_render_targets();
+  uint32_t count = 0;
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    InspectorAttachment& attachment = attachments_out[i];
+    attachment.image = VK_NULL_HANDLE;
+    attachment.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.format = VK_FORMAT_UNDEFINED;
+    attachment.is_depth = false;
+    attachment.base_tiles = 0;
+    attachment.pitch_tiles_at_32bpp = 0;
+    attachment.resource_format = 0;
+    attachment.msaa_samples = xenos::MsaaSamples::k1X;
+    if (!(key.depth_and_color_used & (uint32_t(1) << i)) || !rts[i]) {
+      continue;
+    }
+    const auto* vulkan_rt = static_cast<const VulkanRenderTarget*>(rts[i]);
+    const RenderTargetKey rt_key = vulkan_rt->key();
+    attachment.image = vulkan_rt->image();
+    attachment.layout = vulkan_rt->current_layout();
+    attachment.is_depth = rt_key.is_depth != 0;
+    attachment.base_tiles = rt_key.base_tiles;
+    attachment.pitch_tiles_at_32bpp = rt_key.pitch_tiles_at_32bpp;
+    attachment.resource_format = rt_key.resource_format;
+    attachment.msaa_samples = rt_key.msaa_samples;
+    attachment.format = attachment.is_depth
+                            ? GetDepthVulkanFormat(rt_key.GetDepthFormat())
+                            : GetColorVulkanFormat(rt_key.GetColorFormat());
+    ++count;
+  }
+  return count;
+}
+
 void VulkanRenderTargetCache::GetLastUpdateRenderingAttachments(
     VkRenderingAttachmentInfo* color_attachments,
     uint32_t* color_attachment_count_out,
@@ -4253,6 +4341,16 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
   }
   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
   image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  if (cvars::frame_inspector) {
+    // The frame inspector copies render targets to a host-visible buffer, which
+    // is only legal on an image created as a transfer source. Requested only
+    // when the inspector is enabled: the flag can restrict the compression a
+    // tiler applies to an attachment, and that is not a cost worth paying on
+    // every render target for a diagnostic nobody is running. Because it is
+    // decided here, at creation, the cvar has to be set before launch - turning
+    // it on mid-run would leave the already-cached render targets uncopyable.
+    image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  }
   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_create_info.queueFamilyIndexCount = 0;
   image_create_info.pQueueFamilyIndices = nullptr;

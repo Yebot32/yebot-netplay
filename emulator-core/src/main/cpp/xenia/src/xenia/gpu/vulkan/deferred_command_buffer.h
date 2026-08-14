@@ -32,6 +32,11 @@ class DeferredCommandBuffer {
   DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
                         size_t initial_size_bytes = 1024 * 1024);
 
+  // SpirvShaderTranslator::kDescriptorSetCount, which is static_asserted to be
+  // within the guaranteed maxBoundDescriptorSets of 4. Not included here to
+  // keep this header free of the translator.
+  static constexpr uint32_t kTrackedGraphicsDescriptorSets = 4;
+
   void Reset();
   void Execute(VkCommandBuffer command_buffer);
   bool empty() const { return command_stream_size_ == 0; }
@@ -94,6 +99,42 @@ class DeferredCommandBuffer {
       std::memcpy(args_ptr + dynamic_offsets_offset, dynamic_offsets,
                   sizeof(uint32_t) * dynamic_offset_count);
     }
+    // Remember which pipeline layout each graphics set was last bound with.
+    // Recorded here rather than in the command processor because the external
+    // (transfer / resolve / dump) passes bind through this same entry point,
+    // and it is exactly a guest draw following one of those without a re-bind
+    // that produces VUID-vkCmdDraw-None-08600.
+    // Gated on the diagnostic being on: this is one of the hottest functions in
+    // the command stream and must cost nothing when it is off.
+    if (track_graphics_descriptor_set_layouts_ &&
+        pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+      for (uint32_t i = 0; i < descriptor_set_count; ++i) {
+        uint32_t set = first_set + i;
+        if (set < kTrackedGraphicsDescriptorSets) {
+          graphics_descriptor_set_layouts_[set] = layout;
+          graphics_descriptor_sets_[set] = descriptor_sets[i];
+        }
+      }
+    }
+  }
+
+  // The pipeline layout graphics descriptor set `set` was last bound with in
+  // this command buffer, or VK_NULL_HANDLE if it has not been bound since the
+  // last Reset. Diagnostic only.
+  VkPipelineLayout graphics_descriptor_set_layout(uint32_t set) const {
+    return set < kTrackedGraphicsDescriptorSets
+               ? graphics_descriptor_set_layouts_[set]
+               : VK_NULL_HANDLE;
+  }
+
+  // The descriptor set actually bound at `set`, or VK_NULL_HANDLE if nothing
+  // has been bound there since the last Reset - which is itself the defect
+  // worth seeing, because a shader that statically uses the set then reads
+  // undefined descriptors. Diagnostic only.
+  VkDescriptorSet graphics_descriptor_set(uint32_t set) const {
+    return set < kTrackedGraphicsDescriptorSets
+               ? graphics_descriptor_sets_[set]
+               : VK_NULL_HANDLE;
   }
 
   void CmdVkBindIndexBuffer(VkBuffer buffer, VkDeviceSize offset,
@@ -301,6 +342,30 @@ class DeferredCommandBuffer {
                               const VkBufferImageCopy* regions) {
     std::memcpy(CmdCopyBufferToImageEmplace(src_buffer, dst_image,
                                             dst_image_layout, region_count),
+                regions, sizeof(VkBufferImageCopy) * region_count);
+  }
+
+  VkBufferImageCopy* CmdCopyImageToBufferEmplace(VkImage src_image,
+                                                 VkImageLayout src_image_layout,
+                                                 VkBuffer dst_buffer,
+                                                 uint32_t region_count) {
+    const size_t header_size =
+        xe::align(sizeof(ArgsVkCopyImageToBuffer), alignof(VkBufferImageCopy));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kVkCopyImageToBuffer,
+                     header_size + sizeof(VkBufferImageCopy) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkCopyImageToBuffer*>(args_ptr);
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_buffer = dst_buffer;
+    args.region_count = region_count;
+    return reinterpret_cast<VkBufferImageCopy*>(args_ptr + header_size);
+  }
+  void CmdVkCopyImageToBuffer(VkImage src_image, VkImageLayout src_image_layout,
+                              VkBuffer dst_buffer, uint32_t region_count,
+                              const VkBufferImageCopy* regions) {
+    std::memcpy(CmdCopyImageToBufferEmplace(src_image, src_image_layout,
+                                            dst_buffer, region_count),
                 regions, sizeof(VkBufferImageCopy) * region_count);
   }
 
@@ -659,6 +724,7 @@ class DeferredCommandBuffer {
     kVkClearColorImage,
     kVkCopyBuffer,
     kVkCopyBufferToImage,
+    kVkCopyImageToBuffer,
     kVkFillBuffer,
     kVkBlitImage,
     kVkDispatch,
@@ -831,6 +897,15 @@ class DeferredCommandBuffer {
     static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
   };
 
+  struct ArgsVkCopyImageToBuffer {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkBuffer dst_buffer;
+    uint32_t region_count;
+    // Followed by aligned VkBufferImageCopy[].
+    static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
+  };
+
   struct ArgsVkFillBuffer {
     VkBuffer dst_buffer;
     VkDeviceSize dst_offset;
@@ -995,6 +1070,14 @@ class DeferredCommandBuffer {
   void ShrinkRenderAreaToDrawn(uint32_t granularity_width,
                                uint32_t granularity_height);
 
+  // The union of the pass's draw scissors and clear rects - the part of the
+  // attachments the pass actually touched. Zero if nothing was recorded. Both
+  // stay valid until the next pass begins, so they can be read after the pass
+  // has been ended. Tracked regardless of whether the render area is actually
+  // shrunk, so this is available to the frame inspector either way.
+  uint32_t pass_drawn_width() const { return pass_drawn_width_; }
+  uint32_t pass_drawn_height() const { return pass_drawn_height_; }
+
  private:
   // Offset of the last recorded begin-pass argument struct, in stream elements
   // (not a pointer - the stream vector reallocates as it grows).
@@ -1005,6 +1088,13 @@ class DeferredCommandBuffer {
   uint32_t pass_drawn_width_ = 0;
   uint32_t pass_drawn_height_ = 0;
   uint32_t pass_recorded_draws_ = 0;
+  // Sampled from the diagnostic cvar at Reset so the per-bind path reads a
+  // plain member instead of a cvar.
+  bool track_graphics_descriptor_set_layouts_ = false;
+  VkPipelineLayout
+      graphics_descriptor_set_layouts_[kTrackedGraphicsDescriptorSets] = {};
+  VkDescriptorSet graphics_descriptor_sets_[kTrackedGraphicsDescriptorSets] =
+      {};
 
   void BeginRenderAreaTracking(size_t arguments_size_bytes,
                                bool dynamic_rendering) {

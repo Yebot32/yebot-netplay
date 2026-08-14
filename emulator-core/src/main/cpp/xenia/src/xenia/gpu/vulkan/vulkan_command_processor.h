@@ -51,12 +51,27 @@
 #include "xenia/ui/vulkan/vulkan_upload_buffer_pool.h"
 
 DECLARE_bool(log_gpu_frame_time_breakdown);
+DECLARE_int32(log_artifact_draw_state);
 
 namespace xe {
 namespace gpu {
 namespace vulkan {
 
+class VulkanFrameInspector;
+
+// Records "this raw VkPipelineLayout handle is that pass". Validation-layer
+// messages identify layouts only by handle, so without this a report like
+// "sets bound with VkPipelineLayout 0x133" cannot be attributed to the code
+// that bound them. No-op unless log_artifact_draw_state is set;
+// layouts are created once at init, so the cost is irrelevant either way.
+void LogPipelineLayoutName(const char* name, VkPipelineLayout layout,
+                           uint32_t set_layout_count);
+
 class VulkanCommandProcessor final : public CommandProcessor {
+  // Reads back render targets and drains the queue to do it, so it needs the
+  // submission control that is otherwise internal to the command processor.
+  friend class VulkanFrameInspector;
+
  protected:
 #define OVERRIDING_BASE_CMDPROCESSOR
 #include "../pm4_command_processor_declare.h"
@@ -824,6 +839,28 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   // Descriptor set layouts used by different shaders.
   VkDescriptorSetLayout descriptor_set_layout_empty_ = VK_NULL_HANDLE;
+  // One set allocated from descriptor_set_layout_empty_, bound for the texture
+  // stages a pipeline does not use. Vulkan requires sets 0..N to be bound when
+  // a shader statically uses set N, and every guest pipeline layout declares
+  // all four sets, so skipping the unused texture sets left a hole in the
+  // bound range - see the bind loop in UpdateBindings.
+  VkDescriptorPool empty_descriptor_pool_ = VK_NULL_HANDLE;
+  VkDescriptorSet empty_descriptor_set_ = VK_NULL_HANDLE;
+
+  // One hash per guest draw, in submission order, for the frame being built and
+  // for the previous frame. With a stationary camera the two should match; a
+  // draw that appears, disappears or changes between them is geometry
+  // flickering, which a single-frame capture tool cannot show. Only populated
+  // when log_frame_draw_delta is set.
+  std::vector<uint64_t> frame_draw_digest_;
+  std::vector<uint64_t> frame_draw_digest_prev_;
+  // IssueDraw entries this frame and last, counted before any early exit.
+  uint32_t frame_draw_issue_attempts_ = 0;
+  uint32_t frame_draw_issue_attempts_prev_ = 0;
+  // Parallel to frame_draw_digest_, kept so a differing draw can be named by
+  // its guest shaders rather than just an index.
+  std::vector<std::pair<uint64_t, uint64_t>> frame_draw_shaders_;
+  std::vector<std::pair<uint64_t, uint64_t>> frame_draw_shaders_prev_;
   VkDescriptorSetLayout descriptor_set_layout_constants_ = VK_NULL_HANDLE;
   std::array<VkDescriptorSetLayout,
              size_t(SingleTransientDescriptorLayout::kCount)>
@@ -876,6 +913,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::unique_ptr<VulkanPrimitiveProcessor> primitive_processor_;
 
   std::unique_ptr<VulkanRenderTargetCache> render_target_cache_;
+
+  // Null unless the frame_inspector cvar is set. See vulkan_frame_inspector.h.
+  std::unique_ptr<VulkanFrameInspector> frame_inspector_;
 
   std::unique_ptr<VulkanZPDQueryPool> zpd_host_query_pool_;
 

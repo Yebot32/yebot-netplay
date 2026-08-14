@@ -22,9 +22,12 @@ namespace xe {
 namespace ui {
 
 std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
-#if XE_PLATFORM_xendroid
-    return nullptr;
-#endif
+  // Previously disabled outright on this fork. The detection below is already
+  // safe to run unconditionally: it uses RTLD_NOLOAD, so it only ever finds a
+  // RenderDoc that has ALREADY been injected into the process by the RenderDoc
+  // Android layer, and returns null otherwise. Leaving it enabled costs one
+  // failed dlopen at startup and makes captures possible when RenderDoc is
+  // actually attached.
   std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
 
   pRENDERDOC_GetAPI get_api = nullptr;

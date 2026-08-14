@@ -31,6 +31,7 @@
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/spirv_fsi_system_constants.h"
 #include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/gpu/vulkan/vulkan_frame_inspector.h"
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
 #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
@@ -140,6 +141,47 @@ DEFINE_bool(
     "(the guest constant-buffer count).",
     "Vulkan");
 
+DEFINE_int32(
+    log_artifact_draw_state, 0,
+    "Dump the descriptor binding state of the first N guest draws, for "
+    "diagnosing WRONG-PIXEL artifacts (wrong or stale textures) rather than "
+    "crashes. For each draw it prints, per descriptor set, the set actually "
+    "bound, the pipeline layout it was bound with, and the layout the drawing "
+    "pipeline expects - plus the shader hashes and the up-to-date masks. A set "
+    "showing 'UNBOUND', or bound with a layout other than the drawing "
+    "pipeline's, is a shader reading undefined descriptors: the condition the "
+    "validation layer reports as VUID-vkCmdDraw-None-08600, and the reason a "
+    "title samples the wrong texture. Reports state unconditionally rather "
+    "than testing for a suspected condition, so an empty report means the "
+    "binding really is clean and not that the check missed. Also names every "
+    "pipeline layout at creation, so the raw handles in validation-layer "
+    "messages can be attributed. 0 disables; 64 is usually enough. Costs "
+    "nothing when off.",
+    "Vulkan");
+
+DEFINE_int32(
+    log_frame_draw_delta, 0,
+    "Compare each frame's guest draw stream against the previous frame's and "
+    "report the first N frames that differ. Aimed at FLICKER - geometry that "
+    "appears or disappears between frames - which a single-frame capture tool "
+    "cannot show, because the fault is the difference between two frames "
+    "rather than anything wrong within one. Hold the camera still: the draw "
+    "stream should then be identical frame to frame, so any reported "
+    "difference is the flickering geometry, named by its guest vertex and "
+    "pixel shader hashes. Reports the draw count either side and the first "
+    "index that differs. 0 disables.",
+    "Vulkan");
+
+DEFINE_int32(
+    log_artifact_draw_state_first_frame, 0,
+    "Frame to start log_artifact_draw_state's dump at. The draw budget is "
+    "otherwise spent on the first title's boot draws - on a console that "
+    "launches a dashboard before the game, the dump is exhausted before the "
+    "game renders anything, which is useless for chasing an in-game artifact. "
+    "Set this past the point the artifact is on screen (the f: stamp in each "
+    "log line is the frame number).",
+    "Vulkan");
+
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(vulkan_placeholder_pipelines);
@@ -154,6 +196,22 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 namespace vulkan {
+
+void LogPipelineLayoutName(const char* name, VkPipelineLayout layout,
+                           uint32_t set_layout_count) {
+  if (cvars::log_artifact_draw_state <= 0) {
+    return;
+  }
+  // Non-dispatchable handles are a pointer type or a uint64_t depending on
+  // VK_USE_64_BIT_PTR_DEFINES; copy the bits out either way so the printed
+  // value matches what the validation layer reports.
+  uint64_t bits = 0;
+  static_assert(sizeof(layout) <= sizeof(bits),
+                "VkPipelineLayout wider than uint64_t");
+  std::memcpy(&bits, &layout, sizeof(layout));
+  XELOGI("PipelineLayoutName: {:016X} = {} ({} set layouts)", bits, name,
+         set_layout_count);
+}
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -374,6 +432,45 @@ bool VulkanCommandProcessor::SetupContext() {
     XELOGE("Failed to create an empty Vulkan descriptor set layout");
     return false;
   }
+  // One set from the empty layout, to bind for texture stages a pipeline
+  // doesn't use so the bound set range stays contiguous. A pool with no sizes
+  // is legal for a layout with no bindings, but drivers have been inconsistent
+  // about it, so ask for a single unused descriptor.
+  {
+    VkDescriptorPoolSize empty_pool_size;
+    empty_pool_size.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    empty_pool_size.descriptorCount = 1;
+    VkDescriptorPoolCreateInfo empty_pool_create_info;
+    empty_pool_create_info.sType =
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    empty_pool_create_info.pNext = nullptr;
+    empty_pool_create_info.flags = 0;
+    empty_pool_create_info.maxSets = 1;
+    empty_pool_create_info.poolSizeCount = 1;
+    empty_pool_create_info.pPoolSizes = &empty_pool_size;
+    if (dfn.vkCreateDescriptorPool(device, &empty_pool_create_info, nullptr,
+                                   &empty_descriptor_pool_) == VK_SUCCESS) {
+      VkDescriptorSetAllocateInfo empty_set_allocate_info;
+      empty_set_allocate_info.sType =
+          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+      empty_set_allocate_info.pNext = nullptr;
+      empty_set_allocate_info.descriptorPool = empty_descriptor_pool_;
+      empty_set_allocate_info.descriptorSetCount = 1;
+      empty_set_allocate_info.pSetLayouts = &descriptor_set_layout_empty_;
+      if (dfn.vkAllocateDescriptorSets(device, &empty_set_allocate_info,
+                                       &empty_descriptor_set_) != VK_SUCCESS) {
+        empty_descriptor_set_ = VK_NULL_HANDLE;
+      }
+    }
+    if (empty_descriptor_set_ == VK_NULL_HANDLE) {
+      // Not fatal: the bind loop falls back to leaving unused texture sets
+      // unbound, which is what it always did.
+      XELOGW(
+          "Failed to allocate the empty Vulkan descriptor set; unused texture "
+          "sets will be left unbound, which can make a pipeline that uses a "
+          "higher set read undefined descriptors");
+    }
+  }
   // Guest draw constants.
   // Dynamic constant buffers capability gate, resolved once before the constants layout is
   // created and held constant for the device lifetime. The Vulkan-guaranteed
@@ -551,6 +648,8 @@ bool VulkanCommandProcessor::SetupContext() {
     XELOGE("Failed to initialize the render target cache");
     return false;
   }
+
+  frame_inspector_ = std::make_unique<VulkanFrameInspector>(*this);
 
   // Shared memory, EDRAM, and ZPD FSI counter descriptor set layout.
   bool edram_fragment_shader_interlock =
@@ -1735,6 +1834,11 @@ void VulkanCommandProcessor::ShutdownContext() {
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                          gamma_ramp_buffer_memory_);
 
+  // Freed with its pool.
+  empty_descriptor_set_ = VK_NULL_HANDLE;
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorPool, device,
+                                         empty_descriptor_pool_);
+
   ui::vulkan::util::DestroyAndNullHandle(
       dfn.vkDestroyDescriptorPool, device,
       shared_memory_and_edram_descriptor_pool_);
@@ -1748,6 +1852,10 @@ void VulkanCommandProcessor::ShutdownContext() {
                                          zpd_fsi_counter_sink_buffer_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                          zpd_fsi_counter_sink_buffer_memory_);
+
+  // Before the render target cache, whose images it holds handles to, and while
+  // the device is still up so it can free its readback buffer.
+  frame_inspector_.reset();
 
   texture_cache_.reset();
 
@@ -2215,6 +2323,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
   if (render_target_cache_) {
     render_target_cache_->LogResolveDetailsOnFrameEnd();
+  }
+
+  // Closes out the frame the inspector was capturing - reading back and writing
+  // what was copied during it - and arms the next one. Retires itself once the
+  // requested run of frames is done.
+  if (frame_inspector_ && frame_inspector_->active()) {
+    frame_inspector_->OnGuestFrameEnd(frame_current_);
   }
 
   if (cvars::log_gpu_frame_time_breakdown) {
@@ -3369,6 +3484,13 @@ void VulkanCommandProcessor::EndRenderPass() {
   current_framebuffer_ = nullptr;
   in_render_pass_ = false;
   ClosePassTimestamp();
+
+  // Copies are only legal outside a render pass, so the inspector reads the
+  // attachments here, once the pass holding them has closed. It still sees the
+  // render target cache's last update, which is the pass that just ended.
+  if (frame_inspector_ && frame_inspector_->capturing()) {
+    frame_inspector_->CapturePass();
+  }
 }
 
 VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
@@ -3553,6 +3675,15 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
         "pixel shader and {} vertex shader textures",
         texture_count_pixel, texture_count_vertex);
     return nullptr;
+  }
+  if (cvars::log_artifact_draw_state > 0) {
+    char layout_name[96];
+    std::snprintf(layout_name, sizeof(layout_name),
+                  "guest draw (vtx %u tex / %u smp, px %u tex / %u smp)",
+                  unsigned(texture_count_vertex), unsigned(sampler_count_vertex),
+                  unsigned(texture_count_pixel), unsigned(sampler_count_pixel));
+    LogPipelineLayoutName(layout_name, pipeline_layout,
+                          pipeline_layout_create_info.setLayoutCount);
   }
   auto emplaced_pair = pipeline_layouts_.emplace(
       std::piecewise_construct, std::forward_as_tuple(pipeline_layout_key),
@@ -3750,6 +3881,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   const RegisterFile& regs = *register_file_;
+
+  // Count every draw the guest asks for, before any of this function's ~20
+  // early exits. Compared against the draws actually recorded, this separates
+  // "the guest stopped issuing the draw" from "the guest issued it and we
+  // dropped it" - which need completely different fixes.
+  if (cvars::log_frame_draw_delta > 0) {
+    ++frame_draw_issue_attempts_;
+  }
 
   // One-time confirmation of the effective guest depth path for this title
   // (after per-game config has loaded) - lets a setting like the per-game
@@ -4661,6 +4800,102 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pixel_shader ? pixel_shader->ucode_data_hash() : 0;
   submission_in_progress_.last_render_pass_key =
       render_target_cache_->last_update_render_pass_key().key;
+
+  // Record this draw in the frame's draw-stream digest, for the frame-to-frame
+  // comparison done when the frame closes.
+  if (cvars::log_frame_draw_delta > 0) {
+    uint64_t vs_hash = vertex_shader ? vertex_shader->ucode_data_hash() : 0;
+    uint64_t ps_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    uint64_t draw_hash = vs_hash * UINT64_C(0x9E3779B97F4A7C15);
+    draw_hash ^= ps_hash + UINT64_C(0x9E3779B97F4A7C15) + (draw_hash << 6) +
+                 (draw_hash >> 2);
+    draw_hash ^= uint64_t(prim_type) + UINT64_C(0x9E3779B97F4A7C15) +
+                 (draw_hash << 6) + (draw_hash >> 2);
+    draw_hash ^= uint64_t(primitive_processing_result.host_draw_vertex_count) +
+                 UINT64_C(0x9E3779B97F4A7C15) + (draw_hash << 6) +
+                 (draw_hash >> 2);
+    frame_draw_digest_.push_back(draw_hash);
+    frame_draw_shaders_.emplace_back(vs_hash, ps_hash);
+  }
+
+  // Attribute this draw to the render pass the frame inspector is capturing, so
+  // its report can name each pass's geometry by shader rather than by index.
+  if (frame_inspector_ && frame_inspector_->capturing()) {
+    frame_inspector_->RecordDraw(
+        vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+        pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+  }
+
+  // Artifact diagnosis: dump this draw's descriptor binding state. Reports what
+  // IS bound rather than testing for a suspected fault, so a clean report is
+  // evidence the binding is correct instead of evidence the check missed - an
+  // earlier version of this asserted a specific mismatch condition, never
+  // fired, and hid a real defect the validation layer was reporting.
+  if (cvars::log_artifact_draw_state > 0 &&
+      frame_current_ >= uint64_t(std::max(
+                            0, cvars::log_artifact_draw_state_first_frame))) {
+    static std::atomic<int32_t> artifact_dump_budget{
+        cvars::log_artifact_draw_state};
+    if (artifact_dump_budget.fetch_sub(1) > 0) {
+      if (!current_guest_graphics_pipeline_layout_) {
+        // Reported rather than skipped: a draw recorded with no guest pipeline
+        // layout tracked is itself the finding, and silently skipping it is
+        // what made the previous version of this look clean.
+        XELOGW(
+            "ArtifactDrawState: no guest pipeline layout tracked at draw time "
+            "- descriptor binding cannot be attributed for this draw");
+      } else {
+      // Non-dispatchable handles are a pointer type or a uint64_t depending on
+      // VK_USE_64_BIT_PTR_DEFINES; copy the bits out either way so the values
+      // match what the validation layer prints.
+      auto handle_bits = [](auto handle) {
+        uint64_t bits = 0;
+        static_assert(sizeof(handle) <= sizeof(bits),
+                      "Vulkan handle wider than uint64_t");
+        std::memcpy(&bits, &handle, sizeof(handle));
+        return bits;
+      };
+      VkPipelineLayout draw_layout =
+          current_guest_graphics_pipeline_layout_->GetPipelineLayout();
+      XELOGI(
+          "ArtifactDrawState: pipeline layout {:016X} (vtx {} tex / {} smp, px "
+          "{} tex / {} smp), VS {:016X} PS {:016X}, bound-mask {:X} "
+          "values-mask {:X}",
+          handle_bits(draw_layout),
+          current_guest_graphics_pipeline_layout_->texture_count_vertex(),
+          current_guest_graphics_pipeline_layout_->sampler_count_vertex(),
+          current_guest_graphics_pipeline_layout_->texture_count_pixel(),
+          current_guest_graphics_pipeline_layout_->sampler_count_pixel(),
+          vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+          current_graphics_descriptor_sets_bound_up_to_date_,
+          current_graphics_descriptor_set_values_up_to_date_);
+      static const char* const kSetNames[] = {"shared memory + EDRAM",
+                                              "constants", "textures vertex",
+                                              "textures pixel"};
+      for (uint32_t set = 0;
+           set < uint32_t(SpirvShaderTranslator::kDescriptorSetCount); ++set) {
+        VkDescriptorSet bound_set =
+            deferred_command_buffer_.graphics_descriptor_set(set);
+        VkPipelineLayout bound_layout =
+            deferred_command_buffer_.graphics_descriptor_set_layout(set);
+        if (bound_set == VK_NULL_HANDLE) {
+          XELOGW(
+              "  set {} ({}): UNBOUND - a shader statically using this set "
+              "reads undefined descriptors",
+              set, kSetNames[set]);
+          continue;
+        }
+        XELOGI("  set {} ({}): set {:016X} bound with layout {:016X}{}", set,
+               kSetNames[set], handle_bits(bound_set),
+               handle_bits(bound_layout),
+               bound_layout == draw_layout
+                   ? ""
+                   : "  <-- NOT the drawing pipeline's layout");
+        }
+      }
+    }
+  }
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
@@ -6391,6 +6626,63 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 
   if (is_closing_frame) {
     primitive_processor_->EndFrame();
+
+    // Frame-to-frame draw stream comparison - see log_frame_draw_delta.
+    if (cvars::log_frame_draw_delta > 0) {
+      static std::atomic<int32_t> delta_budget{cvars::log_frame_draw_delta};
+      if (!frame_draw_digest_prev_.empty() &&
+          frame_draw_digest_ != frame_draw_digest_prev_ &&
+          delta_budget.fetch_sub(1) > 0) {
+        size_t common =
+            std::min(frame_draw_digest_.size(), frame_draw_digest_prev_.size());
+        size_t first_diff = common;
+        for (size_t i = 0; i < common; ++i) {
+          if (frame_draw_digest_[i] != frame_draw_digest_prev_[i]) {
+            first_diff = i;
+            break;
+          }
+        }
+        XELOGW(
+            "FrameDrawDelta: draw stream changed - {} draws this frame vs {} "
+            "last, first difference at draw {}",
+            frame_draw_digest_.size(), frame_draw_digest_prev_.size(),
+            first_diff);
+        // The decisive line: if the guest asked for the same number of draws
+        // both frames but fewer were recorded, the draw was dropped in
+        // IssueDraw rather than never issued.
+        XELOGW(
+            "  guest issued {} draws this frame vs {} last; recorded {} vs {}"
+            "{}",
+            frame_draw_issue_attempts_, frame_draw_issue_attempts_prev_,
+            frame_draw_digest_.size(), frame_draw_digest_prev_.size(),
+            (frame_draw_issue_attempts_ == frame_draw_issue_attempts_prev_ &&
+             frame_draw_digest_.size() != frame_draw_digest_prev_.size())
+                ? "  <-- guest issued it, WE DROPPED IT in IssueDraw"
+                : "");
+        if (first_diff < common) {
+          XELOGW(
+              "  draw {}: now VS {:016X} PS {:016X}, was VS {:016X} PS {:016X}",
+              first_diff, frame_draw_shaders_[first_diff].first,
+              frame_draw_shaders_[first_diff].second,
+              frame_draw_shaders_prev_[first_diff].first,
+              frame_draw_shaders_prev_[first_diff].second);
+        } else if (frame_draw_digest_.size() > frame_draw_digest_prev_.size()) {
+          XELOGW("  draw {} appeared this frame: VS {:016X} PS {:016X}",
+                 first_diff, frame_draw_shaders_[first_diff].first,
+                 frame_draw_shaders_[first_diff].second);
+        } else if (first_diff < frame_draw_shaders_prev_.size()) {
+          XELOGW("  draw {} disappeared this frame: was VS {:016X} PS {:016X}",
+                 first_diff, frame_draw_shaders_prev_[first_diff].first,
+                 frame_draw_shaders_prev_[first_diff].second);
+        }
+      }
+      frame_draw_digest_prev_.swap(frame_draw_digest_);
+      frame_draw_shaders_prev_.swap(frame_draw_shaders_);
+      frame_draw_digest_.clear();
+      frame_draw_shaders_.clear();
+      frame_draw_issue_attempts_prev_ = frame_draw_issue_attempts_;
+      frame_draw_issue_attempts_ = 0;
+    }
   }
 
   if (submission_open_) {
@@ -8371,15 +8663,37 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       write_descriptor_set_bits;
 
   // Bind the new descriptor sets.
+  //
+  // A stage with no textures and no samplers still needs its set bound. Vulkan
+  // requires sets 0..N to be bound when the pipeline statically uses set N, and
+  // every guest pipeline layout declares all four sets (unused texture stages
+  // get the empty layout). Dropping the unused ones left a hole: a title with
+  // no vertex textures never bound set 2, so a pixel-textured draw's set 3 sat
+  // outside the bound range and the shader sampled undefined descriptors -
+  // VUID-vkCmdDraw-None-08600, and visible as wrong textures. Bind the empty
+  // set for those stages instead, which keeps the range contiguous and costs
+  // one extra set in an already-issued bind.
   uint32_t descriptor_sets_needed =
       (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetCount) - 1;
   if (!texture_count_vertex && !sampler_count_vertex) {
-    descriptor_sets_needed &=
-        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+    if (empty_descriptor_set_ != VK_NULL_HANDLE) {
+      current_graphics_descriptor_sets_
+          [SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
+              empty_descriptor_set_;
+    } else {
+      descriptor_sets_needed &=
+          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+    }
   }
   if (!texture_count_pixel && !sampler_count_pixel) {
-    descriptor_sets_needed &=
-        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+    if (empty_descriptor_set_ != VK_NULL_HANDLE) {
+      current_graphics_descriptor_sets_
+          [SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
+              empty_descriptor_set_;
+    } else {
+      descriptor_sets_needed &=
+          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+    }
   }
   uint32_t descriptor_sets_remaining =
       descriptor_sets_needed &
