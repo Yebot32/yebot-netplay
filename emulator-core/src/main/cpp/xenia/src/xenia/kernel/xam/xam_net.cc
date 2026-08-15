@@ -7,8 +7,13 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/util/net_utils.h"
+#include "xenia/kernel/util/network_adapter_manager.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
@@ -26,6 +31,27 @@ DEFINE_bool(network_enabled, true,
             "is off. Turn it off only for titles that block indefinitely on a "
             "socket that never answers.",
             "Kernel");
+
+// Values match upstream netplay's NETWORK_MODE so the rest of that port (see
+// docs/netplay-port/) reads this cvar unchanged. Only OFFLINE and LAN are
+// implemented here - XBOXLIVE needs XLiveAPI, which does not build against
+// Edge yet, and is deliberately left to fall through to OFFLINE behaviour.
+//
+// DEFAULT IS OFFLINE, which is exactly what the stubs did before. System Link
+// is opt-in until it has been verified against a second console; flipping this
+// default is a decision to make on evidence, not on the code compiling.
+DEFINE_int32(network_mode, 0,
+             "0 = offline, the console reports no usable network address. "
+             "1 = LAN, System Link over the host's own subnet: the guest is "
+             "handed the real local IP and peers resolve to their real "
+             "addresses. 2 = Xbox Live, NOT IMPLEMENTED, treated as offline.",
+             "Kernel");
+
+namespace NETWORK_MODE {
+constexpr int32_t OFFLINE = 0;
+constexpr int32_t LAN = 1;
+constexpr int32_t XBOXLIVE = 2;
+}  // namespace NETWORK_MODE
 
 #ifdef XE_PLATFORM_WIN32
 // NOTE: must be included last as it expects windows.h to already be included.
@@ -492,31 +518,72 @@ struct XnAddrStatus {
   static constexpr uint32_t XNET_GET_XNADDR_TROUBLESHOOT = 0x00008000;
 };
 
+// Port the guest reserved for System Link traffic, via XNetSetSystemLinkPort.
+// 3074 is the Xbox default and what titles fall back to; it is only used to
+// populate wPortOnline, not to bind anything here.
+static std::atomic<uint16_t> system_link_port = {3074};
+
+// Fill an XNADDR describing THIS console.
+//
+// This is the LAN-only reduction of upstream netplay's XLiveAPI::
+// IpGetConsoleXnAddr. Everything that function does beyond these three fields
+// is the Xbox Live path - an online IP from the web service and a Live logon
+// check - and none of it is reachable without XLiveAPI, which does not build
+// against Edge. See docs/netplay-port/README.md.
+//
+// abOnline is left zeroed. Upstream stores a platform tag in it via a struct
+// overlay; our XNADDR still declares it as a flat uint8_t[20] and no LAN title
+// reads it, so inventing a layout here would be unverifiable.
+static void GetConsoleXnAddr(XNADDR* addr_ptr) {
+  std::memset(addr_ptr, 0, sizeof(XNADDR));
+
+  // A stable per-console MAC out of XConfig's secured settings, NOT the host
+  // NIC's. Titles use it as a console identity - RakNet derives its 64-bit
+  // peer ids from it - so it has to survive a reboot and differ between
+  // consoles. The old 0xCC fill did neither.
+  std::memcpy(addr_ptr->abEnet, GetConsoleMacAddress().raw(),
+              MacAddress::MacAddressSize);
+
+  if (cvars::network_mode != NETWORK_MODE::LAN) {
+    return;
+  }
+
+  const auto adapter_manager =
+      kernel_state()->emulator()->GetNetworkAdapterManager();
+  if (!adapter_manager || !adapter_manager->IsInterfaceSelected()) {
+    return;
+  }
+
+  // ina is already in network byte order, which is what the guest expects.
+  addr_ptr->ina = adapter_manager->GetSelectedAdapterLocalIP().sin_addr;
+  addr_ptr->wPortOnline = system_link_port.load();
+}
+
 dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> addr_ptr) {
-  // Just return a loopback address atm.
-  addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
-  addr_ptr->inaOnline.s_addr = 0;
-  addr_ptr->wPortOnline = 0;
+  GetConsoleXnAddr(addr_ptr);
 
-  // TODO(gibbed): A proper mac address.
-  // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
-  // numbers. A zero value will cause RakPeer::Startup to fail. This causes
-  // 58411436 to crash on startup.
-  // The 360-specific code is scrubbed from the RakNet repo, but there's still
-  // traces of what it's doing which match the game code.
-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L382
-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4527
-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
-  // "Mac address is a poor solution because you can't have multiple connections
-  // from the same system"
-  std::memset(addr_ptr->abEnet, 0xCC, 6);
+  uint32_t status = XnAddrStatus::XNET_GET_XNADDR_ETHERNET;
+  if (cvars::network_mode == NETWORK_MODE::LAN && addr_ptr->ina.s_addr) {
+    // STATIC because the address is the one we hand out and will keep handing
+    // out; DHCP would invite the title to wait for a lease that never changes.
+    status |= XnAddrStatus::XNET_GET_XNADDR_STATIC |
+              XnAddrStatus::XNET_GET_XNADDR_GATEWAY |
+              XnAddrStatus::XNET_GET_XNADDR_DNS;
+  } else {
+    // Titles branch on TROUBLESHOOT to show "check your network" rather than
+    // hanging on a discovery that cannot answer.
+    status |= XnAddrStatus::XNET_GET_XNADDR_TROUBLESHOOT;
+  }
 
-  std::memset(addr_ptr->abOnline, 0, 20);
+  XELOGI("XNetGetTitleXnAddr: mode={} ina={} port={} -> status {:08X}",
+         cvars::network_mode, ip_to_string(addr_ptr->ina),
+         uint16_t(addr_ptr->wPortOnline), status);
 
-  return XnAddrStatus::XNET_GET_XNADDR_STATIC;
+  return status;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetGetTitleXnAddr, kNetworking, kStub);
+
+DECLARE_XAM_EXPORT1(NetDll_XNetGetTitleXnAddr, kNetworking, kImplemented);
 
 dword_result_t NetDll_XNetGetDebugXnAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> addr_ptr) {
@@ -529,11 +596,26 @@ DECLARE_XAM_EXPORT1(NetDll_XNetGetDebugXnAddr, kNetworking, kStub);
 
 dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
                                                   pointer_t<XNADDR> addr_ptr,
-                                                  lpdword_t id_ptr) {
-  // Tell the caller we're not signed in to live (non-zero ret)
-  return 1;
+                                                  lpqword_t id_ptr) {
+  if (cvars::network_mode != NETWORK_MODE::LAN) {
+    // Non-zero: not signed in, which is what the stub always claimed.
+    return 1;
+  }
+
+  // Derived from the peer's MAC, so the same console yields the same id on
+  // every lookup and on both ends of the link. A peer we only know by IP has
+  // no MAC, so it has no machine id either - saying otherwise would hand two
+  // different consoles the id 0.
+  const MacAddress mac(addr_ptr->abEnet);
+  if (!mac.to_uint64()) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+
+  *id_ptr = GetMachineId(mac.to_uint64());
+
+  return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToMachineId, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToMachineId, kNetworking, kImplemented);
 
 dword_result_t XNetLogonGetTitleID_entry(dword_t caller, lpvoid_t params) {
   return kernel_state()->title_id();
@@ -551,27 +633,78 @@ DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToString, kNetworking, kStub);
 // subsequent socket calls (like a handle to a XNet address)
 dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> xn_addr,
-                                               lpvoid_t xid, lpvoid_t in_addr) {
-  return 1;
+                                               lpvoid_t xid,
+                                               pointer_t<in_addr> in_addr) {
+  in_addr.Zero();
+
+  // On a real console the returned IN_ADDR is an opaque handle that the XNet
+  // layer maps back to a secure address. On a LAN there is nothing to secure
+  // and nothing to translate: the peer's ina IS routable from here, so the
+  // mapping is the identity. That is also what upstream netplay does in LAN
+  // mode, so a future port of its session layer keeps working.
+  if (cvars::network_mode != NETWORK_MODE::LAN) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+
+  // Our own address must come back as something we can bind and talk to
+  // locally - a title that resolves itself and then sends to the LAN address
+  // would be shouting at the router to reach itself.
+  if (GetConsoleMacAddress() == MacAddress(xn_addr->abEnet)) {
+    in_addr->s_addr = htonl(INADDR_LOOPBACK);
+    XELOGI("XNetXnAddrToInAddr: self -> loopback");
+    return X_ERROR_SUCCESS;
+  }
+
+  in_addr->s_addr = xn_addr->ina.s_addr;
+
+  XELOGI("XNetXnAddrToInAddr: peer -> {}", ip_to_string(*in_addr));
+
+  return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kSketchy);
 
 // Does the reverse of the above.
-// FIXME: Arguments may not be correct.
-dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, lpvoid_t in_addr,
+dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
                                                pointer_t<XNADDR> xn_addr,
                                                lpvoid_t xid) {
-  return 1;
+  if (xn_addr) {
+    std::memset(xn_addr, 0, sizeof(XNADDR));
+  }
+
+  if (cvars::network_mode != NETWORK_MODE::LAN) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+
+  // Loopback and broadcast both mean "this console" to a title asking who it
+  // is - broadcast because discovery resolves the address it just shouted at.
+  if (in_addr == LOOPBACK || in_addr == BROADCAST) {
+    GetConsoleXnAddr(xn_addr);
+    return X_ERROR_SUCCESS;
+  }
+
+  // A peer we have only ever seen as an IP. We know its address and nothing
+  // else; abEnet stays zero because inventing a MAC here would collide with a
+  // real one and make two consoles look like the same machine.
+  xn_addr->ina.s_addr = htonl(in_addr);
+  xn_addr->wPortOnline = system_link_port.load();
+
+  return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kSketchy);
 
 // https://www.google.com/patents/WO2008112448A1?cl=en
 // Reserves a port for use by system link
 dword_result_t NetDll_XNetSetSystemLinkPort_entry(dword_t caller,
                                                   dword_t port) {
-  return 1;
+  // The guest passes this already byte-swapped, as it would go on the wire.
+  const uint16_t host_port = xe::byte_swap(static_cast<uint16_t>(port));
+  system_link_port.store(host_port);
+
+  XELOGI("XNetSetSystemLinkPort: {}", host_port);
+
+  return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetSetSystemLinkPort, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetSetSystemLinkPort, kNetworking, kImplemented);
 
 // https://github.com/ILOVEPIE/Cxbx-Reloaded/blob/master/src/CxbxKrnl/EmuXOnline.h#L39
 struct XEthernetStatus {

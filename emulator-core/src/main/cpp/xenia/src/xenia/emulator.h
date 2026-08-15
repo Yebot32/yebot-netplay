@@ -26,6 +26,7 @@
 #include "xenia/base/exception_handler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/game_info_database.h"
+#include "xenia/kernel/util/network_adapter_manager.h"
 #include "xenia/kernel/util/xlast.h"
 #include "xenia/memory.h"
 #include "xenia/patcher/patcher.h"
@@ -164,6 +165,16 @@ class Emulator {
 
   kernel::util::GameInfoDatabase* game_info_database() const {
     return game_info_database_.get();
+  }
+
+  // Which host network interface 360 netplay presents to the guest.
+  //
+  // Named to match upstream netplay's accessor so the rest of that port (see
+  // docs/netplay-port/) lands against it unchanged - it is on that port's list
+  // of subsystems Edge lacks. Always non-null; enumeration failure leaves it
+  // with no selected interface rather than absent.
+  kernel::NetworkAdapterManager* GetNetworkAdapterManager() const {
+    return network_adapter_manager_.get();
   }
   // Bare-essentials init: memory, cpu, vfs, kernel state, input system shell.
   // Stores the subsystem factories but does not create graphics/audio or
@@ -500,6 +511,7 @@ class Emulator {
   kernel::object_ref<kernel::XHostThread> plugin_loader_thread_;
   std::optional<uint32_t> title_id_;  // Currently running title ID
   std::unique_ptr<kernel::util::GameInfoDatabase> game_info_database_;
+  std::unique_ptr<kernel::NetworkAdapterManager> network_adapter_manager_;
 
   std::atomic<bool> paused_;
   bool restoring_;

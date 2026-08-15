@@ -414,6 +414,13 @@ X_STATUS Emulator::Setup(
 
   patcher_ = std::make_unique<xe::patcher::Patcher>(storage_root_ / "patches");
 
+  // Enumerate host interfaces before the kernel exists: xam_net answers
+  // XNetGetTitleXnAddr off the selected one, and a title can ask for its own
+  // address as early as its first XNetStartup. Initialize() is non-fatal by
+  // design - with no interface the guest simply sees an offline console.
+  network_adapter_manager_ = std::make_unique<xe::kernel::NetworkAdapterManager>();
+  network_adapter_manager_->Initialize();
+
   XELOGI("{}: Initializing Kernel...", __func__);
   // Shared kernel state.
   kernel_state_ = std::make_unique<xe::kernel::KernelState>(this);
