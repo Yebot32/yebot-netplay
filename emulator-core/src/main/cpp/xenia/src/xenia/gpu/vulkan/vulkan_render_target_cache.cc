@@ -37,6 +37,19 @@
 
 DECLARE_bool(accurate_resolve_number_formats);
 DECLARE_bool(frame_inspector);
+
+DEFINE_bool(
+    log_host_depth_fallback, false,
+    "Report, per frame, how many EDRAM depth transfers had no host depth "
+    "source. When the host depth encoding differs from the guest's - which is "
+    "the case for the guest's 24-bit unorm depth whenever the native unorm24 "
+    "format is not in use - a transfer with a host depth source round-trips "
+    "depth exactly, and one without has to rebuild it from the 24 bits in "
+    "EDRAM and loses everything below that grid. That loss dithers surfaces "
+    "that are close together in depth, so this distinguishes 'depth precision "
+    "is being lost on transfers' from 'it is not, look elsewhere' - which a "
+    "picture of the artifact cannot.",
+    "GPU");
 DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
 
@@ -3348,6 +3361,27 @@ void VulkanRenderTargetCache::RecordResolveDetails(
 }
 
 void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
+  if (cvars::log_host_depth_fallback && host_depth_planned_) {
+    // Reported per frame rather than accumulated, because what matters is
+    // whether this happens while the artifact is on screen, not the lifetime
+    // total. Only "none" is a precision loss: "is source" means the transfer
+    // reads exact depth straight from the source render target, which is the
+    // good case and is indistinguishable from the bad one downstream.
+    XELOGI(
+        "VkHostDepth: {} planned depth transfer(s) this frame | NONE (rebuilt "
+        "from 24 bits, PRECISION LOST): {} | host depth is the source "
+        "(exact): {} | separate host depth source (exact): {} | host encoding "
+        "differs: {}",
+        host_depth_planned_, host_depth_planned_none_,
+        host_depth_planned_is_source_, host_depth_planned_separate_,
+        IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat::kD24S8)
+            ? "yes (kD24S8)"
+            : "no (kD24S8)");
+    host_depth_planned_ = 0;
+    host_depth_planned_none_ = 0;
+    host_depth_planned_is_source_ = 0;
+    host_depth_planned_separate_ = 0;
+  }
   if (!cvars::log_resolve_details) {
     return;
   }

@@ -1211,6 +1211,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     uint64_t last_report_ns = 0;
   };
   ResolveDetailsStats resolve_details_stats_;
+
+  // The host depth counters live on the base RenderTargetCache, which is where
+  // the planner can still tell the two no-source cases apart.
   std::vector<uint32_t> resolve_dests_current_frame_;
   std::vector<uint32_t> resolve_dests_previous_frame_;
   void RecordResolveDetails(const draw_util::ResolveInfo& resolve_info,

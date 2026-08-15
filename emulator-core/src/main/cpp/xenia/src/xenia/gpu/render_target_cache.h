@@ -643,6 +643,16 @@ class RenderTargetCache {
   bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
                                           RenderTargetKey dest) const;
 
+ public:
+  // Per-frame host depth transfer planning counts for log_host_depth_fallback,
+  // counted in the planner because that is the only place where "no host depth
+  // exists" and "host depth is the transfer source" are still distinguishable.
+  // Read and reset by the backend when it reports them at frame end.
+  uint32_t host_depth_planned_ = 0;
+  uint32_t host_depth_planned_none_ = 0;
+  uint32_t host_depth_planned_is_source_ = 0;
+  uint32_t host_depth_planned_separate_ = 0;
+
  private:
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;

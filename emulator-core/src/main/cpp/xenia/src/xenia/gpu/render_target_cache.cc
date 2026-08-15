@@ -21,6 +21,8 @@
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
 
+DECLARE_bool(log_host_depth_fallback);
+
 DEFINE_bool(
     rt_cache_ownership_claim_memo, true,
     "Skip EDRAM ownership-map walks for render target claims that provably "
@@ -1760,6 +1762,25 @@ void RenderTargetCache::ChangeOwnership(
                 host_depth_encoding_different
                     ? it->second.GetHostDepthRenderTarget(dest.GetDepthFormat())
                     : RenderTargetKey();
+            // Counted here rather than at the Vulkan end because this is the
+            // only point where the two reasons for having no host depth source
+            // are still distinguishable. Downstream they are both just a null
+            // pointer, and they mean opposite things: no host depth at all
+            // means the transfer rebuilds depth from the 24 bits in EDRAM and
+            // loses everything below that grid, whereas host depth being the
+            // transfer source itself means the depth is already exact and a
+            // separate source would be redundant.
+            if (cvars::log_host_depth_fallback && dest.is_depth &&
+                host_depth_encoding_different) {
+              ++host_depth_planned_;
+              if (transfer_host_depth_source.IsEmpty()) {
+                ++host_depth_planned_none_;
+              } else if (transfer_host_depth_source == transfer_source) {
+                ++host_depth_planned_is_source_;
+              } else {
+                ++host_depth_planned_separate_;
+              }
+            }
             if (transfer_host_depth_source == transfer_source) {
               // Same render target, don't provide a separate host depth source.
               transfer_host_depth_source = RenderTargetKey();
