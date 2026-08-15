@@ -471,6 +471,34 @@ void XSocket::RunCooperatively(asio::error_code& ec, RetryMode mode,
   }
 }
 
+// Ports below 1024 need root on Linux and Android, so Bind() moves the guest's
+// port to port + 10000. That remap MUST be applied to destinations as well, and
+// undone on the way back in, or two emulator instances talk straight past each
+// other.
+//
+// MEASURED on two devices, 2026-08-15: Halo 3's System Link discovery probe
+// left one console as 192.168.0.173:11001 -> port 1001, while the peer console
+// was listening on 11001. The source port was remapped and the destination was
+// not, so every probe landed on a port nobody had bound. Discovery could never
+// work between two Xenia instances, no matter what the XNet layer did.
+static constexpr uint16_t kPrivilegedPortOffset = 10000;
+
+static uint16_t GuestPortToHostPort(uint16_t port) {
+  return (port != 0 && port < 1024)
+             ? static_cast<uint16_t>(port + kPrivilegedPortOffset)
+             : port;
+}
+
+// Undo the above so the guest only ever sees the port it asked for. A title
+// that replies to the address it received from would otherwise aim at a port
+// that gets remapped a second time.
+static uint16_t HostPortToGuestPort(uint16_t port) {
+  return (port > kPrivilegedPortOffset &&
+          port < kPrivilegedPortOffset + 1024)
+             ? static_cast<uint16_t>(port - kPrivilegedPortOffset)
+             : port;
+}
+
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   if (!tcp_socket_ && !udp_socket_ && !acceptor_) {
     return X_STATUS_INVALID_HANDLE;
@@ -478,7 +506,7 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
 
   auto* addr_in = reinterpret_cast<N_XSOCKADDR_IN*>(name);
   asio::ip::address_v4 addr(addr_in->sin_addr);
-  uint16_t port = addr_in->sin_port;
+  uint16_t port = GuestPortToHostPort(addr_in->sin_port);
 
   asio::error_code ec;
 
@@ -524,12 +552,13 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   // On Linux and Windows (when running under Wine), ports < 1024 require root
   // privileges. Remap to port + 10000 to avoid privilege issues.
   // Note: N_XSOCKADDR_IN uses xe::be<> which auto-converts to/from host endian.
+  // The same mapping is applied to send destinations - see GuestPortToHostPort.
   const uint16_t original_port = static_cast<uint16_t>(name->sin_port);
-  if (original_port < 1024 && original_port != 0) {
-    uint16_t new_port = original_port + 10000;
-    name->sin_port = new_port;
+  const uint16_t mapped_port = GuestPortToHostPort(original_port);
+  if (mapped_port != original_port) {
+    name->sin_port = mapped_port;
     XELOGW("XSocket::Bind: port {} requires privileges, remapping to port {}",
-           original_port, new_port);
+           original_port, mapped_port);
   }
 
   asio::ip::address_v4 addr(name->sin_addr);
@@ -725,7 +754,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
     if (!ec && from) {
       from->sin_family = AF_INET;
       from->sin_addr = sender_endpoint.address().to_v4().to_uint();
-      from->sin_port = sender_endpoint.port();
+      from->sin_port = HostPortToGuestPort(sender_endpoint.port());
       std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
     }
     if (from_len) {
@@ -784,7 +813,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
   if (udp_socket_) {
     if (to) {
       asio::ip::address_v4 addr(to->sin_addr);
-      uint16_t port = to->sin_port;
+      uint16_t port = GuestPortToHostPort(to->sin_port);
       asio::ip::udp::endpoint endpoint(addr, port);
 
       RunCooperatively(ec, RetryMode::kSend, [&]() {
