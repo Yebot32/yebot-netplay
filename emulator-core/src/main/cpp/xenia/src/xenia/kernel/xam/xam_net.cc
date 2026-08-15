@@ -576,9 +576,17 @@ dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
     status |= XnAddrStatus::XNET_GET_XNADDR_TROUBLESHOOT;
   }
 
-  XELOGI("XNetGetTitleXnAddr: mode={} ina={} port={} -> status {:08X}",
-         cvars::network_mode, ip_to_string(addr_ptr->ina),
-         uint16_t(addr_ptr->wPortOnline), status);
+  // Titles poll this every frame - Halo 3 managed 1555 calls in 25 seconds -
+  // so log only when the answer actually changes. Logging every call buried
+  // the rest of the netplay trace under tens of MB.
+  static std::atomic<uint32_t> last_status = {0xFFFFFFFF};
+  static std::atomic<uint32_t> last_ina = {0};
+  const uint32_t ina = addr_ptr->ina.s_addr;
+  if (last_status.exchange(status) != status || last_ina.exchange(ina) != ina) {
+    XELOGI("XNetGetTitleXnAddr: mode={} ina={} port={} -> status {:08X}",
+           cvars::network_mode, ip_to_string(addr_ptr->ina),
+           uint16_t(addr_ptr->wPortOnline), status);
+  }
 
   return status;
 }
@@ -706,6 +714,20 @@ dword_result_t NetDll_XNetSetSystemLinkPort_entry(dword_t caller,
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetSetSystemLinkPort, kNetworking, kImplemented);
 
+// Was an unimplemented import. Mirrors the setter's convention exactly: the
+// guest handed us the port already swapped, so give it back the same way.
+dword_result_t NetDll_XNetGetSystemLinkPort_entry(dword_t caller,
+                                                  lpdword_t port_ptr) {
+  if (!port_ptr) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+
+  *port_ptr = xe::byte_swap(system_link_port.load());
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetSystemLinkPort, kNetworking, kImplemented);
+
 // https://github.com/ILOVEPIE/Cxbx-Reloaded/blob/master/src/CxbxKrnl/EmuXOnline.h#L39
 struct XEthernetStatus {
   static constexpr uint32_t XNET_ETHERNET_LINK_ACTIVE = 0x01;
@@ -715,10 +737,33 @@ struct XEthernetStatus {
   static constexpr uint32_t XNET_ETHERNET_LINK_HALF_DUPLEX = 0x10;
 };
 
+// *** THIS IS THE GATE ON EVERYTHING ELSE. ***
+//
+// Returning 0 here means "no cable". Halo 3 polls this in a tight loop -
+// MEASURED at 34,228 calls in 25 seconds while its System Link browser was
+// open - and never proceeds to create a socket, because as far as the title is
+// concerned the console is not plugged into anything. Every downstream symptom
+// (no socket, no bind, no discovery traffic, an empty browser that never
+// errors) came from this one return value.
 dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
-  return 0;
+  if (cvars::network_mode == NETWORK_MODE::OFFLINE) {
+    return 0;
+  }
+
+  const auto adapter_manager =
+      kernel_state()->emulator()->GetNetworkAdapterManager();
+  if (!adapter_manager || !adapter_manager->IsInterfaceSelected()) {
+    // Genuinely no usable interface - report the cable out rather than lie,
+    // so a title shows "check your connection" instead of hanging.
+    return 0;
+  }
+
+  return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
+         XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+         XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking, kStub);
+DECLARE_XAM_EXPORT2(NetDll_XNetGetEthernetLinkStatus, kNetworking, kImplemented,
+                    kHighFrequency);
 
 dword_result_t NetDll_XNetDnsLookup_entry(dword_t caller, lpstring_t host,
                                           dword_t event_handle,
