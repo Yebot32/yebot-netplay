@@ -880,6 +880,42 @@ dword_result_t NetDll_XNetQosListen_entry(dword_t caller, lpvoid_t id,
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kStub);
 
+// The secure-link handshake a title performs before it will talk to a peer.
+//
+// Both were in xam_table.inc with NO implementation behind them, which is why
+// Halo 3's import table printed them with "!!". Discovery never touches them;
+// JOINING does, and a title that never sees CONNECTED concludes the peer is
+// unreachable - "the party may have an incompatible network setup".
+//
+// There is no security gateway on a LAN and nothing to negotiate: the peer's
+// address is already routable by the time XNetXnAddrToInAddr has run. So the
+// link is up by definition, which is exactly what upstream netplay's stubs
+// say too - see ref/kernel_xam_xam_net.cc.
+enum XnetConnectStatus : uint32_t {
+  XNET_CONNECT_STATUS_IDLE = 0x00,
+  XNET_CONNECT_STATUS_PENDING = 0x01,
+  XNET_CONNECT_STATUS_CONNECTED = 0x02,
+};
+
+dword_result_t NetDll_XNetConnect_entry(dword_t caller, dword_t addr) {
+  XELOGI("XNetConnect({:08X})", addr.value());
+
+  // Upstream sleeps here, with the note that 43430806, 43430821 and 5841124E
+  // fail to connect without it - a title that polls GetConnectStatus in the
+  // same breath can otherwise see CONNECTED before it has finished setting up
+  // its own side. Kept, since it costs one join and cures a class of titles.
+  xe::threading::Sleep(std::chrono::milliseconds(150));
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetConnect, kNetworking, kStub);
+
+dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller,
+                                                 dword_t addr) {
+  return XNET_CONNECT_STATUS_CONNECTED;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetConnectStatus, kNetworking, kStub);
+
 dword_result_t NetDll_inet_addr_entry(lpstring_t addr_ptr) {
   if (!addr_ptr) {
     return -1;
