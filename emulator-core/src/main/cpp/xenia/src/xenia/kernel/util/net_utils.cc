@@ -7,13 +7,26 @@
  ******************************************************************************
  */
 
+#include <mutex>
 #include <random>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/config.h"
 #include "xenia/kernel/util/net_utils.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xconfig.h"
+
+// Blank on a fresh install; GetConsoleMacAddress fills it in on first use and
+// saves it. Two consoles that share this value cannot tell each other apart -
+// see the comment there - so do NOT copy a config between devices and expect
+// System Link to work.
+DEFINE_string(console_mac_address, "",
+              "Console MAC address, twelve hex digits and no separators. "
+              "Blank generates one and writes it back here. It is the "
+              "console's identity on System Link, so it must differ between "
+              "consoles on the same network.",
+              "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -147,13 +160,41 @@ uint64_t GetLocalMachineId(const MacAddress mac_address) {
   return GetMachineId(mac_address.to_uint64());
 }
 
+// The console's own MAC, which on a LAN is its identity.
+//
+// *** THIS USED TO READ XCONFIG AND GET SIX ZERO BYTES ON EVERY CONSOLE. ***
+// XConfig::BuildSetting never handled XCONFIG_SECURED_MAC_ADDRESS, and
+// ReadSetting leaves the caller's buffer untouched for a setting it cannot
+// build, so the zero-initialised array came straight back out. Every Xenra
+// console therefore claimed 00:00:00:00:00:00, which broke System Link joining
+// outright: XNetXnAddrToInAddr decides "is this XNADDR me?" by comparing MACs,
+// every peer compared equal, and the joining console resolved the HOST to
+// loopback and sent its join traffic to 127.0.0.1. MEASURED on two devices -
+// "XNetXnAddrToInAddr: self -> loopback" followed by sendto to 127.0.0.1:1001.
+//
+// Now generated once with the Corona OUI and persisted to the config, so it
+// survives a restart and differs between installs. Reading it no longer
+// touches XConfig; XConfig::BuildSetting serves the guest FROM here, which is
+// also what keeps the two from recursing into each other.
 MacAddress GetConsoleMacAddress() {
-  uint8_t mac_address[MacAddress::MacAddressSize] = {};
+  static std::once_flag generated;
+  static MacAddress cached(uint64_t(0));
 
-  kernel_state()->xconfig()->ReadSetting(
-      XCONFIG_SECURED_CATEGORY, XCONFIG_SECURED_MAC_ADDRESS, &mac_address);
+  std::call_once(generated, []() {
+    if (!cvars::console_mac_address.empty()) {
+      const MacAddress configured(cvars::console_mac_address);
+      if (configured.to_uint64()) {
+        cached = configured;
+        return;
+      }
+    }
+    cached = GenerateMacAddress();
+    OVERRIDE_string(console_mac_address, cached.to_string());
+    config::SaveConfig();
+    XELOGI("Generated a console MAC address: {}", cached.to_printable_form());
+  });
 
-  return MacAddress(mac_address);
+  return cached;
 }
 
 MacAddress GenerateMacAddress() {

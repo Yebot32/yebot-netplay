@@ -16,6 +16,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/config.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/util/net_utils.h"
 #include "xenia/kernel/util/shim_utils.h"
 
 // XConfig settings are kept as cvars so they flow through Xenia's existing
@@ -89,6 +90,17 @@ uint16_t BuildSetting(X_CONFIG_CATEGORY category, uint16_t setting,
   switch (category) {
     case XCONFIG_SECURED_CATEGORY:
       switch (setting) {
+        case XCONFIG_SECURED_MAC_ADDRESS: {
+          // Unhandled until now, and ReadSetting leaves the caller's buffer
+          // alone for a setting it cannot build - so every reader, guest and
+          // host alike, saw six zero bytes. That is what made every console
+          // look like the same machine on System Link. GetConsoleMacAddress
+          // owns the value and reads the cvar, NOT XConfig, so this does not
+          // recurse.
+          std::memcpy(out, GetConsoleMacAddress().raw(),
+                      MacAddress::MacAddressSize);
+          return MacAddress::MacAddressSize;
+        }
         case XCONFIG_SECURED_AV_REGION: {
           uint32_t region = 0;
           switch (cvars::video_standard) {
