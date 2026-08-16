@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <random>
 
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
@@ -1433,10 +1434,50 @@ dword_result_t NetDll_getsockname_entry(dword_t caller, dword_t socket_handle,
 }
 DECLARE_XAM_EXPORT1(NetDll_getsockname, kNetworking, kImplemented);
 
+// The top byte of an XNKID is its session class. Only these three are valid;
+// upstream's IsValidXNKID rejects anything else outright.
+// docs/netplay-port/xnet.h.ported.
+constexpr uint8_t XNKID_SYSTEM_LINK = 0x00;
+constexpr uint8_t XNKID_ONLINE = 0xAE;
+constexpr uint8_t XNKID_SERVER = 0xC0;
+
 dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
                                           lpdword_t exchange_key) {
-  kernel_memory()->Fill(key_id.guest_address(), 8, 0xBE);
-  kernel_memory()->Fill(exchange_key.guest_address(), 16, 0xBE);
+  // *** THIS USED TO Fill() BOTH BUFFERS WITH 0xBE. *** Two things wrong with
+  // that, both measured on two consoles during a System Link join:
+  //
+  //   - 0xBE is not one of the three session classes above, so the session id
+  //     failed IsValidXNKID. Halo 3 completed the whole peer exchange - probe
+  //     out, 12-byte answer back - and then called XNetUnregisterKey and gave
+  //     up, which is the shape of a title rejecting the key rather than
+  //     failing to reach anyone.
+  //   - It is a CONSTANT. Every console produced session id
+  //     BEBEBEBEBEBEBEBE, so no two sessions on a LAN were distinguishable -
+  //     the same class of bug as the all-zero MAC in 4f47801be.
+  //
+  // Generated the way upstream's GenerateSessionId does: the class in the top
+  // byte, 48 random bits below it, stored big-endian as the guest expects.
+  static std::mt19937_64 rng(std::random_device{}());
+  std::uniform_int_distribution<uint64_t> dist;
+
+  const uint64_t session_id = (uint64_t(XNKID_SYSTEM_LINK) << 56) |
+                              (dist(rng) & 0x0000FFFFFFFFFFFFull);
+
+  const xe::be<uint64_t> be_session_id = session_id;
+  std::memcpy(kernel_memory()->TranslateVirtual<uint8_t*>(
+                  key_id.guest_address()),
+              &be_session_id, sizeof(be_session_id));
+
+  // XNKEY is 16 opaque bytes. Nothing on a LAN verifies it, but it has to
+  // differ per session or two hosts hand out the same exchange key.
+  auto* key = kernel_memory()->TranslateVirtual<uint8_t*>(
+      exchange_key.guest_address());
+  for (size_t i = 0; i < 16; i += 8) {
+    const uint64_t chunk = dist(rng);
+    std::memcpy(key + i, &chunk, sizeof(chunk));
+  }
+
+  XELOGI("XNetCreateKey: session id {:016X}", session_id);
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetCreateKey, kNetworking, kStub);
