@@ -711,6 +711,69 @@ dword_result_t XNetLogonGetTitleID_entry(dword_t caller, lpvoid_t params) {
 }
 DECLARE_XAM_EXPORT1(XNetLogonGetTitleID, kNetworking, kImplemented);
 
+// This console's own machine id. Halo 3 imports it and it had NO
+// implementation behind it at all - "!!" in the import table on both consoles.
+//
+// An unimplemented import is worse than a stub for diagnosis: xex_module warns
+// once at module load and installs a null handler, so there is no per-call log
+// line at ANY log level and "grep says it is never called" proves nothing. It
+// is implemented here partly to find out whether the title calls it.
+//
+// The value is the SAME derivation NetDll_XNetXnAddrToMachineId applies to a
+// peer's MAC, so the id a console reports for itself is the id the other
+// console computes for it. Halo identifies session members by machine id, and
+// an id that is absent - or worse, identical on every console, which is the
+// shape the zero MAC and the constant XNKID both had - would make two consoles
+// look like one machine.
+dword_result_t XNetLogonGetMachineID_entry(lpqword_t machine_id_ptr) {
+  if (!machine_id_ptr) {
+    return uint32_t(X_WSAError::X_WSAEFAULT);
+  }
+
+  const uint64_t machine_id = GetLocalMachineId(GetConsoleMacAddress());
+  *machine_id_ptr = machine_id;
+
+  static std::atomic<bool> logged = {false};
+  if (!logged.exchange(true)) {
+    XELOGI("XNetLogonGetMachineID: {:016X}", machine_id);
+  }
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XNetLogonGetMachineID, kNetworking, kImplemented);
+
+// The other two netplay imports Halo 3 wants and we did not provide. Both are
+// upstream's shapes. Same reasoning as above: implemented as much to make them
+// visible in a trace as to make them work.
+dword_result_t NetDll_XNetUnregisterInAddr_entry(dword_t caller,
+                                                 dword_t addr) {
+  // The mapping XNetXnAddrToInAddr hands out is the identity on a LAN, so
+  // there is nothing held to release.
+  XELOGI("XNetUnregisterInAddr({:08X})", addr.value());
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterInAddr, kNetworking, kStub);
+
+dword_result_t NetDll_XNetServerToInAddr_entry(dword_t caller,
+                                               dword_t server_addr,
+                                               dword_t service_id,
+                                               pointer_t<in_addr> pina) {
+  if (!pina) {
+    return uint32_t(X_WSAError::X_WSAEFAULT);
+  }
+  if (!server_addr || !service_id) {
+    return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+
+  pina->s_addr = htonl(server_addr);
+
+  XELOGI("XNetServerToInAddr: service {:08X} -> {}", service_id.value(),
+         ip_to_string(*pina));
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetServerToInAddr, kNetworking, kSketchy);
+
 void NetDll_XNetInAddrToString_entry(dword_t caller, dword_t in_addr,
                                      lpstring_t string_out,
                                      dword_t string_size) {
