@@ -80,6 +80,32 @@ enum {
   NUM_XNCALLER_TYPES = 0x4,
 };
 
+enum PLATFORM_TYPE : uint32_t { Xbox1, Xbox360, PC };
+
+// Security Gateway Address - the layout of XNADDR::abOnline.
+//
+// Taken from docs/netplay-port/xnet.h.ported, which is upstream netplay's
+// xnet.h. It used to be a flat uint8_t[20] here and stayed zeroed; a peer
+// applying upstream's own test
+//
+//     IsDeadSg(sg) := sg.security_parameter_index == 0 && sg.xbox_id == 0
+//
+// therefore read every console we advertised as a DEAD secure address.
+//
+// *** MUST be pack(1). *** xbox_id is 8 bytes, so the natural alignment would
+// round the struct up to 24 and silently push XNADDR to 40 - the static
+// asserts below are the guard, since nothing else in this file would notice.
+#pragma pack(push, 1)
+struct SGADDR {
+  in_addr ina;                                // SG address for the client
+  xe::be<uint32_t> security_parameter_index;  // Assigned by the SG
+  xe::be<uint64_t> xbox_id;                   // Client machine account id
+  uint8_t platform_type;
+  uint8_t reserved[3];
+};
+#pragma pack(pop)
+static_assert_size(SGADDR, 0x14);
+
 // https://github.com/pmrowla/hl2sdk-csgo/blob/master/common/xbox/xboxstubs.h
 typedef struct {
   // FYI: IN_ADDR should be in network-byte order.
@@ -87,8 +113,9 @@ typedef struct {
   in_addr inaOnline;             // Online IP address (zero if not online)
   xe::be<uint16_t> wPortOnline;  // Online port
   uint8_t abEnet[6];             // Ethernet MAC address
-  uint8_t abOnline[20];          // Online identification
+  SGADDR abOnline;               // Online identification
 } XNADDR;
+static_assert_size(XNADDR, 0x24);
 
 struct XNDNS {
   xe::be<int32_t> status;
@@ -531,9 +558,11 @@ static std::atomic<uint16_t> system_link_port = {3074};
 // check - and none of it is reachable without XLiveAPI, which does not build
 // against Edge. See docs/netplay-port/README.md.
 //
-// abOnline is left zeroed. Upstream stores a platform tag in it via a struct
-// overlay; our XNADDR still declares it as a flat uint8_t[20] and no LAN title
-// reads it, so inventing a layout here would be unverifiable.
+// abOnline IS filled now, as an SGADDR. Halo 3 refused every System Link join
+// with "UNABLE TO JOIN - the party may have an incompatible network setup"
+// while never opening its VDP peer socket, i.e. it judged us from the
+// advertisement alone. An all-zero abOnline satisfies upstream's IsDeadSg, so
+// every console we advertised looked like a dead secure address. See #19 s4.
 static void GetConsoleXnAddr(XNADDR* addr_ptr) {
   std::memset(addr_ptr, 0, sizeof(XNADDR));
 
@@ -557,6 +586,22 @@ static void GetConsoleXnAddr(XNADDR* addr_ptr) {
   // ina is already in network byte order, which is what the guest expects.
   addr_ptr->ina = adapter_manager->GetSelectedAdapterLocalIP().sin_addr;
   addr_ptr->wPortOnline = system_link_port.load();
+
+  // What upstream's IpGetConsoleXnAddr sets, plus a non-zero xbox_id.
+  //
+  // Upstream tags the platform and leaves xbox_id at zero, but its LAN peers
+  // reach it through XLiveAPI, which fills the field elsewhere; we have no
+  // such path, and a zero xbox_id with a zero SPI is precisely IsDeadSg. The
+  // id is the SAME derivation NetDll_XNetXnAddrToMachineId applies to a peer's
+  // MAC, so the value we advertise for ourselves is the value the other
+  // console computes for us rather than a second, disagreeing identity.
+  //
+  // security_parameter_index stays zero: it is assigned by a real Security
+  // Gateway, there is no gateway on a LAN, and a fabricated one would be a
+  // guess. xbox_id alone already makes IsDeadSg false.
+  addr_ptr->abOnline.platform_type = PLATFORM_TYPE::Xbox360;
+  addr_ptr->abOnline.xbox_id =
+      GetMachineId(GetConsoleMacAddress().to_uint64());
 }
 
 dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
@@ -695,6 +740,9 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
   // real one and make two consoles look like the same machine.
   xn_addr->ina.s_addr = htonl(in_addr);
   xn_addr->wPortOnline = system_link_port.load();
+  // Upstream tags the platform on this branch too. xbox_id stays zero: it is
+  // derived from a MAC and we do not have this peer's.
+  xn_addr->abOnline.platform_type = PLATFORM_TYPE::Xbox360;
 
   return X_ERROR_SUCCESS;
 }
@@ -1258,8 +1306,15 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
                                    dword_t flags,
                                    pointer_t<XSOCKADDR_IN> to_ptr,
                                    dword_t to_len) {
-  XELOGD("NetDll_sendto: socket={:08X}, len={}", socket_handle.value(),
-         buf_len.value());
+  // Destination included deliberately. This line used to print only the socket
+  // and the length, which is why the Bind/SendTo port-mapping asymmetry needed
+  // a packet capture from a second machine to find at all - the log could not
+  // have shown it. #19 4.4.
+  const uint32_t to_ip = to_ptr ? uint32_t(to_ptr->sin_addr) : 0;
+  const uint16_t to_port = to_ptr ? uint16_t(to_ptr->sin_port) : 0;
+  XELOGD("NetDll_sendto: socket={:08X}, len={}, to={}.{}.{}.{}:{}",
+         socket_handle.value(), buf_len.value(), (to_ip >> 24) & 0xFF,
+         (to_ip >> 16) & 0xFF, (to_ip >> 8) & 0xFF, to_ip & 0xFF, to_port);
 
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
