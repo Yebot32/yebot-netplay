@@ -8,9 +8,17 @@
  */
 
 #include <atomic>
+#include <chrono>
+#include <cstring>
+#include <map>
+#include <mutex>
 #include <random>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "xenia/base/logging.h"
+#include "xenia/base/threading.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/net_utils.h"
@@ -65,6 +73,8 @@ constexpr int32_t XBOXLIVE = 2;
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 #endif
 
 namespace xe {
@@ -179,6 +189,31 @@ struct XWSAOVERLAPPED {
   };
   xe::be<uint32_t> event_handle;
 };
+
+// System Link datagrams are tiny - the discovery advertisement is 187 bytes and
+// the join exchange is 20 out, 12 back - and the ONLY direct evidence of what a
+// title is actually saying to its peer. Nobody had ever looked at the bytes;
+// #20 5.3 asked for exactly this. Anything larger than a control packet is
+// gameplay traffic and would bury the trace, so it is truncated.
+static constexpr size_t kMaxPacketDumpBytes = 256;
+
+static std::string HexDumpPacket(const uint8_t* data, size_t length) {
+  static constexpr char kHexDigits[] = "0123456789ABCDEF";
+  const size_t shown = std::min(length, kMaxPacketDumpBytes);
+  std::string out;
+  out.reserve(shown * 3 + 16);
+  for (size_t i = 0; i < shown; ++i) {
+    if (i) {
+      out.push_back(' ');
+    }
+    out.push_back(kHexDigits[data[i] >> 4]);
+    out.push_back(kHexDigits[data[i] & 0x0F]);
+  }
+  if (shown < length) {
+    out += " ...";
+  }
+  return out;
+}
 
 void LoadSockaddr(const uint8_t* ptr, sockaddr* out_addr) {
   out_addr->sa_family = xe::load_and_swap<uint16_t>(ptr + 0);
@@ -844,6 +879,315 @@ dword_result_t NetDll_XNetDnsRelease_entry(dword_t caller,
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetDnsRelease, kNetworking, kStub);
 
+// ---------------------------------------------------------------------------
+// QoS
+// ---------------------------------------------------------------------------
+// On a real console QoS is served by the XNet layer, not by the title: a host
+// registers a payload once with XNetQosListen and the system answers probes
+// with it for as long as the session is up. A joining console calls
+// XNetQosLookup, gets the payload plus a round-trip time, and decides from it
+// whether the party is joinable.
+//
+// MEASURED, 2026-08-16, both consoles at log_level 3: the host hands
+// XNetQosListen 173 bytes with flags=0x05 (ENABLE|SET_DATA) and the old stub
+// returned X_ERROR_FUNCTION_FAILED and stored NOTHING, while XNetQosLookup and
+// XNetQosGetListenStats were unimplemented imports on both sides. #20 5.1.
+//
+// Upstream netplay serves all of this out of XLiveAPI over HTTP, which does not
+// exist on a LAN and does not build against Edge. So the exchange here is a
+// direct console-to-console one on kQosProbePort. It only ever has to
+// interoperate with another Xenra instance - the same position System Link
+// discovery is already in - so the packet format below is ours.
+enum XNET_QOS : uint32_t {
+  XNET_QOS_LISTEN_ENABLE = 0x01,
+  XNET_QOS_LISTEN_DISABLE = 0x02,
+  XNET_QOS_LISTEN_SET_DATA = 0x04,
+  XNET_QOS_LISTEN_SET_BITSPERSEC = 0x08,
+  XNET_QOS_LISTEN_RELEASE = 0x10,
+};
+
+enum XNET_XNQOSINFO_FLAGS : uint8_t {
+  XNET_XNQOSINFO_COMPLETE = 0x01,
+  XNET_XNQOSINFO_TARGET_CONTACTED = 0x02,
+  XNET_XNQOSINFO_TARGET_DISABLED = 0x04,
+  XNET_XNQOSINFO_DATA_RECEIVED = 0x08,
+  XNET_XNQOSINFO_PARTIAL_COMPLETE = 0x10,
+};
+
+struct XNQOSLISTENSTATS {
+  xe::be<uint32_t> size_of_struct;
+  xe::be<uint32_t> requests_received_count;
+  xe::be<uint32_t> probes_received_count;
+  xe::be<uint32_t> slots_full_discards_count;
+  xe::be<uint32_t> data_replies_sent_count;
+  xe::be<uint32_t> data_reply_bytes_sent;
+  xe::be<uint32_t> probe_replies_sent_count;
+};
+static_assert_size(XNQOSLISTENSTATS, 0x1C);
+
+#ifdef XE_PLATFORM_WIN32
+using qos_socket_t = SOCKET;
+using qos_socklen_t = int;
+static const qos_socket_t kInvalidQosSocket = INVALID_SOCKET;
+static void CloseQosSocket(qos_socket_t s) { closesocket(s); }
+#else
+using qos_socket_t = int;
+using qos_socklen_t = socklen_t;
+static const qos_socket_t kInvalidQosSocket = -1;
+static void CloseQosSocket(qos_socket_t s) { close(s); }
+#endif
+
+// Ours, not Microsoft's. Above 1024 so it needs no privileges and is not
+// touched by XSocket's guest-port remap.
+static constexpr uint16_t kQosProbePort = 13000;
+
+// magic[4] | version | type | data_len(BE16) | session id(BE64) | data
+static constexpr uint8_t kQosMagic[4] = {'X', 'Q', 'O', 'S'};
+static constexpr uint8_t kQosVersion = 1;
+static constexpr size_t kQosHeaderSize = 16;
+static constexpr uint8_t kQosTypeProbe = 0;
+static constexpr uint8_t kQosTypeReply = 1;
+
+struct QosListenEntry {
+  bool enabled = false;
+  uint32_t bits_per_second = 0;
+  std::vector<uint8_t> data;
+};
+
+static std::mutex qos_listen_mutex;
+static std::map<uint64_t, QosListenEntry> qos_listeners;
+
+// XNetQosGetListenStats is a diagnostic on real hardware; a title that polls it
+// is asking whether anyone is probing. Counting for real costs nothing and is
+// the difference between "nobody asked us" and "we answered and were rejected".
+static std::atomic<uint32_t> qos_requests_received = {0};
+static std::atomic<uint32_t> qos_probes_received = {0};
+static std::atomic<uint32_t> qos_data_replies_sent = {0};
+static std::atomic<uint32_t> qos_data_reply_bytes = {0};
+static std::atomic<uint32_t> qos_probe_replies_sent = {0};
+
+static void BuildQosHeader(uint8_t* out, uint8_t type, uint64_t session_id,
+                           uint16_t data_len) {
+  std::memcpy(out, kQosMagic, sizeof(kQosMagic));
+  out[4] = kQosVersion;
+  out[5] = type;
+  out[6] = static_cast<uint8_t>(data_len >> 8);
+  out[7] = static_cast<uint8_t>(data_len & 0xFF);
+  for (int i = 0; i < 8; ++i) {
+    out[8 + i] = static_cast<uint8_t>((session_id >> ((7 - i) * 8)) & 0xFF);
+  }
+}
+
+static bool ParseQosHeader(const uint8_t* data, size_t length, uint8_t* out_type,
+                           uint64_t* out_session_id, uint16_t* out_data_len) {
+  if (length < kQosHeaderSize) {
+    return false;
+  }
+  if (std::memcmp(data, kQosMagic, sizeof(kQosMagic)) != 0 ||
+      data[4] != kQosVersion) {
+    return false;
+  }
+  *out_type = data[5];
+  *out_data_len = static_cast<uint16_t>((data[6] << 8) | data[7]);
+  uint64_t session_id = 0;
+  for (int i = 0; i < 8; ++i) {
+    session_id = (session_id << 8) | data[8 + i];
+  }
+  *out_session_id = session_id;
+  return true;
+}
+
+static std::atomic<bool> qos_responder_running = {false};
+
+// One responder per process, started the first time a title enables listening
+// and left running for the life of the emulator. A title that leaves and
+// re-enters matchmaking would otherwise pay a bind/teardown race on the same
+// port, and the registry it answers from is already keyed by session.
+static void QosResponderThread() {
+  xe::threading::set_name("XNet QoS Responder");
+
+  qos_socket_t sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock == kInvalidQosSocket) {
+    XELOGE("XNet QoS: responder could not open a socket");
+    qos_responder_running.store(false);
+    return;
+  }
+
+  int reuse = 1;
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+             reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+  sockaddr_in bind_addr = {};
+  bind_addr.sin_family = AF_INET;
+  bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind_addr.sin_port = htons(kQosProbePort);
+  if (bind(sock, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) !=
+      0) {
+    XELOGE("XNet QoS: responder could not bind UDP {}", kQosProbePort);
+    CloseQosSocket(sock);
+    qos_responder_running.store(false);
+    return;
+  }
+
+  XELOGI("XNet QoS: responder listening on UDP {}", kQosProbePort);
+
+  std::vector<uint8_t> in_buffer(1500);
+  std::vector<uint8_t> out_buffer;
+  while (true) {
+    sockaddr_in from = {};
+    qos_socklen_t from_len = sizeof(from);
+    const int received =
+        static_cast<int>(recvfrom(sock, reinterpret_cast<char*>(in_buffer.data()),
+                                  static_cast<int>(in_buffer.size()), 0,
+                                  reinterpret_cast<sockaddr*>(&from), &from_len));
+    if (received <= 0) {
+      continue;
+    }
+
+    uint8_t type = 0;
+    uint64_t session_id = 0;
+    uint16_t data_len = 0;
+    if (!ParseQosHeader(in_buffer.data(), static_cast<size_t>(received), &type,
+                        &session_id, &data_len) ||
+        type != kQosTypeProbe) {
+      continue;
+    }
+
+    qos_requests_received.fetch_add(1);
+    qos_probes_received.fetch_add(1);
+
+    std::vector<uint8_t> payload;
+    bool enabled = false;
+    {
+      std::lock_guard<std::mutex> lock(qos_listen_mutex);
+      auto it = qos_listeners.find(session_id);
+      if (it != qos_listeners.end()) {
+        enabled = it->second.enabled;
+        payload = it->second.data;
+      }
+    }
+
+    if (!enabled) {
+      // Answering "not listening" is a real answer - it is how a joining
+      // console learns the party is gone rather than timing out on it.
+      XELOGD("XNet QoS: probe for {:016X} from {}, not listening", session_id,
+             ip_to_string(from.sin_addr));
+      out_buffer.assign(kQosHeaderSize, 0);
+      BuildQosHeader(out_buffer.data(), kQosTypeReply, session_id, 0);
+      sendto(sock, reinterpret_cast<const char*>(out_buffer.data()),
+             static_cast<int>(out_buffer.size()), 0,
+             reinterpret_cast<sockaddr*>(&from), from_len);
+      qos_probe_replies_sent.fetch_add(1);
+      continue;
+    }
+
+    out_buffer.assign(kQosHeaderSize + payload.size(), 0);
+    BuildQosHeader(out_buffer.data(), kQosTypeReply, session_id,
+                   static_cast<uint16_t>(payload.size()));
+    if (!payload.empty()) {
+      std::memcpy(out_buffer.data() + kQosHeaderSize, payload.data(),
+                  payload.size());
+    }
+
+    sendto(sock, reinterpret_cast<const char*>(out_buffer.data()),
+           static_cast<int>(out_buffer.size()), 0,
+           reinterpret_cast<sockaddr*>(&from), from_len);
+
+    qos_probe_replies_sent.fetch_add(1);
+    if (!payload.empty()) {
+      qos_data_replies_sent.fetch_add(1);
+      qos_data_reply_bytes.fetch_add(static_cast<uint32_t>(payload.size()));
+    }
+
+    XELOGD("XNet QoS: answered probe for {:016X} from {} with {} bytes",
+           session_id, ip_to_string(from.sin_addr), payload.size());
+  }
+}
+
+static void EnsureQosResponder() {
+  bool expected = false;
+  if (!qos_responder_running.compare_exchange_strong(expected, true)) {
+    return;
+  }
+  std::thread(QosResponderThread).detach();
+}
+
+// Sends probes_count probes to one peer and waits for the first reply. Returns
+// the measured round trip in milliseconds, or -1 if nobody answered.
+static int32_t ProbeQosPeer(uint32_t peer_ip_net_order, uint64_t session_id,
+                            uint32_t probes_count,
+                            std::vector<uint8_t>* out_data) {
+  qos_socket_t sock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock == kInvalidQosSocket) {
+    return -1;
+  }
+
+  // cfgQosProbeTimeoutInSeconds is the console's own budget for this, and the
+  // title has already told us what it is.
+  const uint32_t timeout_seconds =
+      xnet_startup_params.cfgQosProbeTimeoutInSeconds
+          ? xnet_startup_params.cfgQosProbeTimeoutInSeconds
+          : 2;
+#ifdef XE_PLATFORM_WIN32
+  DWORD timeout = timeout_seconds * 1000;
+#else
+  timeval timeout = {};
+  timeout.tv_sec = timeout_seconds;
+#endif
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+  sockaddr_in peer = {};
+  peer.sin_family = AF_INET;
+  peer.sin_addr.s_addr = peer_ip_net_order;
+  peer.sin_port = htons(kQosProbePort);
+
+  uint8_t probe[kQosHeaderSize];
+  BuildQosHeader(probe, kQosTypeProbe, session_id, 0);
+
+  std::vector<uint8_t> reply(1500);
+  const uint32_t attempts = std::max(probes_count, uint32_t(1));
+  for (uint32_t attempt = 0; attempt < attempts; ++attempt) {
+    const auto sent_at = std::chrono::steady_clock::now();
+    if (sendto(sock, reinterpret_cast<const char*>(probe), sizeof(probe), 0,
+               reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) < 0) {
+      break;
+    }
+
+    const int received = static_cast<int>(
+        recv(sock, reinterpret_cast<char*>(reply.data()),
+             static_cast<int>(reply.size()), 0));
+    if (received < static_cast<int>(kQosHeaderSize)) {
+      continue;
+    }
+
+    uint8_t type = 0;
+    uint64_t reply_session = 0;
+    uint16_t data_len = 0;
+    if (!ParseQosHeader(reply.data(), static_cast<size_t>(received), &type,
+                        &reply_session, &data_len) ||
+        type != kQosTypeReply || reply_session != session_id) {
+      continue;
+    }
+
+    const auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - sent_at)
+                         .count();
+
+    if (data_len &&
+        static_cast<size_t>(received) >= kQosHeaderSize + data_len) {
+      out_data->assign(reply.data() + kQosHeaderSize,
+                       reply.data() + kQosHeaderSize + data_len);
+    }
+
+    CloseQosSocket(sock);
+    return static_cast<int32_t>(rtt);
+  }
+
+  CloseQosSocket(sock);
+  return -1;
+}
+
 dword_result_t NetDll_XNetQosServiceLookup_entry(dword_t caller, dword_t flags,
                                                  dword_t event_handle,
                                                  lpdword_t pqos) {
@@ -869,17 +1213,253 @@ dword_result_t NetDll_XNetQosRelease_entry(dword_t caller,
   if (!qos) {
     return X_STATUS_INVALID_PARAMETER;
   }
+
+  // Each answered probe carried a payload we allocated on the system heap and
+  // handed the guest a pointer to. XNetQosServiceLookup's empty result has
+  // count 0, so this is a no-op there.
+  const uint32_t count = qos->count;
+  for (uint32_t i = 0; i < count; ++i) {
+    const XNQOSINFO& info = qos->info[i];
+    if (info.data_ptr && (info.flags & XNET_XNQOSINFO_DATA_RECEIVED)) {
+      kernel_memory()->SystemHeapFree(uint32_t(info.data_ptr));
+    }
+  }
+
   kernel_memory()->SystemHeapFree(qos.guest_address());
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetQosRelease, kNetworking, kStub);
 
+static uint64_t ReadSessionId(const uint8_t* be_bytes) {
+  uint64_t session_id = 0;
+  for (int i = 0; i < 8; ++i) {
+    session_id = (session_id << 8) | be_bytes[i];
+  }
+  return session_id;
+}
+
 dword_result_t NetDll_XNetQosListen_entry(dword_t caller, lpvoid_t id,
                                           lpvoid_t data, dword_t data_size,
-                                          dword_t r7, dword_t flags) {
-  return X_ERROR_FUNCTION_FAILED;
+                                          dword_t bits_per_second,
+                                          dword_t flags) {
+  if (!id) {
+    return X_ERROR_SUCCESS;
+  }
+
+  const uint64_t session_id = ReadSessionId(id.as<const uint8_t*>());
+
+  XELOGI("XNetQosListen: session {:016X}, {} bytes, {} bits/sec, flags {:08X}",
+         session_id, data_size.value(), bits_per_second.value(), flags.value());
+
+  // The old stub returned X_ERROR_FUNCTION_FAILED, which is a title-visible
+  // "this console cannot host". Everything below is best-effort on a LAN and
+  // there is nothing here that can fail in a way the title should hear about.
+  std::lock_guard<std::mutex> lock(qos_listen_mutex);
+
+  if (flags & XNET_QOS_LISTEN_RELEASE) {
+    qos_listeners.erase(session_id);
+    XELOGI("XNetQosListen: released {:016X}", session_id);
+    return X_ERROR_SUCCESS;
+  }
+
+  auto& entry = qos_listeners[session_id];
+
+  if (flags & XNET_QOS_LISTEN_ENABLE) {
+    entry.enabled = true;
+    EnsureQosResponder();
+  }
+  if (flags & XNET_QOS_LISTEN_DISABLE) {
+    entry.enabled = false;
+  }
+  if (flags & XNET_QOS_LISTEN_SET_BITSPERSEC) {
+    entry.bits_per_second = bits_per_second.value();
+  }
+  if ((flags & XNET_QOS_LISTEN_SET_DATA) && data && data_size) {
+    // cfgQosDataLimitDiv4 is the console's own cap. Upstream assert_always()s
+    // past it; a truncated payload is worse than a rejected one, so refuse.
+    const uint32_t limit =
+        xnet_startup_params.cfgQosDataLimitDiv4
+            ? uint32_t(xnet_startup_params.cfgQosDataLimitDiv4) * 4
+            : 256;
+    if (data_size > limit) {
+      XELOGW("XNetQosListen: {} bytes exceeds the {}-byte QoS data limit",
+             data_size.value(), limit);
+      return X_ERROR_SUCCESS;
+    }
+
+    const uint8_t* payload = data.as<const uint8_t*>();
+    entry.data.assign(payload, payload + data_size);
+    XELOGI("XNetQosListen: stored {} bytes for {:016X}: {}", data_size.value(),
+           session_id, HexDumpPacket(payload, data_size.value()));
+  }
+
+  return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kSketchy);
+
+// The joining half of the above: probe each remote console named by the title
+// and hand back what it answered with. Was an unimplemented import - "!!" in
+// Halo 3's import table on both consoles - so a title that asked what the party
+// looked like got nothing back at all.
+dword_result_t NetDll_XNetQosLookup_entry(
+    dword_t caller, dword_t num_remote_consoles,
+    lpvoid_t remote_addresses_array_ptrs, lpvoid_t session_ids_array_ptrs,
+    lpvoid_t remote_keys_array_ptrs, dword_t num_gateways,
+    lpvoid_t gateways_array, lpvoid_t service_ids_array, dword_t probes_count,
+    dword_t bits_per_second, dword_t flags, dword_t event_handle,
+    lpdword_t qos_ptr) {
+  XELOGI("XNetQosLookup: {} consoles, {} gateways, {} probes",
+         num_remote_consoles.value(), num_gateways.value(),
+         probes_count.value());
+
+  if (!qos_ptr) {
+    return uint32_t(X_WSAError::X_WSAEFAULT);
+  }
+
+  // One entry per remote console, plus one per gateway so the indices the title
+  // reads back line up with the arrays it passed in. We have no security
+  // gateway on a LAN, so those entries complete with no data.
+  const uint32_t count = num_remote_consoles + num_gateways;
+
+  struct QosTarget {
+    uint64_t session_id = 0;
+    uint32_t ip = 0;  // network byte order, 0 = nothing to probe
+  };
+  auto targets = std::make_shared<std::vector<QosTarget>>(count);
+
+  auto* memory = kernel_memory();
+
+  if (session_ids_array_ptrs) {
+    const xe::be<uint32_t>* ptrs =
+        session_ids_array_ptrs.as<const xe::be<uint32_t>*>();
+    for (uint32_t i = 0; i < num_remote_consoles; ++i) {
+      if (!ptrs[i]) {
+        continue;
+      }
+      (*targets)[i].session_id = ReadSessionId(
+          memory->TranslateVirtual<const uint8_t*>(uint32_t(ptrs[i])));
+    }
+  }
+
+  if (remote_addresses_array_ptrs) {
+    const xe::be<uint32_t>* ptrs =
+        remote_addresses_array_ptrs.as<const xe::be<uint32_t>*>();
+    for (uint32_t i = 0; i < num_remote_consoles; ++i) {
+      if (!ptrs[i]) {
+        continue;
+      }
+      const auto* xnaddr =
+          memory->TranslateVirtual<const XNADDR*>(uint32_t(ptrs[i]));
+      // ina is already in network byte order, the same field
+      // XNetXnAddrToInAddr hands to the socket layer.
+      (*targets)[i].ip = xnaddr->ina.s_addr;
+    }
+  }
+
+  const uint32_t size = sizeof(XNQOS) + (sizeof(XNQOSINFO) * count);
+  const uint32_t qos_address = memory->SystemHeapAlloc(size);
+  if (!qos_address) {
+    return uint32_t(X_WSAError::X_WSAEFAULT);
+  }
+  auto* qos = memory->TranslateVirtual<XNQOS*>(qos_address);
+  std::memset(qos, 0, size);
+  *qos_ptr = qos_address;
+
+  // Titles poll count_pending to decide whether a lookup is still running; it
+  // has to be non-zero on return or they spin issuing fresh lookups.
+  qos->count_pending = count;
+
+  auto run = [qos, count, targets, probes_count = probes_count.value(),
+              event_handle = event_handle.value()]() {
+    xe::threading::set_name("XNet QoS Lookup");
+
+    for (uint32_t i = 0; i < count; ++i) {
+      XNQOSINFO& info = qos->info[i];
+      const auto& target = (*targets)[i];
+
+      std::vector<uint8_t> data;
+      int32_t rtt = -1;
+      if (target.ip) {
+        rtt = ProbeQosPeer(target.ip, target.session_id, probes_count, &data);
+      }
+
+      uint8_t info_flags = XNET_XNQOSINFO_COMPLETE;
+
+      if (rtt >= 0) {
+        info_flags |= XNET_XNQOSINFO_TARGET_CONTACTED;
+        info.rtt_min_in_msecs = static_cast<uint16_t>(rtt);
+        info.rtt_med_in_msecs = static_cast<uint16_t>(rtt);
+        info.probes_xmit = static_cast<uint16_t>(std::max(probes_count, 1u));
+        info.probes_recv = 1;
+      } else {
+        // Nobody answered. TARGET_DISABLED is what the title reads as "this
+        // one is not accepting", which is true and is not the same claim as
+        // "the network is broken".
+        info_flags |= XNET_XNQOSINFO_TARGET_DISABLED;
+        info.probes_xmit = static_cast<uint16_t>(std::max(probes_count, 1u));
+        info.probes_recv = 0;
+      }
+
+      if (!data.empty()) {
+        const uint32_t data_address = kernel_memory()->SystemHeapAlloc(
+            static_cast<uint32_t>(data.size()));
+        if (data_address) {
+          std::memcpy(kernel_memory()->TranslateVirtual<uint8_t*>(data_address),
+                      data.data(), data.size());
+          info.data_ptr = data_address;
+          info.data_len = static_cast<uint16_t>(data.size());
+          info_flags |= XNET_XNQOSINFO_DATA_RECEIVED;
+        }
+      }
+
+      info.up_bits_per_sec = 5 * 1024 * 1024;
+      info.down_bits_per_sec = 5 * 1024 * 1024;
+      info.flags = info_flags;
+
+      qos->count_pending =
+          std::max(int32_t(uint32_t(qos->count_pending)) - 1, 0);
+      qos->count = uint32_t(qos->count) + 1;
+
+      XELOGI("XNetQosLookup: {} of {} -> rtt {} ms, {} bytes", i + 1, count,
+             rtt, data.size());
+    }
+
+    if (event_handle && uint32_t(qos->count) > 0) {
+      xboxkrnl::xeNtSetEvent(event_handle, nullptr);
+    }
+  };
+
+  // A probes_count of zero means the title wants the answer on return rather
+  // than through the event - upstream found 5345081A relies on it.
+  if (probes_count) {
+    std::thread(run).detach();
+  } else {
+    XELOGI("XNetQosLookup: synchronous lookup");
+    run();
+  }
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetQosLookup, kNetworking, kSketchy);
+
+dword_result_t NetDll_XNetQosGetListenStats_entry(
+    dword_t caller, lpvoid_t session_id_ptr,
+    pointer_t<XNQOSLISTENSTATS> qos_stats_ptr) {
+  if (!qos_stats_ptr) {
+    return X_ERROR_SUCCESS;
+  }
+
+  qos_stats_ptr->size_of_struct = sizeof(XNQOSLISTENSTATS);
+  qos_stats_ptr->requests_received_count = qos_requests_received.load();
+  qos_stats_ptr->probes_received_count = qos_probes_received.load();
+  qos_stats_ptr->slots_full_discards_count = 0;
+  qos_stats_ptr->data_replies_sent_count = qos_data_replies_sent.load();
+  qos_stats_ptr->data_reply_bytes_sent = qos_data_reply_bytes.load();
+  qos_stats_ptr->probe_replies_sent_count = qos_probe_replies_sent.load();
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetQosGetListenStats, kNetworking, kImplemented);
 
 // The secure-link handshake a title performs before it will talk to a peer.
 //
@@ -1316,8 +1896,13 @@ dword_result_t NetDll_recvfrom_entry(dword_t caller, dword_t socket_handle,
     XThread::SetLastError(socket->GetLastWSAError());
   } else if (ret > 0) {
     // Only log when we actually receive data
-    XELOGD("NetDll_recvfrom: socket={:08X}, received {} bytes",
-           socket_handle.value(), ret);
+    const uint32_t from_ip = from_ptr ? uint32_t(from_ptr->sin_addr) : 0;
+    XELOGD("NetDll_recvfrom: socket={:08X}, received {} bytes from {}.{}.{}.{}:{}",
+           socket_handle.value(), ret, (from_ip >> 24) & 0xFF,
+           (from_ip >> 16) & 0xFF, (from_ip >> 8) & 0xFF, from_ip & 0xFF,
+           from_ptr ? uint16_t(from_ptr->sin_port) : 0);
+    XELOGD("NetDll_recvfrom: payload {}",
+           HexDumpPacket(buf_ptr.as<uint8_t*>(), static_cast<size_t>(ret)));
   }
 
   return ret;
@@ -1352,6 +1937,11 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
   XELOGD("NetDll_sendto: socket={:08X}, len={}, to={}.{}.{}.{}:{}",
          socket_handle.value(), buf_len.value(), (to_ip >> 24) & 0xFF,
          (to_ip >> 16) & 0xFF, (to_ip >> 8) & 0xFF, to_ip & 0xFF, to_port);
+  if (buf_ptr) {
+    XELOGD("NetDll_sendto: payload {}",
+           HexDumpPacket(buf_ptr.as<uint8_t*>(),
+                         static_cast<size_t>(buf_len.value())));
+  }
 
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
