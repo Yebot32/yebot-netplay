@@ -148,7 +148,7 @@ object SettingsSchema {
             // Below the dropdown on purpose: with this on, the dropdown above
             // stops being the rate and becomes the ceiling, so it has to have
             // been read first.
-            b("GPU", "framerate_limit_adaptive", "Adaptive frame rate limit", false),
+            b("GPU", "framerate_limit_adaptive", "Adaptive frame rate limit", true),
             b("GPU", "guest_display_refresh_cap", "Cap guest display refresh (VSync)", true),
             b("GPU", "store_shaders", "Store shaders", true),
             b("GPU", "resolve_resolution_scale_fill_half_pixel_offset", "Resolve scale: fill half-pixel offset", true),

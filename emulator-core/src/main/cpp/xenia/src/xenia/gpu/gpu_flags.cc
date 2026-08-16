@@ -66,7 +66,7 @@ void SetGuestDisplayRefreshCap(bool value) {
 }
 
 DEFINE_bool(
-    framerate_limit_adaptive, false,
+    framerate_limit_adaptive, true,
     "Pick the host frame rate limit from what the device actually sustains, "
     "and then HOLD it, instead of using framerate_limit directly.\n"
     "The limit settles on one of 30/45/60/90/120 and only moves when the "
