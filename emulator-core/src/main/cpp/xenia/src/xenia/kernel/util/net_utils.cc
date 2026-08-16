@@ -189,7 +189,13 @@ MacAddress GetConsoleMacAddress() {
       }
     }
     cached = GenerateMacAddress();
-    OVERRIDE_string(console_mac_address, cached.to_string());
+    // SetConfigValue, NOT OVERRIDE_string. OVERRIDE_* is SetGameConfigValue,
+    // which its own comment says "is never written to the global config, and
+    // is dropped on the next title load" - so the generated MAC applied for
+    // the session and then vanished, and every boot rolled a new identity.
+    dynamic_cast<cvar::ConfigVar<std::string>*>(
+        &ACCESS_CVar(console_mac_address))
+        ->SetConfigValue(cached.to_string());
     config::SaveConfig();
     XELOGI("Generated a console MAC address: {}", cached.to_printable_form());
   });
