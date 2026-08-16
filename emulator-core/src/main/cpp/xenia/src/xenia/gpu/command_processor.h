@@ -190,6 +190,12 @@ class CommandProcessor {
   // vblank timing.
   void ThrottlePresentation();
 
+  // Choose the rung the adaptive limiter should hold, given how long the frame
+  // that just ended actually took to produce. Separated from
+  // ThrottlePresentation so the policy can be reasoned about (and changed)
+  // without touching the sleep loop.
+  uint32_t UpdateAdaptiveFramerateLimit(double frame_work_ms);
+
   // May be called not only from the command processor thread when the command
   // processor is paused, and the termination of this function may be explicitly
   // awaited.
@@ -663,6 +669,30 @@ class CommandProcessor {
 
   // For host frame rate limiting at IssueSwap
   uint64_t last_swap_time_ = 0;
+
+  // Adaptive frame limiter state. All of it is touched only from the command
+  // processor thread, inside ThrottlePresentation.
+  //
+  // The rungs are the ones a display actually runs at; a limiter free to pick
+  // any integer lands on rates that beat against the panel's refresh and look
+  // worse than a lower, steady one.
+  static constexpr uint32_t kAdaptiveRungs[] = {30, 45, 60, 90, 120};
+  static constexpr size_t kAdaptiveRungCount =
+      sizeof(kAdaptiveRungs) / sizeof(kAdaptiveRungs[0]);
+  // Start at 60: the console's own rate, and the answer for most titles that
+  // are not in trouble. The first few frames of a boot are not representative
+  // of anything, so starting high and settling down beats starting low and
+  // climbing through every rung on every launch.
+  size_t adaptive_rung_ = 2;
+  // Worst frame cost seen in the current window. The WORST, not the mean: a
+  // rate that only holds between hitches is not a rate the player experiences.
+  double adaptive_window_worst_ms_ = 0.0;
+  uint32_t adaptive_window_frames_ = 0;
+  // Consecutive windows that had room for the next rung up. Stepping up needs
+  // several; stepping down needs one. Asymmetric on purpose - dropping a rate
+  // late is a stutter the player sees, raising it early is an oscillation.
+  uint32_t adaptive_headroom_windows_ = 0;
+  uint32_t adaptive_last_logged_ = 0;
 
  private:
   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};

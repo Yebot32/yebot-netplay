@@ -47,6 +47,7 @@ object SettingDescriptions {
         "gpu" to "Graphics backend to use for rendering (Vulkan or null)",
         "gpu_stall_spin_iterations" to "How long the graphics thread busy-waits for the game to send more work before going to sleep. Lower frees up a CPU core and cuts heat; too low can add a little latency to each batch of drawing. 0 sleeps immediately",
         "framerate_limit" to "Caps how many frames the emulator presents per second. The console never went above 60, so frames beyond your screen's refresh are just heat and battery. Unlimited lets it run as fast as it can",
+        "framerate_limit_adaptive" to "Picks the limit from what your device actually sustains and holds it steady, settling on 30, 45, 60, 90 or 120. A rate that stays put feels smoother than one that keeps lurching. With this on, the limit above becomes the highest it may choose",
         "gpu_allow_invalid_fetch_constants" to "Tolerate invalid texture/vertex fetch constants instead of failing; works around errors in some games",
         "guest_display_refresh_cap" to "Cap vblanks at the console's 50/60Hz rate; off lets the game run as fast as possible",
         "guest_scheduler" to "Run guest threads as cooperative fibers on a few host threads instead of one thread each; takes effect next launch",

@@ -591,9 +591,116 @@ void CommandProcessor::FrameStatsEndSwap(uint64_t begin_ns) {
   }
 }
 
+// Settle on the highest rung the device is actually holding, then stay there.
+//
+// The input is the time the frame took to PRODUCE - measured before the
+// throttle sleeps, so it is the cost of the work and not the cost plus
+// whatever we chose to wait. That distinction is the whole reason this can
+// tell "comfortably meeting 60" from "only just meeting 60": once a limiter is
+// active the achieved frame rate equals the target either way, so the achieved
+// rate cannot answer the question and the work time can.
+uint32_t CommandProcessor::UpdateAdaptiveFramerateLimit(double frame_work_ms) {
+  // A window long enough that one slow frame does not move the rate, short
+  // enough to react inside a scene change. ~1s at 60.
+  constexpr uint32_t kWindowFrames = 60;
+  // Steps up only after this many consecutive windows with room to spare.
+  constexpr uint32_t kHeadroomWindowsToRise = 3;
+  // The next rung has to fit in this fraction of its budget before we take it,
+  // so a frame that would only just fit does not cause a rise-then-fall cycle.
+  constexpr double kRiseMargin = 0.80;
+  // Below its own budget by this much before we drop - a rung is allowed to
+  // miss slightly rather than abandoning a rate over rounding.
+  constexpr double kFallMargin = 1.05;
+
+  // framerate_limit doubles as the ceiling here, so "never above 60" is said in
+  // one place whether or not adaptive is on. Unlimited means no ceiling.
+  const uint32_t ceiling_fps = cvars::framerate_limit
+                                   ? cvars::framerate_limit
+                                   : kAdaptiveRungs[kAdaptiveRungCount - 1];
+  size_t ceiling_rung = 0;
+  for (size_t i = 0; i < kAdaptiveRungCount; ++i) {
+    if (kAdaptiveRungs[i] <= ceiling_fps) {
+      ceiling_rung = i;
+    }
+  }
+  if (adaptive_rung_ > ceiling_rung) {
+    adaptive_rung_ = ceiling_rung;
+  }
+
+  // A "frame" this long is a disc load, a shader compile or a stall, not a
+  // frame rate. MEASURED: Halo 3's boot produces a 1780 ms one, which without
+  // this pins the limiter to its lowest rung before the title has drawn
+  // anything. Such frames are dropped from the statistic entirely rather than
+  // clamped, because a load says nothing about the rate that follows it.
+  constexpr double kNotAFrameMs = 250.0;
+  if (frame_work_ms <= kNotAFrameMs) {
+    adaptive_window_worst_ms_ =
+        std::max(adaptive_window_worst_ms_, frame_work_ms);
+  }
+  if (++adaptive_window_frames_ < kWindowFrames) {
+    return kAdaptiveRungs[adaptive_rung_];
+  }
+  // Every frame in the window was a stall. Hold the current rung rather than
+  // deciding anything from no data.
+  if (adaptive_window_worst_ms_ <= 0.0) {
+    adaptive_window_frames_ = 0;
+    return kAdaptiveRungs[adaptive_rung_];
+  }
+
+  const double worst_ms = adaptive_window_worst_ms_;
+  adaptive_window_worst_ms_ = 0.0;
+  adaptive_window_frames_ = 0;
+
+  const double current_budget_ms = 1000.0 / kAdaptiveRungs[adaptive_rung_];
+
+  if (worst_ms > current_budget_ms * kFallMargin) {
+    // Not holding this rate. Drop straight to the highest rung the measured
+    // cost fits, rather than one rung at a time: a title that has gone from a
+    // menu into a firefight should not spend three windows stuttering its way
+    // down.
+    size_t target = 0;
+    for (size_t i = 0; i <= ceiling_rung; ++i) {
+      if (worst_ms <= 1000.0 / kAdaptiveRungs[i]) {
+        target = i;
+      }
+    }
+    adaptive_rung_ = target;
+    adaptive_headroom_windows_ = 0;
+  } else if (adaptive_rung_ < ceiling_rung &&
+             worst_ms <= (1000.0 / kAdaptiveRungs[adaptive_rung_ + 1]) *
+                             kRiseMargin) {
+    if (++adaptive_headroom_windows_ >= kHeadroomWindowsToRise) {
+      ++adaptive_rung_;
+      adaptive_headroom_windows_ = 0;
+    }
+  } else {
+    adaptive_headroom_windows_ = 0;
+  }
+
+  const uint32_t limit = kAdaptiveRungs[adaptive_rung_];
+  if (limit != adaptive_last_logged_) {
+    adaptive_last_logged_ = limit;
+    XELOGI("Adaptive frame limit: {} FPS (worst frame {:.1f} ms)", limit,
+           worst_ms);
+  }
+  return limit;
+}
+
 void CommandProcessor::ThrottlePresentation() {
   // Host frame rate limiting based on framerate_limit cvar.
-  const uint32_t framerate_limit = cvars::framerate_limit;
+  uint32_t framerate_limit = cvars::framerate_limit;
+
+  if (cvars::framerate_limit_adaptive) {
+    // Cost of the frame that just ended, before any throttle sleep.
+    const uint64_t tick_freq_now = Clock::guest_tick_frequency();
+    const uint64_t work_ticks = Clock::QueryGuestTickCount() - last_swap_time_;
+    const double work_ms = tick_freq_now ? static_cast<double>(work_ticks) /
+                                               (static_cast<double>(
+                                                    tick_freq_now) /
+                                                1000.0)
+                                         : 0.0;
+    framerate_limit = UpdateAdaptiveFramerateLimit(work_ms);
+  }
 
   if (framerate_limit == 0) {
     // No host frame limiting

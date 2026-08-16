@@ -65,6 +65,23 @@ void SetGuestDisplayRefreshCap(bool value) {
   OVERRIDE_bool(guest_display_refresh_cap, value);
 }
 
+DEFINE_bool(
+    framerate_limit_adaptive, false,
+    "Pick the host frame rate limit from what the device actually sustains, "
+    "and then HOLD it, instead of using framerate_limit directly.\n"
+    "The limit settles on one of 30/45/60/90/120 and only moves when the "
+    "measured cost of a frame says it has to - it steps down promptly when "
+    "frames stop fitting the budget, and back up only after a sustained "
+    "stretch with real headroom, so it does not oscillate between two rates.\n"
+    "A steady 30 reads as smoother than an average of 45 that keeps lurching, "
+    "and an unthrottled GPU on a handheld is pinned at its maximum clock "
+    "whether or not the extra frames were worth anything - MEASURED on a "
+    "Tab S9: capping a title below what it could reach dropped the SoC 10C "
+    "and took GPU utilisation from 99% to idle-between-frames.\n"
+    "framerate_limit becomes the CEILING when this is on (Unlimited means the "
+    "top rung), so there is still one place to say 'never above 60'.",
+    "GPU");
+
 void SetFramerateLimit(uint32_t value) {
   OVERRIDE_uint32(framerate_limit, value);
 }
