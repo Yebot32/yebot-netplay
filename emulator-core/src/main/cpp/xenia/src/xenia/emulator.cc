@@ -28,6 +28,7 @@
 #include "xenia/base/debugging.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/literals.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/platform.h"
@@ -113,6 +114,20 @@ DEFINE_CVar(launch_data, "",
             "Used internally for title-to-title launches.",
             "General", true, std::string);
 
+// The LOADED image - decrypted, decompressed, exactly the bytes the CPU
+// executes - as opposed to dump_xex, which writes the raw container to the
+// working directory and is therefore no use for reading guest code.
+//
+// This exists because dump_functions_at can only dump a function the title has
+// actually EXECUTED, so reading a guest routine meant driving two consoles
+// through a System Link join once per function. The image is in memory from
+// module load, so one boot yields every function at once and the disassembly
+// can be done offline. See xenra-handoff-22 section 5.
+DEFINE_bool(dump_module_image, false,
+            "Write the loaded (decrypted, decompressed) executable image to "
+            "<log dir>/module_<base>_<size>.bin at launch.",
+            "CPU");
+
 DEFINE_bool(dump_xex, false, "Dump the main XEX to current directory on launch",
             "General");
 
@@ -130,6 +145,8 @@ DEFINE_bool(guest_crash_is_fatal, true,
             "as a hang. Disable to keep the thread parked for post-mortem "
             "inspection.",
             "General");
+
+DECLARE_path(log_file);
 
 DECLARE_string(gpu);
 DECLARE_string(apu);
@@ -2452,6 +2469,29 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (XFAILED(result)) {
     XELOGE("Failed to initialize user module {}", path);
     return result;
+  }
+
+  if (cvars::dump_module_image && module->xex_module()) {
+    const uint32_t base = module->xex_module()->base_address();
+    const uint32_t size = module->xex_module()->image_size();
+    auto* host = memory()->TranslateVirtual(base);
+    // Next to the log, the one directory known writable on every platform -
+    // same choice PPCTranslator::DumpTargetFunction makes for fndump files.
+    std::filesystem::path dir = cvars::log_file.empty()
+                                    ? xe::filesystem::GetExecutableFolder()
+                                    : cvars::log_file.parent_path();
+    std::filesystem::path out =
+        dir / fmt::format("module_{:08X}_{:08X}.bin", base, size);
+    if (!host || !size) {
+      XELOGE("dump_module_image: nothing mapped at {:08X}", base);
+    } else if (FILE* f = xe::filesystem::OpenFile(out, "wb")) {
+      const size_t written = fwrite(host, 1, size, f);
+      fclose(f);
+      XELOGI("dump_module_image: wrote {} of {} bytes to {}", written, size,
+             xe::path_to_utf8(out));
+    } else {
+      XELOGE("dump_module_image: cannot write {}", xe::path_to_utf8(out));
+    }
   }
   // Grab the current title ID.
   xex2_opt_execution_info* info = nullptr;

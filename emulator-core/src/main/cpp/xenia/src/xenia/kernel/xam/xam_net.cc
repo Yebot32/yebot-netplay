@@ -7,12 +7,14 @@
  ******************************************************************************
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1030,6 +1032,17 @@ dword_result_t NetDll_XNetGetSystemLinkPort_entry(dword_t caller,
 
   *port_ptr = xe::byte_swap(system_link_port.load());
 
+  // Once only. Worth seeing because the value we hand back here is OURS - the
+  // titles tested never call XNetSetSystemLinkPort, so 3074 is a Xenra default
+  // and it is also what GetConsoleXnAddr writes into wPortOnline. The reference
+  // netplay fork leaves wPortOnline ZERO outside Xbox Live. Not changed,
+  // because both consoles set it identically so it cannot desync them, and it
+  // rides in the advertisement, which currently works.
+  static std::atomic<bool> logged = {false};
+  if (!logged.exchange(true)) {
+    XELOGI("XNetGetSystemLinkPort: {}", system_link_port.load());
+  }
+
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetSystemLinkPort, kNetworking, kImplemented);
@@ -1500,6 +1513,16 @@ static int32_t ProbeQosPeer(uint32_t peer_ip_net_order, uint64_t session_id,
 dword_result_t NetDll_XNetQosServiceLookup_entry(dword_t caller, dword_t flags,
                                                  dword_t event_handle,
                                                  lpdword_t pqos) {
+  // Once only - a title that polls this would otherwise bury the trace. Logged
+  // at all because this returns an EMPTY result and says so to nobody, and a
+  // title that needed a real answer here would look, from the log, like it had
+  // never asked. Rule 79.
+  static std::atomic<bool> logged = {false};
+  if (!logged.exchange(true)) {
+    XELOGI("XNetQosServiceLookup: flags {:08X} -> empty result (stub)",
+           flags.value());
+  }
+
   // Set pqos as some games will try accessing it despite non-successful result
   if (pqos) {
     auto qos_guest = kernel_memory()->SystemHeapAlloc(sizeof(XNQOS));
@@ -1802,6 +1825,18 @@ DECLARE_XAM_EXPORT1(NetDll_XNetConnect, kNetworking, kStub);
 
 dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller,
                                                  dword_t addr) {
+  // Once per address, not once per call - titles poll this in a loop until it
+  // reports CONNECTED. It was silent, so a title stuck waiting on a peer we
+  // never report as connected would have left no trace at all. Rule 79.
+  static std::mutex mutex;
+  static std::set<uint32_t> seen;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (seen.insert(addr.value()).second) {
+      XELOGI("XNetGetConnectStatus({:08X}) -> CONNECTED", addr.value());
+    }
+  }
+
   return XNET_CONNECT_STATUS_CONNECTED;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetConnectStatus, kNetworking, kStub);
@@ -2454,14 +2489,61 @@ dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetCreateKey, kNetworking, kStub);
 
+// Both of these returned 0 with NO log line of any kind, so "the title never
+// registers a key" was never a statement anybody could make about them - rule
+// 79, which has now cost this project four wrong conclusions. The registry is
+// deliberately observational: nothing on a LAN consults it yet, and the point
+// of landing it is to find out from a trace whether either title depends on
+// registration having happened. Do not cite it as a netplay fix.
+//
+// The reference netplay fork does keep this state - it routes a System Link
+// key to SetSystemlinkID() and consults that when resolving peers - so if a
+// title turns out to care, this is where the behaviour goes.
+static std::mutex registered_key_mutex;
+static std::map<uint64_t, std::array<uint8_t, 16>> registered_keys;
+
 dword_result_t NetDll_XNetRegisterKey_entry(dword_t caller, lpdword_t key_id,
                                             lpdword_t exchange_key) {
+  if (!key_id) {
+    XELOGW("XNetRegisterKey: null key id");
+    return 0;
+  }
+
+  const uint64_t session_id =
+      ReadSessionId(reinterpret_cast<const uint8_t*>(key_id.host_address()));
+
+  std::array<uint8_t, 16> key{};
+  if (exchange_key) {
+    std::memcpy(key.data(),
+                reinterpret_cast<const uint8_t*>(exchange_key.host_address()),
+                key.size());
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(registered_key_mutex);
+    registered_keys[session_id] = key;
+  }
+
+  XELOGI("XNetRegisterKey: session {:016X}, key {}", session_id,
+         HexDumpPacket(key.data(), key.size()));
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetRegisterKey, kNetworking, kStub);
 
 dword_result_t NetDll_XNetUnregisterKey_entry(dword_t caller,
                                               lpdword_t key_id) {
+  if (!key_id) {
+    return 0;
+  }
+
+  const uint64_t session_id =
+      ReadSessionId(reinterpret_cast<const uint8_t*>(key_id.host_address()));
+  {
+    std::lock_guard<std::mutex> lock(registered_key_mutex);
+    registered_keys.erase(session_id);
+  }
+
+  XELOGI("XNetUnregisterKey: session {:016X}", session_id);
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterKey, kNetworking, kStub);
