@@ -52,6 +52,13 @@ namespace cpu {
 // tolerating "0x" and "sub_" prefixes.
 bool GuestAddressInList(const std::string& list, uint32_t address);
 
+// As above, but true when any listed address falls inside [begin, end). An
+// address taken from a trace or a GuestScheduler watchdog dump is a program
+// counter somewhere INSIDE a function, not its entry, so matching on equality
+// alone never fires for the case you actually want to debug.
+bool GuestAddressListIntersects(const std::string& list, uint32_t begin,
+                                uint32_t end);
+
 }  // namespace cpu
 }  // namespace xe
 

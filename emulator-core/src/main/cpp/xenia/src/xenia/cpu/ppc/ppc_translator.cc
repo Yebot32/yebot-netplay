@@ -296,7 +296,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
   if (cvars::disassemble_functions) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoAllDisasm;
   }
-  const bool dump_this_function = IsDumpTarget(function->address());
+  const bool dump_this_function = IsDumpCandidate(function->address());
   if (dump_this_function) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoAllDisasm;
   }
@@ -392,7 +392,8 @@ bool PPCTranslator::Translate(GuestFunction* function,
 
   DumpMachineCode(function);
 
-  if (dump_this_function) {
+  if (dump_this_function &&
+      IsDumpTargetRange(function->address(), function->end_address())) {
     DumpTargetFunction(function);
   }
 
@@ -402,6 +403,30 @@ bool PPCTranslator::Translate(GuestFunction* function,
 bool PPCTranslator::IsDumpTarget(uint32_t address) {
   return !cvars::dump_functions_at.empty() &&
          GuestAddressInList(cvars::dump_functions_at, address);
+}
+
+// The address you have is almost never a function entry. A GuestScheduler
+// watchdog dump gives an `lr`, and a trace gives a program counter - both point
+// INTO a function, so matching entry addresses alone means the one function you
+// wanted to read is the one you never get.
+//
+// Extents are only known after the scan, but the disassembly has to be
+// requested before it, so this is deliberately two-stage: a generous window
+// below the target decides whether to BUILD debug info, and the exact
+// containment test below decides whether to WRITE the file. The window costs
+// disassembly for a handful of functions that are then discarded; enabling it
+// for every function instead is what makes a title of this size crawl.
+bool PPCTranslator::IsDumpCandidate(uint32_t address) {
+  static constexpr uint32_t kMaxFunctionSpan = 0x20000;
+  return !cvars::dump_functions_at.empty() &&
+         GuestAddressListIntersects(cvars::dump_functions_at, address,
+                                    address + kMaxFunctionSpan);
+}
+
+bool PPCTranslator::IsDumpTargetRange(uint32_t address, uint32_t end_address) {
+  return !cvars::dump_functions_at.empty() &&
+         GuestAddressListIntersects(cvars::dump_functions_at, address,
+                                    end_address + 4);
 }
 
 void PPCTranslator::DumpTargetFunction(GuestFunction* function) {

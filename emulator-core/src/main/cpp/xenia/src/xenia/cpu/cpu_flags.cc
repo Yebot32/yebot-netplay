@@ -119,5 +119,39 @@ bool GuestAddressInList(const std::string& list, uint32_t address) {
   return false;
 }
 
+bool GuestAddressListIntersects(const std::string& list, uint32_t begin,
+                                uint32_t end) {
+  if (begin >= end) {
+    return false;
+  }
+  for (size_t pos = 0; pos < list.size();) {
+    size_t entry_end = list.find(',', pos);
+    if (entry_end == std::string::npos) {
+      entry_end = list.size();
+    }
+    std::string entry = list.substr(pos, entry_end - pos);
+    pos = entry_end + 1;
+    size_t first = entry.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+      continue;
+    }
+    entry = entry.substr(first, entry.find_last_not_of(" \t") - first + 1);
+    if (entry.size() > 2 && entry[0] == '0' &&
+        (entry[1] == 'x' || entry[1] == 'X')) {
+      entry = entry.substr(2);
+    }
+    if (entry.size() > 4 && (entry.compare(0, 4, "sub_") == 0 ||
+                             entry.compare(0, 4, "SUB_") == 0)) {
+      entry = entry.substr(4);
+    }
+    uint32_t parsed = 0;
+    if (std::sscanf(entry.c_str(), "%X", &parsed) == 1 && parsed >= begin &&
+        parsed < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace cpu
 }  // namespace xe
