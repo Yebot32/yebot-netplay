@@ -270,6 +270,12 @@ static_assert_size(XNetStartupParams, 0xD);
 
 XNetStartupParams xnet_startup_params = {0};
 
+// Defined with the rest of the QoS layer below.
+static void EnsureQosResponder();
+// Peer MAC cache, defined next to the QoS packet code that feeds it.
+static void RememberPeerMac(uint32_t ina_net_order, const MacAddress& mac);
+static bool LookupPeerMac(uint32_t ina_net_order, MacAddress* out_mac);
+
 dword_result_t NetDll_XNetStartup_entry(dword_t caller,
                                         pointer_t<XNetStartupParams> params) {
   XELOGI("NetDll_XNetStartup: caller={}, params={:08X}", caller.value(),
@@ -278,6 +284,26 @@ dword_result_t NetDll_XNetStartup_entry(dword_t caller,
   if (params) {
     assert_true(params->cfgSizeOfStruct == sizeof(XNetStartupParams));
     std::memcpy(&xnet_startup_params, params, sizeof(XNetStartupParams));
+  }
+
+  // *** THE QoS RESPONDER USED TO START ONLY WHEN THE LOCAL TITLE CALLED
+  // XNetQosListen(ENABLE), AND THAT IS THE WRONG TRIGGER. *** On real hardware
+  // QoS is answered by the XNet layer, not the title: a console replies to a
+  // probe whether or not anything is registered, and "nothing is listening for
+  // that session" is itself a valid answer the responder below already knows
+  // how to send.
+  //
+  // MEASURED on two consoles, 2026-08-17: DiRT 3 hosting a System Link race
+  // never calls XNetQosListen at all, so nothing was bound on UDP 13000, so
+  // the joining console's eight probes went into silence -
+  //   XNetQosLookup: 1 of 1 -> rtt -1 ms, 0 bytes
+  // - and the title reported "connection failed". Silence and "not listening"
+  // are very different claims and the peer was neither down nor unreachable.
+  //
+  // Binding when the network comes up costs one idle UDP socket per emulator
+  // instance, which is what a console does anyway.
+  if (cvars::network_mode == NETWORK_MODE::LAN) {
+    EnsureQosResponder();
   }
 
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
@@ -697,10 +723,21 @@ dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
   // different consoles the id 0.
   const MacAddress mac(addr_ptr->abEnet);
   if (!mac.to_uint64()) {
+    // *** THIS HAD NO LOG LINE AT ALL, WHICH IS WHY "the trace says the
+    // machine id path is never exercised" WAS AN UNSAFE READING OF IT ***
+    // (rule 68 - and I made exactly that mistake on 2026-08-17). An XNADDR
+    // with a zero MAC is what XNetInAddrToXnAddr hands back for a peer we
+    // have only ever seen as an IP, so this is the expected shape when a
+    // title asks "who just contacted me".
+    XELOGW("XNetXnAddrToMachineId: zero MAC, no machine id for ina={}",
+           ip_to_string(addr_ptr->ina));
     return uint32_t(X_WSAError::X_WSAEINVAL);
   }
 
   *id_ptr = GetMachineId(mac.to_uint64());
+
+  XELOGI("XNetXnAddrToMachineId: ina={} mac={} -> {:016X}",
+         ip_to_string(addr_ptr->ina), mac.to_string(), uint64_t(*id_ptr));
 
   return X_ERROR_SUCCESS;
 }
@@ -809,6 +846,11 @@ dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
 
   in_addr->s_addr = xn_addr->ina.s_addr;
 
+  // The title just handed us this peer's IP and MAC together. That is the one
+  // place the pairing arrives for free, so record it - XNetInAddrToXnAddr has
+  // to answer the reverse question later with nothing but the address.
+  RememberPeerMac(xn_addr->ina.s_addr, MacAddress(xn_addr->abEnet));
+
   XELOGI("XNetXnAddrToInAddr: peer -> {}", ip_to_string(*in_addr));
 
   return X_ERROR_SUCCESS;
@@ -834,14 +876,28 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
     return X_ERROR_SUCCESS;
   }
 
-  // A peer we have only ever seen as an IP. We know its address and nothing
-  // else; abEnet stays zero because inventing a MAC here would collide with a
-  // real one and make two consoles look like the same machine.
   xn_addr->ina.s_addr = htonl(in_addr);
   xn_addr->wPortOnline = system_link_port.load();
-  // Upstream tags the platform on this branch too. xbox_id stays zero: it is
-  // derived from a MAC and we do not have this peer's.
   xn_addr->abOnline.platform_type = PLATFORM_TYPE::Xbox360;
+
+  // If we have met this console before - through a QoS exchange, or through a
+  // title handing us its XNADDR - answer with its real identity. A peer we
+  // genuinely have never seen still gets a zero MAC, because inventing one
+  // would disagree with what that console reports for itself and hand the two
+  // ends different machine ids for the same machine.
+  MacAddress peer_mac(uint64_t(0));
+  if (LookupPeerMac(xn_addr->ina.s_addr, &peer_mac)) {
+    std::memcpy(xn_addr->abEnet, peer_mac.raw(), MacAddress::MacAddressSize);
+    xn_addr->abOnline.xbox_id = GetMachineId(peer_mac.to_uint64());
+    XELOGI("XNetInAddrToXnAddr: {} -> MAC {}", ip_to_string(xn_addr->ina),
+           peer_mac.to_string());
+    return X_ERROR_SUCCESS;
+  }
+
+  XELOGW(
+      "XNetInAddrToXnAddr: {} is not a console we have met - returning a zero "
+      "MAC, so XNetXnAddrToMachineId will refuse it",
+      ip_to_string(xn_addr->ina));
 
   return X_ERROR_SUCCESS;
 }
@@ -1004,10 +1060,16 @@ static void CloseQosSocket(qos_socket_t s) { close(s); }
 // touched by XSocket's guest-port remap.
 static constexpr uint16_t kQosProbePort = 13000;
 
-// magic[4] | version | type | data_len(BE16) | session id(BE64) | data
+// magic[4] | version | type | data_len(BE16) | session id(BE64) |
+//   sender MAC[6] | reserved[2] | data
+//
+// Version 2 added the sender MAC. Both ends of this exchange are Xenra, so a
+// console can simply state its own identity rather than leaving the receiver
+// to guess it from an IP - see the peer MAC cache above.
 static constexpr uint8_t kQosMagic[4] = {'X', 'Q', 'O', 'S'};
-static constexpr uint8_t kQosVersion = 1;
-static constexpr size_t kQosHeaderSize = 16;
+static constexpr uint8_t kQosVersion = 2;
+static constexpr size_t kQosHeaderSize = 24;
+static constexpr size_t kQosMacOffset = 16;
 static constexpr uint8_t kQosTypeProbe = 0;
 static constexpr uint8_t kQosTypeReply = 1;
 
@@ -1016,6 +1078,69 @@ struct QosListenEntry {
   uint32_t bits_per_second = 0;
   std::vector<uint8_t> data;
 };
+
+// ---------------------------------------------------------------------------
+// Peer MAC cache
+// ---------------------------------------------------------------------------
+// XNetInAddrToXnAddr has to answer "who is the console at this address?", and
+// until now it could only ever say "somebody, at this IP" - abEnet came back
+// all zero, so XNetXnAddrToMachineId then refused with WSAEINVAL because a
+// zero MAC would give every unknown peer the machine id 0 (rule 73).
+//
+// MEASURED on two consoles, 2026-08-17: DiRT 3's host does exactly this the
+// instant a joining console connects -
+//   XNetInAddrToXnAddr: 192.168.0.173 -> XNADDR with zero MAC
+//   XNetXnAddrToMachineId: zero MAC, no machine id for ina=192.168.0.173
+//   NetDll_recv: socket=000010DC -> 5 bytes
+//   NetDll_recv: socket=000010DC -> 0 bytes      <- peer dropped
+// - so the host cannot identify who is talking to it and the connection ends.
+// (Halo 3 never calls either function, which is why this was correctly ruled
+// out for that title earlier the same day and is still live for this one.)
+//
+// The honest fix is to LEARN the mapping rather than invent it. Two sources,
+// both real data rather than a guess:
+//   - Any XNADDR a title hands to XNetXnAddrToInAddr already carries the
+//     peer's MAC next to its IP.
+//   - The QoS probe exchange, which is our own packet format between two
+//     Xenra instances, so each side can simply state its own MAC.
+// Inventing a MAC from the IP was the alternative and it is worse: the value
+// would not match what that console reports for itself, so the two ends would
+// compute different machine ids for the same machine.
+static std::mutex peer_mac_mutex;
+static std::map<uint32_t, MacAddress> peer_mac_cache;
+
+static void RememberPeerMac(uint32_t ina_net_order, const MacAddress& mac) {
+  if (!ina_net_order || !mac.to_uint64()) {
+    return;
+  }
+  if (mac == GetConsoleMacAddress()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(peer_mac_mutex);
+  auto it = peer_mac_cache.find(ina_net_order);
+  if (it != peer_mac_cache.end()) {
+    if (it->second == mac) {
+      return;
+    }
+    it->second = mac;
+  } else {
+    peer_mac_cache.emplace(ina_net_order, mac);
+  }
+  in_addr shown = {};
+  shown.s_addr = ina_net_order;
+  XELOGI("XNet: learned peer {} is MAC {}", ip_to_string(shown),
+         mac.to_string());
+}
+
+static bool LookupPeerMac(uint32_t ina_net_order, MacAddress* out_mac) {
+  std::lock_guard<std::mutex> lock(peer_mac_mutex);
+  auto it = peer_mac_cache.find(ina_net_order);
+  if (it == peer_mac_cache.end()) {
+    return false;
+  }
+  *out_mac = it->second;
+  return true;
+}
 
 static std::mutex qos_listen_mutex;
 static std::map<uint64_t, QosListenEntry> qos_listeners;
@@ -1039,10 +1164,15 @@ static void BuildQosHeader(uint8_t* out, uint8_t type, uint64_t session_id,
   for (int i = 0; i < 8; ++i) {
     out[8 + i] = static_cast<uint8_t>((session_id >> ((7 - i) * 8)) & 0xFF);
   }
+  std::memcpy(out + kQosMacOffset, GetConsoleMacAddress().raw(),
+              MacAddress::MacAddressSize);
+  out[22] = 0;
+  out[23] = 0;
 }
 
 static bool ParseQosHeader(const uint8_t* data, size_t length, uint8_t* out_type,
-                           uint64_t* out_session_id, uint16_t* out_data_len) {
+                           uint64_t* out_session_id, uint16_t* out_data_len,
+                           MacAddress* out_sender_mac) {
   if (length < kQosHeaderSize) {
     return false;
   }
@@ -1057,6 +1187,9 @@ static bool ParseQosHeader(const uint8_t* data, size_t length, uint8_t* out_type
     session_id = (session_id << 8) | data[8 + i];
   }
   *out_session_id = session_id;
+  if (out_sender_mac) {
+    *out_sender_mac = MacAddress(data + kQosMacOffset);
+  }
   return true;
 }
 
@@ -1110,11 +1243,16 @@ static void QosResponderThread() {
     uint8_t type = 0;
     uint64_t session_id = 0;
     uint16_t data_len = 0;
+    MacAddress sender_mac(uint64_t(0));
     if (!ParseQosHeader(in_buffer.data(), static_cast<size_t>(received), &type,
-                        &session_id, &data_len) ||
+                        &session_id, &data_len, &sender_mac) ||
         type != kQosTypeProbe) {
       continue;
     }
+
+    // The probing console told us who it is, so the next time a title asks
+    // XNetInAddrToXnAddr about this address we can answer with a real MAC.
+    RememberPeerMac(from.sin_addr.s_addr, sender_mac);
 
     qos_requests_received.fetch_add(1);
     qos_probes_received.fetch_add(1);
@@ -1227,11 +1365,16 @@ static int32_t ProbeQosPeer(uint32_t peer_ip_net_order, uint64_t session_id,
     uint8_t type = 0;
     uint64_t reply_session = 0;
     uint16_t data_len = 0;
+    MacAddress sender_mac(uint64_t(0));
     if (!ParseQosHeader(reply.data(), static_cast<size_t>(received), &type,
-                        &reply_session, &data_len) ||
+                        &reply_session, &data_len, &sender_mac) ||
         type != kQosTypeReply || reply_session != session_id) {
       continue;
     }
+
+    // The answering console named itself, so the joining side learns the host
+    // the same way the host learns the joiner.
+    RememberPeerMac(peer_ip_net_order, sender_mac);
 
     const auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
                          std::chrono::steady_clock::now() - sent_at)
@@ -1616,6 +1759,10 @@ dword_result_t NetDll_closesocket_entry(dword_t caller, dword_t socket_handle) {
 
   // TODO: Absolutely delete this object. It is no longer valid after calling
   // closesocket.
+  // Which end hangs up first is the whole question in a failed TCP join, and
+  // neither closesocket nor shutdown said anything at any log level.
+  XELOGI("NetDll_closesocket: socket={:08X}", socket_handle.value());
+
   socket->Close();
   socket->ReleaseHandle();
   return 0;
@@ -1630,6 +1777,9 @@ int_result_t NetDll_shutdown_entry(dword_t caller, dword_t socket_handle,
     XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
     return -1;
   }
+
+  XELOGI("NetDll_shutdown: socket={:08X}, how={}", socket_handle.value(),
+         uint32_t(how));
 
   auto ret = socket->Shutdown(how);
   if (ret == -1) {
@@ -1742,12 +1892,24 @@ dword_result_t NetDll_connect_entry(dword_t caller, dword_t socket_handle,
   }
 
   N_XSOCKADDR native_name(name);
+  const auto* as_in = reinterpret_cast<const N_XSOCKADDR_IN*>(&native_name);
+  in_addr dest = {};
+  // sin_addr is xe::be<>, so reading it into a uint32_t already byte-swaps to
+  // host order; ip_to_string wants network order. Swap back rather than print
+  // 174.0.168.192 for 192.168.0.174.
+  dest.s_addr = htonl(uint32_t(as_in->sin_addr));
+
   X_STATUS status = socket->Connect(&native_name, namelen);
   if (XFAILED(status)) {
+    XELOGI("NetDll_connect: socket={:08X} -> {}:{} failed, error {:08X}",
+           socket_handle.value(), ip_to_string(dest),
+           uint16_t(as_in->sin_port), socket->GetLastWSAError());
     XThread::SetLastError(socket->GetLastWSAError());
     return -1;
   }
 
+  XELOGI("NetDll_connect: socket={:08X} -> {}:{} connected",
+         socket_handle.value(), ip_to_string(dest), uint16_t(as_in->sin_port));
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_connect, kNetworking, kImplemented);
@@ -1763,10 +1925,14 @@ dword_result_t NetDll_listen_entry(dword_t caller, dword_t socket_handle,
 
   X_STATUS status = socket->Listen(backlog);
   if (XFAILED(status)) {
+    XELOGI("NetDll_listen: socket={:08X} failed, error {:08X}",
+           socket_handle.value(), socket->GetLastWSAError());
     XThread::SetLastError(socket->GetLastWSAError());
     return -1;
   }
 
+  XELOGI("NetDll_listen: socket={:08X}, backlog={}", socket_handle.value(),
+         int32_t(backlog));
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_listen, kNetworking, kImplemented);
@@ -1793,6 +1959,12 @@ dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
     addr_ptr->address_family = native_addr.address_family;
     std::memcpy(addr_ptr->sa_data, native_addr.sa_data, *addrlen_ptr - 2);
     *addrlen_ptr = native_len;
+
+    const auto* as_in = reinterpret_cast<const N_XSOCKADDR_IN*>(&native_addr);
+    in_addr peer = {};
+    peer.s_addr = htonl(uint32_t(as_in->sin_addr));
+    XELOGI("NetDll_accept: socket={:08X} accepted {} as socket={:08X}",
+           socket_handle.value(), ip_to_string(peer), new_socket->handle());
 
     return new_socket->handle();
   } else {
@@ -1921,7 +2093,26 @@ dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Recv(buf_ptr, buf_len, flags);
+  const int ret = socket->Recv(buf_ptr, buf_len, flags);
+
+  // *** THIS FUNCTION LOGGED NOTHING AT ANY LEVEL. *** A guest thread looping
+  // on it was completely invisible: no per-call line, no error, nothing to
+  // grep. Finding that DiRT 3's System Link join sits here took a
+  // GuestScheduler watchdog dump and two function disassemblies, and every one
+  // of those steps was only needed because this line did not exist. Rule 68.
+  if (ret < 0) {
+    XELOGI("NetDll_recv: socket={:08X}, len={} -> failed, error {:08X}",
+           socket_handle.value(), buf_len.value(), socket->GetLastWSAError());
+  } else if (ret == 0) {
+    XELOGI("NetDll_recv: socket={:08X} -> 0 bytes, peer closed the connection",
+           socket_handle.value());
+  } else {
+    XELOGI("NetDll_recv: socket={:08X}, len={} -> {} bytes: {}",
+           socket_handle.value(), buf_len.value(), ret,
+           HexDumpPacket(buf_ptr.as<uint8_t*>(), static_cast<size_t>(ret)));
+  }
+
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_recv, kNetworking, kImplemented);
 
@@ -1982,7 +2173,20 @@ dword_result_t NetDll_send_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Send(buf_ptr, buf_len, flags);
+  const int sent = socket->Send(buf_ptr, buf_len, flags);
+
+  // The 5-byte write the host reads on a DiRT 3 join is invisible from this
+  // side without it, and the payload matters - see the sendto dump below.
+  if (sent < 0) {
+    XELOGI("NetDll_send: socket={:08X}, len={} -> failed, error {:08X}",
+           socket_handle.value(), buf_len.value(), socket->GetLastWSAError());
+  } else {
+    XELOGI("NetDll_send: socket={:08X}, len={} -> {} bytes: {}",
+           socket_handle.value(), buf_len.value(), sent,
+           HexDumpPacket(buf_ptr.as<uint8_t*>(), static_cast<size_t>(sent)));
+  }
+
+  return sent;
 }
 DECLARE_XAM_EXPORT1(NetDll_send, kNetworking, kImplemented);
 
