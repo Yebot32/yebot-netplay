@@ -86,7 +86,6 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       return X_E_SUCCESS;
     }
     case 0x00058006: {
-      // Buffer only set when online
       assert_true(!buffer_length || buffer_length == 4);
       XELOGD("XLiveBaseGetNatType({:08X})", buffer_ptr);
       // XENRA (360 netplay): titles read this straight after logon and treat a
@@ -95,7 +94,30 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       // working on this network - see upnp.cc and the Netplay screen's network
       // check. A title that cannot host will find out from the session layer,
       // not from this.
-      if (buffer_length == 4) {
+      //
+      // This used to write ONLY when buffer_length == 4. MEASURED on two
+      // consoles, 2026-08-17, at log_level 3: Halo 3 calls this through
+      // XMsgInProcessCall with buffer_length = 0 and a valid buffer_ptr, so the
+      // guard skipped the store and the title read back whatever was already on
+      // its stack. The note at the top of this function already says
+      // buffer_length may be zero or valid, so key the store on the POINTER,
+      // which is what the title actually hands us.
+      //
+      // *** THIS IS NOT THE SYSTEM LINK JOIN BLOCKER. I PREDICTED IT WAS AND
+      // THE A/B SAID NO. *** The call sits right on the decision: the host
+      // makes it once on receiving the 20-byte join request, the client makes
+      // it TWICE on receiving the host's 12-byte answer - once per NAT being
+      // compared - and the client then tears the join down with
+      // XNetQosListen(RELEASE) + XNetUnregisterKey. The on-screen error is
+      // about NAT compatibility. All of that fit, and it was still wrong:
+      // MEASURED with this fixed, both consoles on the same build, the join
+      // fails identically. Adjacency to the decision is not causation. Rule 76
+      // again - that is three hypotheses from reading code, three misses.
+      //
+      // Kept because writing the value the title asked for is correct on its
+      // own terms, not because it fixes anything. Do not cite it as a netplay
+      // fix.
+      if (buffer_ptr && (!buffer_length || buffer_length == 4)) {
         xe::store_and_swap<uint32_t>(buffer, 1);  // XONLINE_NAT_OPEN
       }
       return X_E_SUCCESS;
