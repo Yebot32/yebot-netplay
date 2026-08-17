@@ -202,6 +202,41 @@ struct XWSAOVERLAPPED {
 // below anything that could be gameplay traffic.
 static constexpr size_t kMaxPacketDumpBytes = 512;
 
+// *** Memory::TranslateVirtual NEVER RETURNS NULL. *** It is pointer
+// arithmetic over the membase, so `if (!host)` is dead code and dereferencing
+// the result for an unmapped guest address reads unmapped host memory and
+// segfaults. A diagnostic that dumps a guest pointer taken from a stack slot -
+// which may hold anything at all - has to ask the heap first. This is the same
+// guard ReadGuestWord in cpu/backend/a64/a64_tracers.cc uses.
+//
+// MEASURED: without it, a DiRT 3 join killed the guest thread outright -
+// "Host-side crash on fiber thread ... guest lr 0x8271BEA4" in client runs 10,
+// 11 and 13, and in none of runs 2-8, which predate the diagnostic.
+static bool GuestRangeReadable(Memory* memory, uint32_t address, size_t length) {
+  if (!memory || !address || !length) {
+    return false;
+  }
+  // Page protection is per-page, so both ends have to be checked - a dump can
+  // start inside a mapped page and run off the end of it.
+  const uint32_t last = address + static_cast<uint32_t>(length) - 1;
+  if (last < address) {
+    return false;  // wrapped
+  }
+  for (uint32_t probe = address;; probe += 0x1000) {
+    const uint32_t at = std::min(probe, last);
+    auto* heap = memory->LookupHeap(at);
+    uint32_t protect = 0;
+    if (!heap || !heap->QueryProtect(at, &protect) ||
+        !(protect & kMemoryProtectRead)) {
+      return false;
+    }
+    if (at == last) {
+      break;
+    }
+  }
+  return true;
+}
+
 static std::string HexDumpPacket(const uint8_t* data, size_t length) {
   static constexpr char kHexDigits[] = "0123456789ABCDEF";
   const size_t shown = std::min(length, kMaxPacketDumpBytes);
@@ -763,11 +798,11 @@ dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
     uint32_t shown = 0;
     for (uint32_t off = 0; off < 0x400 && shown < 24; off += 4) {
       const uint32_t slot = sp + off;
-      auto* host = memory->TranslateVirtual(slot);
-      if (!host) {
+      if (!GuestRangeReadable(memory, slot, sizeof(uint32_t))) {
         break;
       }
-      const uint32_t v = xe::load_and_swap<uint32_t>(host);
+      const uint32_t v =
+          xe::load_and_swap<uint32_t>(memory->TranslateVirtual(slot));
       // Title code only: the executable module, not xam/xboxkrnl thunks.
       if (v >= 0x82000000 && v < 0x83000000) {
         chain += fmt::format(" +{:03X}={:08X}", off, v);
@@ -801,19 +836,23 @@ dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
     if (caller_lr == 0x8271BEA4) {
       for (const auto& slot : {std::pair<const char*, uint32_t>{"stream", 0x5C},
                                std::pair<const char*, uint32_t>{"dest", 0x64}}) {
-        auto* slot_host = memory->TranslateVirtual(sp + slot.second);
-        if (!slot_host) {
+        const uint32_t slot_addr = sp + slot.second;
+        if (!GuestRangeReadable(memory, slot_addr, sizeof(uint32_t))) {
           continue;
         }
-        const uint32_t obj = xe::load_and_swap<uint32_t>(slot_host);
-        auto* obj_host = memory->TranslateVirtual(obj);
-        if (!obj || !obj_host) {
+        const uint32_t obj =
+            xe::load_and_swap<uint32_t>(memory->TranslateVirtual(slot_addr));
+        // A stack slot holds whatever the caller left there, so `obj` is an
+        // arbitrary 32-bit value and is NOT known to be a pointer at all.
+        if (!GuestRangeReadable(memory, obj, 0x40)) {
           XELOGI("XNetXnAddrToMachineId: {} ptr={:08X} (not mapped)", slot.first,
                  obj);
           continue;
         }
         XELOGI("XNetXnAddrToMachineId: {} ptr={:08X} head {}", slot.first, obj,
-               HexDumpPacket(reinterpret_cast<const uint8_t*>(obj_host), 0x40));
+               HexDumpPacket(reinterpret_cast<const uint8_t*>(
+                                 memory->TranslateVirtual(obj)),
+                             0x40));
       }
     }
   }
