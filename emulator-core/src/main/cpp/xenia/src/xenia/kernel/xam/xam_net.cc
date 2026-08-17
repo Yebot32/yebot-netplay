@@ -195,7 +195,10 @@ struct XWSAOVERLAPPED {
 // title is actually saying to its peer. Nobody had ever looked at the bytes;
 // #20 5.3 asked for exactly this. Anything larger than a control packet is
 // gameplay traffic and would bury the trace, so it is truncated.
-static constexpr size_t kMaxPacketDumpBytes = 256;
+// 512, not 256: DiRT 3's System Link advertisement is 462 bytes and 256 cut it
+// in half, which is no use for decoding the session it describes. Still far
+// below anything that could be gameplay traffic.
+static constexpr size_t kMaxPacketDumpBytes = 512;
 
 static std::string HexDumpPacket(const uint8_t* data, size_t length) {
   static constexpr char kHexDigits[] = "0123456789ABCDEF";
@@ -716,6 +719,33 @@ dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
     // Non-zero: not signed in, which is what the stub always claimed.
     return 1;
   }
+
+  // The WHOLE struct, not just the two fields the lines below name. On a DiRT 3
+  // join the client asks for the machine id of ina=100.105.78.32
+  // mac=564064695A50 - values that are ASCII-looking garbage and appear in
+  // neither the 229-byte session descriptor (searched at all 8 bit alignments)
+  // nor anywhere on the host. Two fields are not enough to match that struct
+  // against a payload on the wire; 36 bytes are.
+  // The GUEST ADDRESS and the CALLER matter as much as the contents. On a
+  // DiRT 3 join the client asks for the machine id of an XNADDR holding nine
+  // 4-byte records with a constant 0x6469 tag and a 0x410 stride. That is
+  // structured data, not the uninitialised memory it was taken for, and it is
+  // MEASURED not to come off the wire: it is in neither the 229-byte session
+  // descriptor nor the 462-byte advertisement at any bit alignment, and it is
+  // not inside the recv buffer either (that hypothesis was tested and failed -
+  // buf=6468D64C+1264 vs guest=701EF1B0).
+  //
+  // So the question is no longer what the bytes are, it is which guest function
+  // believes they are an XNADDR. lr is the address to feed to
+  // dump_functions_at. RULE 80: if that lands in a shim ending in `b`, the real
+  // caller is elsewhere - dump the branch target too.
+  auto* thread = XThread::GetCurrentThread();
+  const uint32_t caller_lr =
+      thread ? uint32_t(thread->thread_state()->context()->lr) : 0;
+  XELOGI("XNetXnAddrToMachineId: guest={:08X} lr={:08X} XNADDR {}",
+         addr_ptr.guest_address(), caller_lr,
+         HexDumpPacket(reinterpret_cast<const uint8_t*>(addr_ptr.host_address()),
+                       sizeof(XNADDR)));
 
   // Derived from the peer's MAC, so the same console yields the same id on
   // every lookup and on both ends of the link. A peer we only know by IP has
@@ -2107,8 +2137,13 @@ dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
     XELOGI("NetDll_recv: socket={:08X} -> 0 bytes, peer closed the connection",
            socket_handle.value());
   } else {
-    XELOGI("NetDll_recv: socket={:08X}, len={} -> {} bytes: {}",
-           socket_handle.value(), buf_len.value(), ret,
+    // buf= is the guest address of the receive buffer. A title that parses a
+    // field at a fixed offset reads stale buffer content when the message is
+    // shorter than it expects, and the only way to tell that apart from a
+    // malformed message is to see whether a later wild pointer falls inside
+    // [buf, buf+len).
+    XELOGI("NetDll_recv: socket={:08X}, buf={:08X}, len={} -> {} bytes: {}",
+           socket_handle.value(), buf_ptr.guest_address(), buf_len.value(), ret,
            HexDumpPacket(buf_ptr.as<uint8_t*>(), static_cast<size_t>(ret)));
   }
 
@@ -2150,12 +2185,19 @@ dword_result_t NetDll_recvfrom_entry(dword_t caller, dword_t socket_handle,
     XThread::SetLastError(socket->GetLastWSAError());
   } else if (ret > 0) {
     // Only log when we actually receive data
+    // INFO, not DEBUG. The TCP pair got this treatment and the UDP pair did
+    // not, so a log_level 2 netplay trace showed the whole TCP handshake and
+    // NONE of the discovery/advertisement traffic that precedes it - which is
+    // the half where a peer's XNADDR actually reaches the joining console.
+    // Raising the level to see it is not a workaround: log_level 3 turns on
+    // the guest import trace too and puts the log into the hundreds of MB.
+    // HexDumpPacket truncates at 256 bytes, so a line is bounded.
     const uint32_t from_ip = from_ptr ? uint32_t(from_ptr->sin_addr) : 0;
-    XELOGD("NetDll_recvfrom: socket={:08X}, received {} bytes from {}.{}.{}.{}:{}",
+    XELOGI("NetDll_recvfrom: socket={:08X}, received {} bytes from {}.{}.{}.{}:{}",
            socket_handle.value(), ret, (from_ip >> 24) & 0xFF,
            (from_ip >> 16) & 0xFF, (from_ip >> 8) & 0xFF, from_ip & 0xFF,
            from_ptr ? uint16_t(from_ptr->sin_port) : 0);
-    XELOGD("NetDll_recvfrom: payload {}",
+    XELOGI("NetDll_recvfrom: payload {}",
            HexDumpPacket(buf_ptr.as<uint8_t*>(), static_cast<size_t>(ret)));
   }
 
@@ -2201,11 +2243,11 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
   // have shown it. #19 4.4.
   const uint32_t to_ip = to_ptr ? uint32_t(to_ptr->sin_addr) : 0;
   const uint16_t to_port = to_ptr ? uint16_t(to_ptr->sin_port) : 0;
-  XELOGD("NetDll_sendto: socket={:08X}, len={}, to={}.{}.{}.{}:{}",
+  XELOGI("NetDll_sendto: socket={:08X}, len={}, to={}.{}.{}.{}:{}",
          socket_handle.value(), buf_len.value(), (to_ip >> 24) & 0xFF,
          (to_ip >> 16) & 0xFF, (to_ip >> 8) & 0xFF, to_ip & 0xFF, to_port);
   if (buf_ptr) {
-    XELOGD("NetDll_sendto: payload {}",
+    XELOGI("NetDll_sendto: payload {}",
            HexDumpPacket(buf_ptr.as<uint8_t*>(),
                          static_cast<size_t>(buf_len.value())));
   }
