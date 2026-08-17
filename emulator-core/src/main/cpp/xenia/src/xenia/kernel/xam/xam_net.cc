@@ -742,6 +742,79 @@ dword_result_t NetDll_XNetXnAddrToMachineId_entry(dword_t caller,
   auto* thread = XThread::GetCurrentThread();
   const uint32_t caller_lr =
       thread ? uint32_t(thread->thread_state()->context()->lr) : 0;
+
+  // lr names ONE frame. The bad XNADDR is deserialised by 8271BE40, which is a
+  // leaf helper - the field order that desynced the stream lives in whatever
+  // called it, and that caller has no address anywhere in the log. Rather than
+  // spend a two-console test cycle per frame, scan the guest stack for values
+  // that look like title code and print them: the return chain is in there.
+  //
+  // Scan, not a back-chain walk, because the frames here save lr at
+  // frame-specific offsets (8271BE40 uses r1-8 before its stwu) and a strict
+  // walk would need per-function prologue knowledge. A scan over-reports - some
+  // hits are stale stack garbage, not live return addresses - so treat the
+  // output as candidates to feed to dump_functions_at, not as a proven chain.
+  if (thread) {
+    const uint32_t sp = uint32_t(thread->thread_state()->context()->r[1]);
+    auto* memory = kernel_state()->memory();
+    std::string chain;
+    uint32_t shown = 0;
+    for (uint32_t off = 0; off < 0x400 && shown < 24; off += 4) {
+      const uint32_t slot = sp + off;
+      auto* host = memory->TranslateVirtual(slot);
+      if (!host) {
+        break;
+      }
+      const uint32_t v = xe::load_and_swap<uint32_t>(host);
+      // Title code only: the executable module, not xam/xboxkrnl thunks.
+      if (v >= 0x82000000 && v < 0x83000000) {
+        chain += fmt::format(" +{:03X}={:08X}", off, v);
+        ++shown;
+      }
+    }
+    XELOGI("XNetXnAddrToMachineId: stack sp={:08X} code refs:{}", sp, chain);
+
+    // *** THESE TWO SLOTS ARE NOT THE ARGUMENTS. *** 8271BE40 does
+    //     std r30, -0x18(r1)      <- saves the CALLER's r30
+    //     std r31, -0x10(r1)      <- saves the CALLER's r31
+    //     stwu r1, -0x70(r1)
+    //     or  r30, r4, r4         <- only HERE does r30 become the stream
+    // so the stores are the ordinary callee-saved-register prologue and these
+    // slots hold whatever the caller had in r30/r31. I labelled them
+    // stream/dest and that was wrong. They happen to be useful anyway: on the
+    // DiRT 3 join both hold objects whose head is
+    //     +08 buffer ptr, +0C size in BITS, +10 size in BYTES, +18 bit cursor
+    // and the failing one MEASURED buffer=6468D6B5 size=124 bytes cursor=342,
+    // where 6468D6B5 is the recv buffer 6468D64C + 105 and 105 + 124 = 229
+    // exactly - a correctly bounded window over the message body, cursor well
+    // inside it. Do not trust the names; do trust that arithmetic.
+    //
+    // *** A CONTIGUOUS MSB-FIRST BIT SLICE DOES NOT DECODE THIS FORMAT. ***
+    // Extracting 288 bits at the cursor fails to reproduce even the XNADDR the
+    // WORKING advertisement path produces, and a scan of all 3408 bit offsets
+    // of that 462-byte packet does not contain it either. Whatever the encoding
+    // is, it is not a plain bit slice, so no conclusion of the form "those
+    // bytes are/are not in that payload" is safe until the reader at 8270E0D0
+    // has been read.
+    if (caller_lr == 0x8271BEA4) {
+      for (const auto& slot : {std::pair<const char*, uint32_t>{"stream", 0x5C},
+                               std::pair<const char*, uint32_t>{"dest", 0x64}}) {
+        auto* slot_host = memory->TranslateVirtual(sp + slot.second);
+        if (!slot_host) {
+          continue;
+        }
+        const uint32_t obj = xe::load_and_swap<uint32_t>(slot_host);
+        auto* obj_host = memory->TranslateVirtual(obj);
+        if (!obj || !obj_host) {
+          XELOGI("XNetXnAddrToMachineId: {} ptr={:08X} (not mapped)", slot.first,
+                 obj);
+          continue;
+        }
+        XELOGI("XNetXnAddrToMachineId: {} ptr={:08X} head {}", slot.first, obj,
+               HexDumpPacket(reinterpret_cast<const uint8_t*>(obj_host), 0x40));
+      }
+    }
+  }
   XELOGI("XNetXnAddrToMachineId: guest={:08X} lr={:08X} XNADDR {}",
          addr_ptr.guest_address(), caller_lr,
          HexDumpPacket(reinterpret_cast<const uint8_t*>(addr_ptr.host_address()),
