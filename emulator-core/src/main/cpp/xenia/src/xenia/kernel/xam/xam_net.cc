@@ -652,6 +652,28 @@ struct XnAddrStatus {
 // populate wPortOnline, not to bind anything here.
 static std::atomic<uint16_t> system_link_port = {3074};
 
+// The System Link session this console is currently in, as last handed to
+// XNetRegisterKey. Declared here rather than beside the key registry further
+// down because XNetInAddrToXnAddr - which is above it - has to answer "which
+// session is the console at this address in?".
+//
+// Upstream keeps a per-peer map (XLiveAPI::sessionIdCache, keyed by inaOnline)
+// and falls back to XLiveAPI::GetSystemlinkID(). We have no XLiveAPI, but on a
+// LAN the answer is the same for a different reason: MEASURED on a DiRT 3 join,
+// both consoles register the SAME session ids (0000541E6E937795 and
+// 0000889BE8E21FE2 in run 13), because System Link peers are in one shared
+// session. So the id this console registered is also the peer's id.
+static std::atomic<uint64_t> current_session_id = {0};
+
+// Big-endian, matching ReadSessionId further down - an XNKID is eight bytes in
+// guest order, not a host integer.
+static void WriteSessionId(uint8_t* be_bytes, uint64_t session_id) {
+  for (int i = 7; i >= 0; --i) {
+    be_bytes[i] = uint8_t(session_id & 0xFF);
+    session_id >>= 8;
+  }
+}
+
 // Fill an XNADDR describing THIS console.
 //
 // This is the LAN-only reduction of upstream netplay's XLiveAPI::
@@ -1009,8 +1031,38 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
     std::memset(xn_addr, 0, sizeof(XNADDR));
   }
 
+  // *** THE XNKID OUT-PARAM IS NOT OPTIONAL, AND WE USED TO IGNORE IT. ***
+  //
+  // Upstream netplay memsets it on entry and then fills it from its session
+  // cache. We took the pointer and never touched it, so the title read back
+  // whatever it had put there.
+  //
+  // MEASURED on DiRT 3: the remote member builder at 8271AE58 stages the peer
+  // IP at r1+0x50, passes THAT SAME BUFFER as the XNKID out-param, and after
+  // the call does `ld r11, 0x50(r1)` / `std r11, 0(r28)` - it reads the eight
+  // bytes straight back and stores them as the member's session id (the ctor
+  // at 8272B428 points r28 at member+0x58). Leaving the buffer alone therefore
+  // handed every remote peer a session id built from the leftover IP in the
+  // high word plus stack garbage in the low word.
+  //
+  // Zeroed unconditionally, before the network_mode bail, because a title that
+  // ignores our return value must still not read stack.
+  if (xid) {
+    std::memset(reinterpret_cast<void*>(xid.host_address()), 0,
+                sizeof(uint64_t));
+  }
+
   if (cvars::network_mode != NETWORK_MODE::LAN) {
     return uint32_t(X_WSAError::X_WSAEINVAL);
+  }
+
+  // Answer with the session this console is in. On a LAN that is also the
+  // peer's session - see current_session_id. Zero until the title registers a
+  // key, which is correct: before that there is no session to name, and a
+  // fabricated id would disagree with the one on the wire.
+  const uint64_t session_id = current_session_id.load();
+  if (xid && session_id) {
+    WriteSessionId(reinterpret_cast<uint8_t*>(xid.host_address()), session_id);
   }
 
   // Loopback and broadcast both mean "this console" to a title asking who it
@@ -1033,15 +1085,16 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
   if (LookupPeerMac(xn_addr->ina.s_addr, &peer_mac)) {
     std::memcpy(xn_addr->abEnet, peer_mac.raw(), MacAddress::MacAddressSize);
     xn_addr->abOnline.xbox_id = GetMachineId(peer_mac.to_uint64());
-    XELOGI("XNetInAddrToXnAddr: {} -> MAC {}", ip_to_string(xn_addr->ina),
-           peer_mac.to_string());
+    XELOGI("XNetInAddrToXnAddr: {} -> MAC {}, XNKID {:016X}{}",
+           ip_to_string(xn_addr->ina), peer_mac.to_string(), session_id,
+           xid ? "" : " (title passed no XNKID buffer)");
     return X_ERROR_SUCCESS;
   }
 
   XELOGW(
       "XNetInAddrToXnAddr: {} is not a console we have met - returning a zero "
-      "MAC, so XNetXnAddrToMachineId will refuse it",
-      ip_to_string(xn_addr->ina));
+      "MAC, so XNetXnAddrToMachineId will refuse it. XNKID {:016X}",
+      ip_to_string(xn_addr->ina), session_id);
 
   return X_ERROR_SUCCESS;
 }
@@ -2563,7 +2616,14 @@ dword_result_t NetDll_XNetRegisterKey_entry(dword_t caller, lpdword_t key_id,
     registered_keys[session_id] = key;
   }
 
-  XELOGI("XNetRegisterKey: session {:016X}, key {}", session_id,
+  // This registry was observational when it was added. It is load-bearing now:
+  // XNetInAddrToXnAddr answers the XNKID out-param from it. DiRT 3 registers
+  // more than one key (a party and a game session), so "most recently
+  // registered" is a choice, not a fact - the log line below is what tells us
+  // whether it is the right one.
+  current_session_id.store(session_id);
+
+  XELOGI("XNetRegisterKey: session {:016X} (now current), key {}", session_id,
          HexDumpPacket(key.data(), key.size()));
   return 0;
 }
@@ -2577,9 +2637,22 @@ dword_result_t NetDll_XNetUnregisterKey_entry(dword_t caller,
 
   const uint64_t session_id =
       ReadSessionId(reinterpret_cast<const uint8_t*>(key_id.host_address()));
+  uint64_t remaining = 0;
   {
     std::lock_guard<std::mutex> lock(registered_key_mutex);
     registered_keys.erase(session_id);
+    if (!registered_keys.empty()) {
+      remaining = registered_keys.rbegin()->first;
+    }
+  }
+
+  // Leaving a torn-down session as "current" would have XNetInAddrToXnAddr
+  // name a session the console has left. Fall back to another registered one
+  // if there is any, otherwise to none.
+  uint64_t expected = session_id;
+  if (current_session_id.compare_exchange_strong(expected, remaining)) {
+    XELOGI("XNetUnregisterKey: current session {:016X} -> {:016X}", session_id,
+           remaining);
   }
 
   XELOGI("XNetUnregisterKey: session {:016X}", session_id);
