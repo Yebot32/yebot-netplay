@@ -34,6 +34,12 @@ enum class X_WSAError : uint32_t {
   X_WSAENOTSOCK = 0x2736,
   X_WSAEMSGSIZE = 0x2738,
   X_WSAENETDOWN = 0x2742,
+  // 10057. Reported when a receive is attempted on a TCP socket that has
+  // neither connected nor accepted - which here means one still represented by
+  // an acceptor_. Titles distinguish this from WSAEWOULDBLOCK to decide
+  // whether retrying is worth anything; DiRT 3's receive wrapper branches on
+  // exactly that pair.
+  X_WSAENOTCONN = 0x2749,
 };
 
 struct XSOCKADDR {

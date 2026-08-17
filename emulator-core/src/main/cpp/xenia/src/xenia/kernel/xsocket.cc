@@ -163,6 +163,18 @@ uint32_t AsioErrorToWSAError(const asio::error_code& ec) {
   if (ec == asio::error::interrupted) {
     return 10004;  // WSAEINTR
   }
+  if (ec == asio::error::eof) {
+    // Callers that read data should turn this into a zero-length read before
+    // getting here - see Recv/RecvFrom. For everything else, an abortive close
+    // is the closest WSA code and is at least in the range a title checks.
+    return 10054;  // WSAECONNRESET
+  }
+  // The fallback hands the guest a raw host errno wearing a WSA error's
+  // clothes. Nothing the title compares against will match it, so it takes
+  // whatever its default branch is - which is how eof surfaced as the
+  // uninterpretable "error 00000002". Say so rather than letting it pass.
+  XELOGW("AsioErrorToWSAError: unmapped error {} ({}), passing through as {}",
+         ec.value(), ec.message(), ec.value());
   return static_cast<uint32_t>(ec.value());
 }
 
@@ -304,6 +316,28 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
   if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
     // Disable socket encryption
     secure_ = false;
+    return X_STATUS_SUCCESS;
+  }
+
+  // SO_EXCLUSIVEADDRUSE, which Winsock defines as ~SO_REUSEADDR - 0xFFFFFFFB.
+  // There is no such option on Linux or Android, so it fell through to the
+  // host setsockopt below and came back ENOPROTOOPT -> WSAENOPROTOOPT 0x273A.
+  //
+  // *** THAT WAS DiRT 3'S SYSTEM LINK HOSTING BLOCKER. *** MEASURED on the Tab
+  // S9, 2026-08-17, at log_level 3: the title opens a UDP socket, sets FIONBIO,
+  // asks for this option, gets -1, and calls closesocket on the very next line.
+  // It never binds and never sends a byte, so nothing downstream of it - XNet,
+  // QoS, XSession - was ever reached. The three consecutive log lines are the
+  // whole causal chain, which is what makes this different from the NAT-type
+  // guess that preceded it.
+  //
+  // Accepting it is not a lie about the semantics: SO_EXCLUSIVEADDRUSE means
+  // "do not let another socket bind this address", and a bare bind() on Linux
+  // is already exclusive unless SO_REUSEADDR is set. Bind() additionally
+  // rejects a duplicate bind through the kernel object table, which is the
+  // check a guest would actually notice.
+  if (level == 0xFFFF && optname == 0xFFFFFFFB) {
+    XELOGI("XSocket::SetOption: SO_EXCLUSIVEADDRUSE accepted (no-op)");
     return X_STATUS_SUCCESS;
   }
 
@@ -524,6 +558,26 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
       return X_STATUS_UNSUCCESSFUL;
     }
 
+    // *** THE GUEST'S FIONBIO LIVES ON THE ACCEPTOR WE JUST DESTROYED. ***
+    // A TCP socket starts life as an acceptor_ because we do not yet know
+    // whether it will listen or connect, so IOControl(FIONBIO) set the flag
+    // there. This replacement socket opens in the default BLOCKING mode, and
+    // nothing was carrying the guest's choice across - so a title that set
+    // non-blocking before connecting got a blocking socket back.
+    //
+    // RunCooperatively then makes it worse rather than catching it: it trusts
+    // guest_non_blocking_, takes the single-attempt fast path, and issues one
+    // blocking receive that never returns. The fiber cannot be preempted, no
+    // further guest call is ever made, and the title hangs with no diagnostic
+    // at all.
+    if (guest_non_blocking_) {
+      asio::error_code nb_ec;
+      tcp_socket_->non_blocking(true, nb_ec);
+      if (nb_ec) {
+        XELOGW("XSocket::Connect: could not restore non-blocking mode");
+      }
+    }
+
     asio::ip::tcp::endpoint endpoint(addr, port);
     RunCooperatively(ec, RetryMode::kConnect,
                      [&]() { tcp_socket_->connect(endpoint, ec); });
@@ -670,6 +724,34 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
       object_ref<XSocket>(new XSocket(kernel_state_, std::move(new_socket)));
   socket->bound_ = true;
 
+  // *** WINSOCK'S ACCEPTED SOCKETS INHERIT THE LISTENER'S BLOCKING MODE.
+  // POSIX'S DO NOT. *** accept() on Linux always hands back a socket with
+  // O_NONBLOCK clear, no matter what the listening socket was set to, so a
+  // title that called ioctlsocket(FIONBIO) once on its listener - which is all
+  // it has to do on a real console - got a BLOCKING socket from us.
+  //
+  // MEASURED on two consoles, 2026-08-17. DiRT 3's host does exactly that:
+  //   NetDll_ioctlsocket: socket=000010D0, cmd=8004667E   <- listener only
+  //   NetDll_accept: socket=000010D0 accepted ... as socket=000010D4
+  //   NetDll_recv: socket=000010D4 -> 5 bytes
+  //   ...then the network thread parks inside recv, wait=none, and the title
+  //   never gets control back to answer. The joining console waits ~210
+  //   frames for a reply, gives up, and closes - which is the only reason the
+  //   host's recv ever returned at all.
+  //
+  // This is the same defect as the one Connect() carries a fix for, on the
+  // path that fix did not cover: there, the flag was lost when the acceptor
+  // became a tcp_socket; here, it is never given to the accepted socket in the
+  // first place.
+  socket->guest_non_blocking_ = guest_non_blocking_;
+  if (guest_non_blocking_) {
+    asio::error_code nb_ec;
+    socket->tcp_socket_->non_blocking(true, nb_ec);
+    if (nb_ec) {
+      XELOGW("XSocket::Accept: could not inherit non-blocking mode");
+    }
+  }
+
   return socket;
 }
 
@@ -709,6 +791,12 @@ int XSocket::Shutdown(int how) {
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   if (!tcp_socket_ && !udp_socket_) {
+    // A TCP socket that has neither connected nor accepted is still just an
+    // acceptor_ here. This used to return -1 and leave last_error_ at whatever
+    // the previous call put there, so the guest read a stale code - and a
+    // title that branches on WSAEWOULDBLOCK to decide whether to try again
+    // will happily spin on one. WSAENOTCONN is what a real console reports.
+    last_error_ = uint32_t(X_WSAError::X_WSAENOTCONN);
     return -1;
   }
 
@@ -727,6 +815,18 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
     });
   }
 
+  // *** A GRACEFUL TCP CLOSE IS A ZERO-LENGTH READ, NOT AN ERROR. *** Winsock
+  // reports it as recv() == 0 with no error set, and every title is written
+  // against that. asio reports it as asio::error::eof instead, which is not in
+  // AsioErrorToWSAError's table, so it fell through to the raw ec.value() -
+  // and MEASURED on the Tab S9, 2026-08-17, DiRT 3's host read
+  // "error 00000002" back from every recv. 2 is asio's misc eof; it is not a
+  // WSA code at all, so nothing the guest compares against could match it.
+  if (ec == asio::error::eof) {
+    last_error_ = 0;
+    return 0;
+  }
+
   if (ec) {
     last_error_ = AsioErrorToWSAError(ec);
     return -1;
@@ -738,6 +838,8 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
                       N_XSOCKADDR_IN* from, uint32_t* from_len) {
   if (!udp_socket_ && !tcp_socket_) {
+    // Same stale-error trap as Recv above.
+    last_error_ = uint32_t(X_WSAError::X_WSAENOTCONN);
     return -1;
   }
 
@@ -765,6 +867,12 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
       bytes_received =
           tcp_socket_->receive(asio::buffer(buf, buf_len), flags, ec);
     });
+  }
+
+  // Same graceful-close rule as Recv above.
+  if (ec == asio::error::eof) {
+    last_error_ = 0;
+    return 0;
   }
 
   if (ec) {
