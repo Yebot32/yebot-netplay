@@ -28,6 +28,7 @@
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/null/null_graphics_system.h"
+#include "xenia/gpu/upstream_conformance.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 #include "xenia/hid/nop/nop_hid.h"
 #include "xenia/kernel/xam/xam_module.h"
@@ -328,6 +329,11 @@ bool EmulatorApp::OnInitialize() {
         config::LoadGameConfigForFile(
             std::filesystem::absolute(std::filesystem::u8path(game_path)));
     }
+
+    // Fork-only GPU cvars back to Xenia Edge's PC behaviour when asked, before
+    // anything reads one. Off unless gpu_upstream_conformance is set; see
+    // gpu/upstream_conformance.h for why the whole group is one switch.
+    xe::gpu::ApplyGpuUpstreamConformance();
 
     // Android has no UI-thread paint pump that the kUIThreadOnRequest present mode
     // needs, so this must be true regardless of what the (possibly stale/edited)
