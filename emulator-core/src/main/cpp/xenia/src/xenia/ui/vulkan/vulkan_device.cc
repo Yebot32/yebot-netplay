@@ -15,6 +15,7 @@
 #include "xenia/base/platform.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -29,9 +30,329 @@ DEFINE_int32(
     "driver-specific large-binding misbehavior.",
     "Vulkan");
 
+DEFINE_int32(
+    vulkan_max_api_minor_version, 3,
+    "Highest Vulkan 1.x minor version the emulator will declare and use. "
+    "Lowering it to 2 makes the device request the KHR/EXT feature structures "
+    "instead of the promoted core VkPhysicalDeviceVulkan13Features - required "
+    "under RenderDoc, whose capture layer refuses that structure outright and "
+    "fails vkCreateDevice with VK_ERROR_FEATURE_NOT_PRESENT. Leave at 3 for "
+    "normal use; there is no reason to lower it except for frame capture.",
+    "Vulkan");
+
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+uint32_t VulkanDevice::HighestUsedApiMinorVersion() {
+  uint32_t minor = uint32_t(std::max(0, cvars::vulkan_max_api_minor_version));
+  minor = std::min(minor, uint32_t(VK_API_VERSION_MINOR(
+                              kHighestUsedApiMinorVersion)));
+  return VK_MAKE_API_VERSION(0, 1, minor, 0);
+}
+
+namespace {
+
+// Members of VkPhysicalDeviceFeatures in declaration order. The struct is a
+// flat run of VkBool32 and the spec never reorders it, so it can be walked as
+// an array and each bit named.
+const char* const kPhysicalDeviceFeatureNames[] = {
+    "robustBufferAccess",
+    "fullDrawIndexUint32",
+    "imageCubeArray",
+    "independentBlend",
+    "geometryShader",
+    "tessellationShader",
+    "sampleRateShading",
+    "dualSrcBlend",
+    "logicOp",
+    "multiDrawIndirect",
+    "drawIndirectFirstInstance",
+    "depthClamp",
+    "depthBiasClamp",
+    "fillModeNonSolid",
+    "depthBounds",
+    "wideLines",
+    "largePoints",
+    "alphaToOne",
+    "multiViewport",
+    "samplerAnisotropy",
+    "textureCompressionETC2",
+    "textureCompressionASTC_LDR",
+    "textureCompressionBC",
+    "occlusionQueryPrecise",
+    "pipelineStatisticsQuery",
+    "vertexPipelineStoresAndAtomics",
+    "fragmentStoresAndAtomics",
+    "shaderTessellationAndGeometryPointSize",
+    "shaderImageGatherExtended",
+    "shaderStorageImageExtendedFormats",
+    "shaderStorageImageMultisample",
+    "shaderStorageImageReadWithoutFormat",
+    "shaderStorageImageWriteWithoutFormat",
+    "shaderUniformBufferArrayDynamicIndexing",
+    "shaderSampledImageArrayDynamicIndexing",
+    "shaderStorageBufferArrayDynamicIndexing",
+    "shaderStorageImageArrayDynamicIndexing",
+    "shaderClipDistance",
+    "shaderCullDistance",
+    "shaderFloat64",
+    "shaderInt64",
+    "shaderInt16",
+    "shaderResourceResidency",
+    "shaderResourceMinLod",
+    "sparseBinding",
+    "sparseResidencyBuffer",
+    "sparseResidencyImage2D",
+    "sparseResidencyImage3D",
+    "sparseResidency2Samples",
+    "sparseResidency4Samples",
+    "sparseResidency8Samples",
+    "sparseResidency16Samples",
+    "sparseResidencyAliased",
+    "variableMultisampleRate",
+    "inheritedQueries",
+};
+static_assert(sizeof(VkPhysicalDeviceFeatures) ==
+                  sizeof(kPhysicalDeviceFeatureNames) /
+                      sizeof(kPhysicalDeviceFeatureNames[0]) *
+                      sizeof(VkBool32),
+              "VkPhysicalDeviceFeatures member list is out of date");
+
+// vkCreateDevice can return VK_ERROR_FEATURE_NOT_PRESENT for a feature that
+// vkGetPhysicalDeviceFeatures2 just reported as supported. A capture layer
+// sitting between us and the driver is the usual cause - it advertises the
+// driver's feature set on query but refuses features it cannot serialize on
+// create - and the plain failure is fatal and says nothing about which feature
+// was at fault, which is a whole debugging session for one bit.
+//
+// Identify the culprits by probing, then create the device without them. Each
+// probe is a device create/destroy, which is cheap and happens once at startup
+// only on the path that would otherwise have aborted.
+//
+// Returns the result of the final create. `enabled_features` is updated to what
+// was actually accepted.
+VkResult CreateDeviceDroppingRejectedFeatures(
+    const VulkanInstance::Functions& ifn, VkPhysicalDevice physical_device,
+    VkDeviceCreateInfo& device_create_info,
+    VkPhysicalDeviceFeatures& enabled_features, const char* device_name,
+    VkDevice& device_out) {
+  const size_t feature_count =
+      sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32);
+  VkBool32* const features = reinterpret_cast<VkBool32*>(&enabled_features);
+
+  const VkPhysicalDeviceFeatures requested_features = enabled_features;
+  const VkBool32* const requested =
+      reinterpret_cast<const VkBool32*>(&requested_features);
+
+  XELOGW(
+      "vkCreateDevice on '{}' returned VK_ERROR_FEATURE_NOT_PRESENT for a "
+      "feature set the physical device reported as supported. Probing to find "
+      "which feature is being refused.",
+      device_name);
+
+  // First establish whether the refusal is a core feature at all: retry with
+  // every core feature off, leaving the pNext feature structures untouched.
+  std::memset(&enabled_features, 0, sizeof(enabled_features));
+  VkDevice probe_device = VK_NULL_HANDLE;
+  VkResult result =
+      ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
+                         &probe_device);
+  if (result != VK_SUCCESS) {
+    // Not a core feature. The refusal is in one of the extension feature
+    // structures chained off pNext, so probe those by unlinking one at a time.
+    enabled_features = requested_features;
+    XELOGW(
+        "Device creation still fails with every core feature disabled ({}). "
+        "The refusal is in an extension feature structure; probing the pNext "
+        "chain.",
+        vk::to_string(vk::Result(result)));
+
+    std::vector<VkBaseOutStructure*> chain;
+    for (auto* node = static_cast<VkBaseOutStructure*>(
+             const_cast<void*>(device_create_info.pNext));
+         node; node = node->pNext) {
+      chain.push_back(node);
+    }
+
+    // Relinks the chain, optionally omitting one node.
+    auto relink = [&](size_t omit_index) {
+      VkBaseOutStructure* head = nullptr;
+      VkBaseOutStructure* tail = nullptr;
+      for (size_t i = 0; i < chain.size(); ++i) {
+        if (i == omit_index) {
+          continue;
+        }
+        if (tail) {
+          tail->pNext = chain[i];
+        } else {
+          head = chain[i];
+        }
+        tail = chain[i];
+      }
+      if (tail) {
+        tail->pNext = nullptr;
+      }
+      device_create_info.pNext = head;
+    };
+
+    for (size_t i = 0; i < chain.size(); ++i) {
+      relink(i);
+      probe_device = VK_NULL_HANDLE;
+      if (ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
+                             &probe_device) != VK_SUCCESS) {
+        continue;
+      }
+      ifn.vkDestroyDevice(probe_device, nullptr);
+      XELOGW("Feature structure {} contains the refusal; narrowing to a field.",
+             vk::to_string(vk::StructureType(chain[i]->sType)));
+
+      // Dropping a whole structure turns off every feature it carries while
+      // the emulator still believes they are on - for VkPhysicalDeviceVulkan13
+      // Features that means dynamicRendering, and the guest renders nothing.
+      // Narrow to the individual field so the rest stay enabled.
+      relink(chain.size());
+      if (chain[i]->sType ==
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
+        static const char* const kVulkan13FeatureNames[] = {
+            "robustImageAccess",
+            "inlineUniformBlock",
+            "descriptorBindingInlineUniformBlockUpdateAfterBind",
+            "pipelineCreationCacheControl",
+            "privateData",
+            "shaderDemoteToHelperInvocation",
+            "shaderTerminateInvocation",
+            "subgroupSizeControl",
+            "computeFullSubgroups",
+            "synchronization2",
+            "textureCompressionASTC_HDR",
+            "shaderZeroInitializeWorkgroupMemory",
+            "dynamicRendering",
+            "shaderIntegerDotProduct",
+            "maintenance4",
+        };
+        auto* const features_1_3 =
+            reinterpret_cast<VkPhysicalDeviceVulkan13Features*>(chain[i]);
+        VkBool32* const fields = &features_1_3->robustImageAccess;
+        const size_t field_count =
+            (sizeof(*features_1_3) -
+             offsetof(VkPhysicalDeviceVulkan13Features, robustImageAccess)) /
+            sizeof(VkBool32);
+        static_assert(sizeof(kVulkan13FeatureNames) /
+                              sizeof(kVulkan13FeatureNames[0]) ==
+                          15,
+                      "VkPhysicalDeviceVulkan13Features field list is stale");
+
+        // Disable cumulatively: keep a field off once it has been ruled out, so
+        // several refused fields still converge.
+        for (size_t j = 0; j < field_count && j < 15; ++j) {
+          if (!fields[j]) {
+            continue;
+          }
+          fields[j] = VK_FALSE;
+          probe_device = VK_NULL_HANDLE;
+          if (ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
+                                 &probe_device) != VK_SUCCESS) {
+            XELOGW(
+                "Vulkan 1.3 feature {} disabled, still refused; leaving it off "
+                "and continuing.",
+                kVulkan13FeatureNames[j]);
+            continue;
+          }
+          ifn.vkDestroyDevice(probe_device, nullptr);
+          XELOGE(
+              "*** Vulkan 1.3 feature REFUSED by vkCreateDevice: {} *** "
+              "Creating the device with that one feature off and everything "
+              "else intact.",
+              kVulkan13FeatureNames[j]);
+          return ifn.vkCreateDevice(physical_device, &device_create_info,
+                                    nullptr, &device_out);
+        }
+        XELOGE(
+            "No single Vulkan 1.3 field accounted for the refusal; falling "
+            "back to dropping the whole structure.");
+      }
+
+      relink(i);
+      XELOGE(
+          "*** Vulkan feature structure REFUSED by vkCreateDevice: {} *** "
+          "Creating the device without it. Every feature it carries is now "
+          "OFF while the emulator still believes it is on, so this session is "
+          "for capture and diagnosis only - do not trust rendering or "
+          "performance results from it.",
+          vk::to_string(vk::StructureType(chain[i]->sType)));
+      result = ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
+                                  &device_out);
+      if (result != VK_SUCCESS) {
+        // Relinking left the chain in the reduced state deliberately; restore
+        // it so the caller's failure report describes what was asked for.
+        relink(chain.size());
+      }
+      return result;
+    }
+
+    relink(chain.size());
+    XELOGE(
+        "No single feature structure was responsible - removing any one of "
+        "them still leaves vkCreateDevice refusing. The layer or driver is "
+        "rejecting a combination.");
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+  }
+  ifn.vkDestroyDevice(probe_device, nullptr);
+
+  // Probe each requested feature on its own. A feature that fails alone is
+  // refused outright; testing them individually also means several independent
+  // culprits are all found in this one pass.
+  std::vector<bool> rejected(feature_count, false);
+  size_t rejected_count = 0;
+  for (size_t i = 0; i < feature_count; ++i) {
+    if (!requested[i]) {
+      continue;
+    }
+    std::memset(&enabled_features, 0, sizeof(enabled_features));
+    features[i] = VK_TRUE;
+    probe_device = VK_NULL_HANDLE;
+    result = ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
+                                &probe_device);
+    if (result == VK_SUCCESS) {
+      ifn.vkDestroyDevice(probe_device, nullptr);
+      continue;
+    }
+    rejected[i] = true;
+    ++rejected_count;
+    XELOGE("*** Vulkan feature REFUSED by vkCreateDevice: {} ({}) ***",
+           kPhysicalDeviceFeatureNames[i],
+           vk::to_string(vk::Result(result)));
+  }
+
+  // Retry with everything that was requested except the refused features.
+  enabled_features = requested_features;
+  for (size_t i = 0; i < feature_count; ++i) {
+    if (rejected[i]) {
+      features[i] = VK_FALSE;
+    }
+  }
+
+  if (!rejected_count) {
+    XELOGE(
+        "No individual feature was refused, so the failure depends on a "
+        "combination of features. Giving up on the fallback.");
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+  }
+
+  result = ifn.vkCreateDevice(physical_device, &device_create_info, nullptr,
+                              &device_out);
+  if (result == VK_SUCCESS) {
+    XELOGW(
+        "Vulkan device created with {} feature(s) dropped. Emulation will run, "
+        "but anything depending on those features is degraded - treat results "
+        "from this session with that in mind.",
+        rejected_count);
+  }
+  return result;
+}
+
+}  // namespace
 
 template <typename Structure, VkStructureType StructureType>
 struct VulkanFeatures {
@@ -82,7 +403,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
                           VK_API_VERSION_MAJOR(unclamped_api_version),
                           VK_API_VERSION_MINOR(unclamped_api_version), 0),
       vulkan_instance->api_version() >= VK_MAKE_API_VERSION(0, 1, 1, 0)
-          ? kHighestUsedApiMinorVersion
+          ? HighestUsedApiMinorVersion()
           : VK_MAKE_API_VERSION(0, 1, 0, 0));
   properties.apiVersion =
       VK_MAKE_API_VERSION(VK_API_VERSION_VARIANT(clamped_api_minor_version),
@@ -1067,8 +1388,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   // Create the device.
 
-  const VkResult device_create_result = ifn.vkCreateDevice(
+  VkResult device_create_result = ifn.vkCreateDevice(
       physical_device, &device_create_info, nullptr, &device->device_);
+  if (device_create_result == VK_ERROR_FEATURE_NOT_PRESENT) {
+    device_create_result = CreateDeviceDroppingRejectedFeatures(
+        ifn, physical_device, device_create_info, enabled_features,
+        properties.deviceName, device->device_);
+  }
   if (device_create_result != VK_SUCCESS) {
     XELOGE(
         "Failed to create a Vulkan logical device from the physical device "

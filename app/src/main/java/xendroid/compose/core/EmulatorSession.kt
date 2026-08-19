@@ -128,6 +128,11 @@ class EmulatorSession {
 
     fun averageFps(): Double = if (booted) core.average_fps() else 0.0
 
+    /** Guest frame counter, matching the "f:NNNNNNN" stamp on the GPU log lines.
+     *  Shown on the debug overlay so a screenshot can be tied to the exact
+     *  frame's log output. */
+    fun guestFrameIndex(): Long = if (booted) core.guest_frame_index() else 0L
+
     /** Effective show_debug_overlay (global + per-game override). The override lands on the
      *  detached boot thread, so callers must POLL this after boot. */
     fun showDebugOverlayEnabled(): Boolean = if (booted) core.show_debug_overlay_enabled() else false

@@ -134,6 +134,19 @@ DEFINE_bool(
     "address reuse within and across frames.",
     "GPU");
 
+DEFINE_bool(
+    log_resolve_regions, false,
+    "Log every resolve's destination address and rectangle, and a per-frame "
+    "summary of them, stamped with the guest frame number the debug overlay "
+    "shows.\n"
+    "This is the instrument for the horizontal band: on a banded frame the "
+    "EDRAM ownership transfers are complete (measured), and the bad strip "
+    "shows the PREVIOUS frame's picture rather than a dark or missing one - so "
+    "the copy that did not happen is the resolve out of EDRAM into the guest "
+    "surface. A strip that is drawn but never resolved looks exactly like "
+    "this. Respects the armed window of log_render_pass_extents_arm_frames.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -3300,6 +3313,16 @@ bool VulkanRenderTargetCache::Resolve(
   if (cvars::log_resolve_details) {
     RecordResolveDetails(resolve_info, copied, direct_host_used);
   }
+  if (cvars::log_resolve_regions && diagnostic_log_window_open()) {
+    // Sizes are in samples; at 4xMSAA that is 2x the guest pixels each way, but
+    // the raw numbers are what the resolve registers hold, so they are recorded
+    // as they are and converted where they are read.
+    resolve_regions_this_frame_.push_back(ResolveRegionRecord{
+        resolve_info.copy_dest_base, resolve_info.copy_dest_x0,
+        resolve_info.copy_dest_y0,
+        uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
+        resolve_info.height_div_8 * 8, copied});
+  }
 
   return copied && cleared;
 }
@@ -3365,7 +3388,24 @@ void VulkanRenderTargetCache::RecordResolveDetails(
   }
 }
 
-void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
+void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd(
+    uint64_t frame_index) {
+  // Per-frame resolve regions. Printed before anything can clear them, and
+  // printed for EVERY frame in the window even when there were none, so a
+  // frame with no resolves at all is visible as such rather than as a gap in
+  // the log.
+  if (cvars::log_resolve_regions && diagnostic_log_window_open()) {
+    for (const ResolveRegionRecord& r : resolve_regions_this_frame_) {
+      XELOGI(
+          "ResolveRegion: f:{} dest=0x{:08X} x {}..{} y {}..{} ({}x{} samples)"
+          "{}",
+          frame_index, r.dest_base, r.x0, r.x0 + r.width, r.y0,
+          r.y0 + r.height, r.width, r.height, r.copied ? "" : " NOT COPIED");
+    }
+    XELOGI("ResolveSummary: f:{} {} resolve(s)", frame_index,
+           resolve_regions_this_frame_.size());
+  }
+  resolve_regions_this_frame_.clear();
   if (cvars::log_host_depth_fallback && host_depth_planned_) {
     // Reported per frame rather than accumulated, because what matters is
     // whether this happens while the artifact is on screen, not the lifetime

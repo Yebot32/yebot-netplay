@@ -1159,6 +1159,13 @@ static jdouble j_average_fps(JNIEnv* env, jobject thiz) {
     return (jdouble)fps;
 }
 
+// The command processor's guest frame counter - the same number the GPU logs stamp
+// as "f:NNNNNNN". Shown on the debug overlay so a screenshot can be joined to the
+// exact log lines for the frame it captured.
+static jlong j_guest_frame_index(JNIEnv* env, jobject thiz) {
+    return (jlong)xe::GetGuestFrameIndex();
+}
+
 // EFFECTIVE Display|show_debug_overlay, i.e. the live cvar AFTER any per-game config
 // overlay. xenia's LoadGameConfig applies a game-specific override into this cvar
 // during module load (on the detached boot thread), so the Compose overlay gate must
@@ -1793,6 +1800,7 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"debug_overlay_text", "()Ljava/lang/String;", (void *) j_debug_overlay_text}
             ,{"instant_fps", "()D", (void *) j_instant_fps}
             ,{"average_fps", "()D", (void *) j_average_fps}
+            ,{"guest_frame_index", "()J", (void *) j_guest_frame_index}
             ,{"last_frame_time_ms", "()D", (void *) j_last_frame_time_ms}
             ,{"show_debug_overlay_enabled", "()Z", (void *) j_show_debug_overlay_enabled}
             ,{"show_touch_overlay_enabled", "()Z", (void *) j_show_touch_overlay_enabled}

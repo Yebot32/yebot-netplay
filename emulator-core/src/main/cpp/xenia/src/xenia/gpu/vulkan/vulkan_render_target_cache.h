@@ -124,7 +124,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   // Called once per guest frame (from IssueSwap) to aggregate and, once per
   // second, log the resolve classification when log_resolve_details is set.
-  void LogResolveDetailsOnFrameEnd();
+  // Called once per guest frame (from IssueSwap). [frame_index] is the command
+  // processor's counter - the number the debug overlay shows - so the per-frame
+  // resolve report can be joined to a screenshot of that exact frame.
+  void LogResolveDetailsOnFrameEnd(uint64_t frame_index);
 
   Path GetPath() const override { return path_; }
 
@@ -1218,6 +1221,25 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   std::vector<uint32_t> resolve_dests_previous_frame_;
   void RecordResolveDetails(const draw_util::ResolveInfo& resolve_info,
                             bool copied, bool direct_host);
+
+  // *** WHERE EACH FRAME ACTUALLY RESOLVED TO, PER FRAME. ***
+  //
+  // The EDRAM ownership transfers are complete on a banded frame - measured -
+  // and the band is the TOP STRIP showing the PREVIOUS frame's picture, not a
+  // missing or dark strip. Stale, not absent, means the copy out of EDRAM into
+  // the guest surface is what did not happen for that strip, so this records
+  // the destination and rectangle of every resolve and reports them per frame.
+  // A banded frame should be missing the strip's rectangle, or be resolving it
+  // to somewhere else.
+  struct ResolveRegionRecord {
+    uint32_t dest_base;
+    uint32_t x0;
+    uint32_t y0;
+    uint32_t width;
+    uint32_t height;
+    bool copied;
+  };
+  std::vector<ResolveRegionRecord> resolve_regions_this_frame_;
 
   // Temporary storage for PerformTransfersAndResolveClears.
   std::vector<TransferInvocation> current_transfer_invocations_;

@@ -210,6 +210,35 @@ class RenderTargetCache {
 
   virtual void BeginFrame();
 
+  // *** CALL THIS ONCE PER PRESENTED GUEST FRAME, FROM IssueSwap. ***
+  //
+  // Reports what the frame's EDRAM ownership transfers covered, then discards
+  // the accounting. [frame_index] is the command processor's own counter - the
+  // number the debug overlay shows as f:NNNN - so a banded screenshot joins to
+  // this line.
+  //
+  // It is NOT hung off BeginFrame, which is where it used to live: BeginFrame
+  // is called by the Metal command processor and by nobody else, so on the
+  // Vulkan path - the only path Android runs - it never executed. #24 4.6's
+  // "zero transfer gaps over 21,000 frames" was therefore not a weak result,
+  // it was no result at all, and the coverage map it fed grew for the whole
+  // session instead of being cleared per frame (holding pointers to render
+  // targets that had since been deleted).
+  void ReportEdramTransferCoverage(uint64_t frame_index);
+
+  // Opens or closes the armed diagnostic window (see
+  // log_render_pass_extents_arm_frames - one touch of the sentinel arms every
+  // GPU instrument, so their output is joinable frame by frame). Takes effect
+  // from the next frame, since it is set at frame end. Reopening resets the
+  // per-window line budget, or a second window would log nothing after the
+  // first had spent it.
+  void SetDiagnosticLogWindowOpen(bool open);
+
+  // For instruments in the backends that must fall silent with everything else.
+  bool diagnostic_log_window_open() const {
+    return diagnostic_log_window_open_;
+  }
+
   virtual bool Update(bool is_rasterization_done,
                       reg::RB_DEPTHCONTROL normalized_depth_control,
                       uint32_t normalized_color_mask,
@@ -790,6 +819,36 @@ class RenderTargetCache {
   };
   OwnershipClaimMemo
       ownership_claim_memos_[1 + xenos::kMaxColorRenderTargets];
+
+  // log_edram_transfers accounting. A render target is legitimately restored by
+  // several updates within one frame (0..368 then 368..720, say), so a single
+  // update covering only part of it proves nothing. Coverage is accumulated per
+  // render target across the frame and only reported once the frame ends, where
+  // a genuine hole - an interior gap, or a start below the top - is separable
+  // from ordinary split coverage.
+  struct EdramTransferCoverage {
+    // Half-open guest pixel row spans this frame's transfers restored.
+    std::vector<std::pair<uint32_t, uint32_t>> spans;
+    // How many transfers and rectangles produced them. A strip that stops
+    // being restored shows up here as a missing transfer, not only as a
+    // missing span, so the two disagree loudly if the accounting is wrong.
+    uint32_t transfers = 0;
+    uint32_t rectangles = 0;
+    // Copied out of the render target, so the report never dereferences a
+    // pointer to something the cache may have deleted during the frame.
+    RenderTargetKey key;
+  };
+  std::map<const RenderTarget*, EdramTransferCoverage> edram_transfer_coverage_;
+
+  // Detail-line budget for log_edram_transfers. A member rather than a
+  // function-local static so that reopening the armed window can reset it -
+  // as a static it was spent once, for the whole process, and every later
+  // window logged nothing while still looking armed.
+  uint32_t edram_transfer_lines_used_ = 0;
+
+  // False while the armed diagnostic window is shut. Defaults to open so an
+  // unarmed configuration behaves exactly as before.
+  bool diagnostic_log_window_open_ = true;
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.

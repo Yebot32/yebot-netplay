@@ -9,9 +9,13 @@
 
 #include "xenia/gpu/render_target_cache.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <string>
 
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -22,6 +26,26 @@
 #include "xenia/gpu/xenos.h"
 
 DECLARE_bool(log_host_depth_fallback);
+
+DEFINE_int32(
+    log_edram_transfers, 0,
+    "Log each EDRAM ownership transfer as the guest pixel ROWS it restores, "
+    "not just the tile range, for at most this many lines (0 = off, negative "
+    "= unlimited).\n"
+    "For a horizontal band of stale or missing pixels - the class of artifact "
+    "whose seam lands on an EDRAM tile-row boundary - the question is never "
+    "whether transfers happened, it is which scanlines each one covered and "
+    "which scanlines nothing covered at all. This prints both, so a band "
+    "observed at rows N..M can be matched against the transfer that should "
+    "have restored it. Bounded by a line budget because it prints per render "
+    "target per update, which is several times per frame.\n"
+    "The budget bounds the PRINTING only. A per-frame EdramFrameXfer line (one "
+    "per render target, with the merged rows and the transfer count) and an "
+    "EdramSummary line are written for every frame whatever the budget, so a "
+    "banded screenshot can be joined to that frame by its f: stamp. Respects "
+    "the armed window of log_render_pass_extents_arm_frames, which arms every "
+    "GPU instrument at once.",
+    "GPU");
 
 DEFINE_bool(
     rt_cache_ownership_claim_memo, true,
@@ -612,6 +636,90 @@ void RenderTargetCache::ClearCache() {
 
 void RenderTargetCache::BeginFrame() { ResetAccumulatedRenderTargets(); }
 
+void RenderTargetCache::SetDiagnosticLogWindowOpen(bool open) {
+  if (open && !diagnostic_log_window_open_) {
+    edram_transfer_lines_used_ = 0;
+  }
+  diagnostic_log_window_open_ = open;
+}
+
+// Reports what this frame's EDRAM ownership transfers covered, per render
+// target, and clears the accounting for the next one.
+//
+// This is the instrument section 8.1 of briefing #25 asks for. The band's edge
+// sits exactly on a strip boundary (guest rows 208 / 464 / 720 - the bottom
+// edges of the three horizontal strips FH2 renders each frame into the same
+// 10 MB of EDRAM), and the pass STRUCTURE of a banded frame is identical to a
+// good one, so what is left is the transfers that move each strip out of EDRAM
+// and back. A per-frame line for each render target, stamped with the frame the
+// overlay shows, is what makes "the banded frames are the ones where this strip
+// was not restored" a five-minute test instead of a session.
+//
+// Two things are deliberate. The summary is printed EVERY frame, including when
+// nothing was covered at all, so "found nothing" stays distinguishable from
+// "never ran" - the exact flaw that left #24 4.6 unproven. And full coverage is
+// reported as well as holes: a run of good frames whose coverage is complete is
+// evidence ABOUT the transfers, whereas a silent instrument is evidence about
+// nothing.
+void RenderTargetCache::ReportEdramTransferCoverage(uint64_t frame_index) {
+  if (cvars::log_edram_transfers == 0 || !diagnostic_log_window_open_) {
+    // Cleared even when silent. It used to be cleared only by the report,
+    // which never ran on this path, so it accumulated every rectangle of every
+    // frame for the life of the process.
+    edram_transfer_coverage_.clear();
+    return;
+  }
+
+  uint32_t targets_checked = 0;
+  uint32_t targets_with_holes = 0;
+  for (auto& [render_target, coverage] : edram_transfer_coverage_) {
+    if (coverage.spans.empty()) {
+      continue;
+    }
+    ++targets_checked;
+    std::sort(coverage.spans.begin(), coverage.spans.end());
+    std::vector<std::pair<uint32_t, uint32_t>> merged;
+    for (const auto& span : coverage.spans) {
+      if (!merged.empty() && span.first <= merged.back().second) {
+        merged.back().second = std::max(merged.back().second, span.second);
+      } else {
+        merged.push_back(span);
+      }
+    }
+
+    // The merged spans ARE the strips, named in the same guest rows the seam
+    // was measured in, so the two can be compared without arithmetic.
+    std::string rows;
+    for (const auto& span : merged) {
+      rows += fmt::format(" {}..{}", span.first, span.second);
+    }
+    std::string holes;
+    if (merged.front().first != 0) {
+      holes += fmt::format(" TOP UNCOVERED rows 0..{};", merged.front().first);
+    }
+    for (size_t i = 1; i < merged.size(); ++i) {
+      holes += fmt::format(" GAP rows {}..{};", merged[i - 1].second,
+                           merged[i].first);
+    }
+    if (!holes.empty()) {
+      ++targets_with_holes;
+    }
+
+    const RenderTargetKey& key = coverage.key;
+    XELOGI(
+        "EdramFrameXfer: f:{} {} rt base={} pitch={} {} width={} : {} "
+        "transfer(s), {} rect(s), rows{}{}{}",
+        frame_index, key.is_depth ? "depth" : "color", uint32_t(key.base_tiles),
+        key.GetPitchTiles(), key.GetFormatName(), key.GetWidth(),
+        coverage.transfers, coverage.rectangles, rows,
+        holes.empty() ? "" : " -", holes);
+  }
+
+  XELOGI("EdramSummary: f:{} {} render target(s) transferred, {} with holes",
+         frame_index, targets_checked, targets_with_holes);
+  edram_transfer_coverage_.clear();
+}
+
 bool RenderTargetCache::IsScaleNativeForPitch(
     uint32_t pitch_tiles_at_32bpp, xenos::MsaaSamples msaa_samples) const {
   uint32_t threshold = cvars::draw_resolution_scale_threshold;
@@ -989,6 +1097,93 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   if (interlock_barrier_only) {
     // No copying transfers or render target bindings - only needed the barrier.
     return true;
+  }
+
+  // Artifact diagnosis: report each ownership transfer in guest pixel rows.
+  // Reports what the transfers DID cover rather than testing for a suspected
+  // fault, so a run with no gaps is evidence the transfers are right, instead
+  // of evidence that a narrower check missed.
+  if (cvars::log_edram_transfers != 0 && diagnostic_log_window_open_) {
+    // Command-processor thread only, so a plain counter is enough. It was a
+    // function-local static atomic, which could never be reset - see
+    // SetDiagnosticLogWindowOpen.
+    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+      const std::vector<Transfer>& transfers = last_update_transfers_[i];
+      const RenderTarget* const dest =
+          (depth_and_color_rts_used_bits & (uint32_t(1) << i)) ? rts[i]
+                                                               : nullptr;
+      if (transfers.empty() || !dest) {
+        continue;
+      }
+      // *** THE LINE BUDGET GATES THE PRINTING, NEVER THE ACCOUNTING. ***
+      // It used to `break` out of the whole loop, which stopped accumulating
+      // coverage as well - so once the budget ran out the frame report would
+      // have shown missing strips that were transferred perfectly well. An
+      // instrument that manufactures the fault it is looking for is worse than
+      // no instrument.
+      const bool print_detail =
+          cvars::log_edram_transfers < 0 ||
+          edram_transfer_lines_used_ < uint32_t(cvars::log_edram_transfers);
+      const RenderTargetKey dest_key = dest->key();
+      const uint32_t dest_pitch_tiles = dest_key.GetPitchTiles();
+      // Rows the destination itself spans, so a transfer covering only part of
+      // it is visible as a shortfall rather than having to be inferred.
+      const uint32_t dest_width = dest_key.GetWidth();
+      EdramTransferCoverage& coverage = edram_transfer_coverage_[dest];
+      coverage.key = dest_key;
+      coverage.transfers += uint32_t(transfers.size());
+      if (print_detail) {
+        XELOGI(
+            "EdramXfer: {} rt base={} pitch={} {} width={} : {} transfer(s)",
+            i ? fmt::format("color{}", i - 1) : std::string("depth"),
+            uint32_t(dest_key.base_tiles), dest_pitch_tiles,
+            dest_key.GetFormatName(), dest_width, transfers.size());
+        ++edram_transfer_lines_used_;
+      }
+      uint32_t covered_row_min = UINT32_MAX;
+      uint32_t covered_row_max = 0;
+      for (size_t t = 0; t < transfers.size(); ++t) {
+        const Transfer& transfer = transfers[t];
+        Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithoutCutout];
+        const uint32_t rectangle_count = transfer.GetRectangles(
+            dest_key.base_tiles, dest_pitch_tiles, dest_key.msaa_samples,
+            dest_key.Is64bpp(), rectangles);
+        std::string rows;
+        for (uint32_t r = 0; r < rectangle_count; ++r) {
+          const Transfer::Rectangle& rectangle = rectangles[r];
+          const uint32_t row_end = rectangle.y_pixels + rectangle.height_pixels;
+          if (print_detail) {
+            rows += fmt::format(" rows {}..{}", rectangle.y_pixels, row_end);
+          }
+          covered_row_min = std::min(covered_row_min, rectangle.y_pixels);
+          covered_row_max = std::max(covered_row_max, row_end);
+          // Accumulated for the frame-end report, which is the only place
+          // partial coverage can be judged - see ReportEdramTransferCoverage.
+          coverage.spans.emplace_back(rectangle.y_pixels, row_end);
+          ++coverage.rectangles;
+        }
+        if (print_detail) {
+          XELOGI("EdramXfer:   [{}] tiles {}..{} <- base={} {}{} ->{}", t,
+                 transfer.start_tiles, transfer.end_tiles,
+                 transfer.source ? uint32_t(transfer.source->key().base_tiles)
+                                 : 0u,
+                 transfer.source ? transfer.source->key().GetFormatName()
+                                 : "nothing",
+                 transfer.host_depth_source ? " +hostdepth" : "", rows);
+          ++edram_transfer_lines_used_;
+        }
+      }
+      if (print_detail && covered_row_min != UINT32_MAX) {
+        // Stated without a verdict: one update covering part of a target is
+        // routine, and an earlier version of this flagged every such update as
+        // a fault - 15,333 of them in one session, almost all of them ordinary
+        // split coverage. The judgement belongs at frame end, where the whole
+        // frame's coverage is known.
+        XELOGI("EdramXfer:   this update covered rows {}..{}", covered_row_min,
+               covered_row_max);
+        ++edram_transfer_lines_used_;
+      }
+    }
   }
 
   // If everything succeeded, update the used render targets.

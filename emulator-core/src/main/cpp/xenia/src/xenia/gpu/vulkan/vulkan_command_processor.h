@@ -356,6 +356,15 @@ class VulkanCommandProcessor final : public CommandProcessor {
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
 
+  // Asks RenderDoc to capture the next frame when the trigger sentinel file
+  // appears. No-op unless renderdoc_trigger_poll_frames is set and the capture
+  // layer was actually injected into this process.
+  void PollRenderDocCaptureTrigger();
+
+  // Opens a bounded log_render_pass_extents window when its sentinel file
+  // appears, so the log is silent until the artifact is actually on screen.
+  void PollPassExtentArmTrigger();
+
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
 
@@ -919,6 +928,19 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   // Null unless the frame_inspector cvar is set. See vulkan_frame_inspector.h.
   std::unique_ptr<VulkanFrameInspector> frame_inspector_;
+
+  // log_render_pass_extents per-frame tallies, reported in IssueSwap. Touched
+  // only from the command processor thread.
+  uint32_t pass_extent_passes_this_frame_ = 0;
+  uint32_t pass_extent_clipped_this_frame_ = 0;
+  // Frames left in the armed logging window (see PollPassExtentArmTrigger).
+  uint32_t pass_extent_frames_remaining_ = 0;
+
+  // RenderDoc capture triggering (see PollRenderDocCaptureTrigger). Resolved on
+  // first poll rather than at init - the layer is injected by the Android
+  // loader, so nothing here owns it and it may simply not be there.
+  bool renderdoc_trigger_checked_ = false;
+  const ui::RenderDocAPI* renderdoc_api_ = nullptr;
 
   std::unique_ptr<VulkanZPDQueryPool> zpd_host_query_pool_;
 

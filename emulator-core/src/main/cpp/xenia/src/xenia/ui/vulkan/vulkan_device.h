@@ -47,6 +47,12 @@ class VulkanDevice {
   static constexpr uint32_t kHighestUsedApiMinorVersion =
       VK_MAKE_API_VERSION(0, 1, 3, 0);
 
+  // kHighestUsedApiMinorVersion clamped by the vulkan_max_api_minor_version
+  // cvar. Capping to 1.2 makes the emulator ask for the KHR/EXT feature
+  // structures rather than the promoted core-1.3 VkPhysicalDeviceVulkan13
+  // Features, which is what a capture layer that predates 1.3 can accept.
+  static uint32_t HighestUsedApiMinorVersion();
+
   struct Properties {
     // Vulkan 1.0
     uint32_t apiVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);

@@ -629,7 +629,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
   // VK_ERROR_INCOMPATIBLE_DRIVER if apiVersion was larger than 1.0."
   application_info.apiVersion =
       vulkan_instance->api_version_ >= VK_MAKE_API_VERSION(0, 1, 1, 0)
-          ? VulkanDevice::kHighestUsedApiMinorVersion
+          ? VulkanDevice::HighestUsedApiMinorVersion()
           : VK_MAKE_API_VERSION(0, 1, 0, 0);
 
   VkInstanceCreateInfo instance_create_info;

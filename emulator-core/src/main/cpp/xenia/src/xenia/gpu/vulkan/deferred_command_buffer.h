@@ -11,6 +11,7 @@
 #define XENIA_GPU_VULKAN_DEFERRED_COMMAND_BUFFER_H_
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -559,6 +560,20 @@ class DeferredCommandBuffer {
                 sizeof(VkViewport) * viewport_count);
   }
 
+  // Records the viewport in effect for the drawn-extent diagnostic.
+  //
+  // Deliberately NOT hooked into CmdVkSetViewport: that command is only emitted
+  // when the viewport actually changes, so a pass whose viewport was already
+  // correct records nothing and the tracker would read a stale value (or zero).
+  // The command processor calls this on every guest draw instead.
+  void SetTrackedViewport(const VkViewport& viewport) {
+    // Height may be negative (flipped Y); normalise to a bottom edge.
+    const float bottom = std::max(viewport.y, viewport.y + viewport.height);
+    current_viewport_bottom_ = std::max(0.0f, bottom);
+    current_viewport_right_ =
+        std::max(0.0f, viewport.x + std::abs(viewport.width));
+  }
+
   // Extended dynamic state (EDS1/EDS2, core in Vulkan 1.3). Each setter mirrors
   // the value that the static pipeline would otherwise bake.
   void CmdVkSetCullMode(VkCullModeFlags cull_mode) {
@@ -1081,6 +1096,33 @@ class DeferredCommandBuffer {
   uint32_t pass_drawn_width() const { return pass_drawn_width_; }
   uint32_t pass_drawn_height() const { return pass_drawn_height_; }
 
+  // The union of the pass's DRAW scissors only, with clear rects excluded.
+  //
+  // The two must not be conflated when asking whether geometry is being
+  // clipped. A guest clear covers the whole EDRAM range for the pitch, so it
+  // lands at the full framebuffer height and makes every pass containing one
+  // look like it has draws overflowing the attachment. Measured: that read
+  // 10,039 of 88,052 passes as "clipped", every one of them with a drawn
+  // height of exactly 8192, and all of them false.
+  uint32_t pass_draw_scissor_width() const { return pass_draw_scissor_width_; }
+  uint32_t pass_draw_scissor_height() const {
+    return pass_draw_scissor_height_;
+  }
+
+  // Number of draws (not clears) recorded in the pass.
+  uint32_t pass_recorded_draws() const { return pass_recorded_draws_; }
+
+  // The union of the viewports in effect at each draw. This is the bound that
+  // actually says where geometry can land: a draw scissor left at the full
+  // EDRAM range restricts nothing, so it cannot distinguish "geometry reaches
+  // past the attachment" from "nobody narrowed the scissor".
+  uint32_t pass_draw_viewport_width() const {
+    return pass_draw_viewport_width_;
+  }
+  uint32_t pass_draw_viewport_height() const {
+    return pass_draw_viewport_height_;
+  }
+
  private:
   // Offset of the last recorded begin-pass argument struct, in stream elements
   // (not a pointer - the stream vector reallocates as it grows).
@@ -1090,6 +1132,14 @@ class DeferredCommandBuffer {
   VkRect2D current_scissor_ = {};
   uint32_t pass_drawn_width_ = 0;
   uint32_t pass_drawn_height_ = 0;
+  // Draw scissors only - see pass_draw_scissor_width().
+  uint32_t pass_draw_scissor_width_ = 0;
+  uint32_t pass_draw_scissor_height_ = 0;
+  // Viewport bounds at draw time - see pass_draw_viewport_width().
+  float current_viewport_right_ = 0.0f;
+  float current_viewport_bottom_ = 0.0f;
+  uint32_t pass_draw_viewport_width_ = 0;
+  uint32_t pass_draw_viewport_height_ = 0;
   uint32_t pass_recorded_draws_ = 0;
   // Sampled from the diagnostic cvar at Reset so the per-bind path reads a
   // plain member instead of a cvar.
@@ -1107,6 +1157,10 @@ class DeferredCommandBuffer {
     render_area_patch_dynamic_ = dynamic_rendering;
     pass_drawn_width_ = 0;
     pass_drawn_height_ = 0;
+    pass_draw_scissor_width_ = 0;
+    pass_draw_scissor_height_ = 0;
+    pass_draw_viewport_width_ = 0;
+    pass_draw_viewport_height_ = 0;
     pass_recorded_draws_ = 0;
   }
 
@@ -1127,6 +1181,20 @@ class DeferredCommandBuffer {
       return;
     }
     ++pass_recorded_draws_;
+    pass_draw_viewport_width_ =
+        std::max(pass_draw_viewport_width_,
+                 uint32_t(std::ceil(std::max(0.0f, current_viewport_right_))));
+    pass_draw_viewport_height_ =
+        std::max(pass_draw_viewport_height_,
+                 uint32_t(std::ceil(std::max(0.0f, current_viewport_bottom_))));
+    pass_draw_scissor_width_ = std::max(
+        pass_draw_scissor_width_,
+        uint32_t(std::max(0, current_scissor_.offset.x)) +
+            current_scissor_.extent.width);
+    pass_draw_scissor_height_ = std::max(
+        pass_draw_scissor_height_,
+        uint32_t(std::max(0, current_scissor_.offset.y)) +
+            current_scissor_.extent.height);
     AccumulateDrawnRect(current_scissor_);
   }
 

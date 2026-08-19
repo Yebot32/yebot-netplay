@@ -36,7 +36,13 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
   // RenderDoc is attached - this is why RTLD_NOLOAD or GetModuleHandle instead
   // of LoadLibrary.
 #if XE_PLATFORM_LINUX
-#if XE_PLATFORM_ANDROID
+// XE_PLATFORM_ANDROID is deliberately left undefined by this fork (see
+// base/platform.h), so `#if XE_PLATFORM_ANDROID` here evaluates to 0 and falls
+// through to the desktop library name - the RTLD_NOLOAD probe then never finds
+// the layer that the Android loader actually injected, and the in-application
+// capture API is unavailable even with RenderDoc correctly attached. Test the
+// compiler's own __ANDROID__ so this does not depend on the fork's macro.
+#if defined(__ANDROID__)
   const char* const library_name = "libVkLayer_GLES_RenderDoc.so";
 #else
   const char* const library_name = "librenderdoc.so";

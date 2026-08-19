@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -40,12 +41,34 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/ui/vulkan/vulkan_diagnostics.h"
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(vulkan_in_pass_resolve_debug_read_usage);
 DECLARE_bool(log_gpu_frame_time_breakdown);
+
+DEFINE_int32(
+    log_render_pass_extents, 0,
+    "Log every render pass's framebuffer extent against the extent its draws "
+    "actually covered, for at most this many lines (0 = off, negative = "
+    "unlimited).\n"
+    "The render area is always the framebuffer's full host extent, and that "
+    "height comes from the render target's EDRAM tile count - so a pass whose "
+    "framebuffer is shorter than the geometry being drawn clips it, on a tile "
+    "boundary, leaving whatever was underneath. That is the shape of the "
+    "banded artifact this exists to find: it prints the framebuffer height "
+    "next to the drawn height, so a pass that cannot fit its own draws is "
+    "visible directly rather than inferred.\n"
+    "Clipping is judged on DRAW SCISSORS ONLY. A guest clear covers the whole "
+    "EDRAM range for the pitch, so including clear rects made every pass "
+    "holding one look clipped - 10,039 false positives out of 88,052 passes, "
+    "all with a drawn height of exactly 8192, and no true ones. The clear-"
+    "inclusive union is still printed, in brackets, for comparison.\n"
+    "A PassExtentSummary line is written every frame so a run that finds "
+    "nothing is distinguishable from a check that never executed.",
+    "GPU");
 
 DEFINE_bool(
     render_area_dirty_extent, false,
@@ -180,6 +203,43 @@ DEFINE_int32(
     "game renders anything, which is useless for chasing an in-game artifact. "
     "Set this past the point the artifact is on screen (the f: stamp in each "
     "log line is the frame number).",
+    "Vulkan");
+
+DEFINE_int32(
+    log_render_pass_extents_arm_frames, 0,
+    "When > 0, the GPU artifact instruments stay SILENT until armed, then log "
+    "for this many guest frames. Arm them by creating the file named by "
+    "log_render_pass_extents_arm_path (`adb shell touch <path>`).\n"
+    "Despite the name this arms log_edram_transfers as well, deliberately: the "
+    "two are read together for the same frame, and two separately armed "
+    "windows would describe two different moments.\n"
+    "Logging from boot is the wrong shape for chasing an intermittent artifact: "
+    "unlimited grows ~85 MB per minute at ~220 passes per frame (and the "
+    "synchronous flush is heavy enough to change frame timing, which may itself "
+    "suppress the artifact), while a plain line budget is exhausted during the "
+    "menus long before the game is anywhere interesting. Arming costs nothing "
+    "until the moment the artifact is actually on screen.",
+    "GPU");
+DEFINE_string(
+    log_render_pass_extents_arm_path,
+    "/sdcard/Android/data/Ali.Xanite.green.diag/files/compose/xenra-passlog-arm",
+    "Sentinel file that arms log_render_pass_extents_arm_frames. Deleted as "
+    "soon as it is seen, so one touch means one window.",
+    "GPU");
+
+DEFINE_int32(
+    renderdoc_trigger_poll_frames, 0,
+    "Poll for a RenderDoc capture trigger file every N presented guest frames "
+    "(0 disables). When the file named by renderdoc_trigger_path exists it is "
+    "deleted and RenderDoc is asked to capture the next frame. This is how a "
+    "capture is taken without driving the qrenderdoc GUI: with the artifact on "
+    "screen, `adb shell touch <path>` from the host. Requires RenderDoc to be "
+    "attached - if the layer is not injected this does nothing at all.",
+    "Vulkan");
+DEFINE_string(
+    renderdoc_trigger_path, "/sdcard/Download/xenra-capture-trigger",
+    "Path of the sentinel file polled by renderdoc_trigger_poll_frames. It is "
+    "deleted as soon as it is seen, so one touch means one capture.",
     "Vulkan");
 
 DECLARE_bool(gpu_debug_markers);
@@ -384,8 +444,10 @@ std::string VulkanCommandProcessor::GetTitleStateSuffix() const {
 bool VulkanCommandProcessor::SetupContext() {
   if (!CommandProcessor::SetupContext()) {
     XELOGE("Failed to initialize base command processor context");
+    ui::vulkan::GpuDiagnosticStage("base command processor context", false);
     return false;
   }
+  ui::vulkan::GpuDiagnosticStage("base command processor context", true);
 
   // Check if debug markers should be enabled (CVAR or RenderDoc detection).
   UpdateDebugMarkersEnabled();
@@ -609,8 +671,10 @@ bool VulkanCommandProcessor::SetupContext() {
       *this, *memory_, trace_writer_, guest_shader_pipeline_stages_);
   if (!shared_memory_->Initialize()) {
     XELOGE("Failed to initialize shared memory");
+    ui::vulkan::GpuDiagnosticStage("shared memory", false);
     return false;
   }
+  ui::vulkan::GpuDiagnosticStage("shared memory", true);
 
   // Read-watch consumption tracking for resolves.
   InitResolveReadWatch();
@@ -621,8 +685,10 @@ bool VulkanCommandProcessor::SetupContext() {
       *register_file_, *memory_, trace_writer_, *shared_memory_, *this);
   if (!primitive_processor_->Initialize()) {
     XELOGE("Failed to initialize the geometric primitive processor");
+    ui::vulkan::GpuDiagnosticStage("geometric primitive processor", false);
     return false;
   }
+  ui::vulkan::GpuDiagnosticStage("geometric primitive processor", true);
 
   uint32_t shared_memory_binding_count_log2 =
       SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
@@ -656,8 +722,18 @@ bool VulkanCommandProcessor::SetupContext() {
       draw_resolution_scale_y, *this);
   if (!render_target_cache_->Initialize(shared_memory_binding_count)) {
     XELOGE("Failed to initialize the render target cache");
+    ui::vulkan::GpuDiagnosticStage("render target cache", false);
     return false;
   }
+  ui::vulkan::GpuDiagnosticStage("render target cache", true);
+  // Which EDRAM path was chosen is the single most informative line for a GPU
+  // without fragment shader interlock, which is every Mali part.
+  ui::vulkan::GpuDiagnosticNote(
+      std::string("           EDRAM path: ") +
+      (render_target_cache_->GetPath() ==
+               RenderTargetCache::Path::kPixelShaderInterlock
+           ? "pixel shader interlock (FSI)"
+           : "host render targets (FBO)"));
 
   frame_inspector_ = std::make_unique<VulkanFrameInspector>(*this);
 
@@ -725,8 +801,10 @@ bool VulkanCommandProcessor::SetupContext() {
       guest_shader_vertex_stages_);
   if (!pipeline_cache_->Initialize()) {
     XELOGE("Failed to initialize the graphics pipeline cache");
+    ui::vulkan::GpuDiagnosticStage("graphics pipeline cache", false);
     return false;
   }
+  ui::vulkan::GpuDiagnosticStage("graphics pipeline cache", true);
 
   // Requires the transient descriptor set layouts.
   // Use the same draw resolution scale as render target cache
@@ -735,8 +813,10 @@ bool VulkanCommandProcessor::SetupContext() {
       draw_resolution_scale_y, *this, guest_shader_pipeline_stages_);
   if (!texture_cache_) {
     XELOGE("Failed to initialize the texture cache");
+    ui::vulkan::GpuDiagnosticStage("texture cache", false);
     return false;
   }
+  ui::vulkan::GpuDiagnosticStage("texture cache", true);
 
   // Fallback for query segment normalization when no draw pinned a scale.
   zpd_draw_resolution_scale_x_ = draw_resolution_scale_x;
@@ -1715,6 +1795,13 @@ bool VulkanCommandProcessor::SetupContext() {
   system_constants_.zpd_fsi_counter_index = UINT32_MAX;
   zpd_fsi_counter_index_force_update_ = true;
 
+  ui::vulkan::GpuDiagnosticStage("GPU context setup COMPLETE", true);
+  ui::vulkan::GpuDiagnosticNote(
+      "\nThe GPU backend initialized fully. If the emulator still shows a "
+      "black\nscreen or crashes from here, the fault is past setup - in "
+      "drawing or\npresentation - so the Xenia log is needed as well as this "
+      "report.");
+
   return true;
 }
 
@@ -2322,6 +2409,84 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
 }
 
+void VulkanCommandProcessor::PollPassExtentArmTrigger() {
+  if (cvars::log_render_pass_extents_arm_frames <= 0) {
+    return;
+  }
+  if (pass_extent_frames_remaining_ > 0) {
+    if (--pass_extent_frames_remaining_ == 0) {
+      XELOGI(
+          "PassExtentArm: window closed at frame {}; touch {} to arm another",
+          frame_current_, cvars::log_render_pass_extents_arm_path);
+    }
+    return;
+  }
+  // Only stat the filesystem occasionally - this runs on the command processor
+  // thread once per presented frame.
+  if (frame_current_ % 30 != 0) {
+    return;
+  }
+  FILE* arm = std::fopen(cvars::log_render_pass_extents_arm_path.c_str(), "rb");
+  if (!arm) {
+    return;
+  }
+  std::fclose(arm);
+  std::remove(cvars::log_render_pass_extents_arm_path.c_str());
+  pass_extent_frames_remaining_ =
+      uint32_t(cvars::log_render_pass_extents_arm_frames);
+  XELOGI("PassExtentArm: armed at frame {} for {} frame(s)", frame_current_,
+         pass_extent_frames_remaining_);
+}
+
+void VulkanCommandProcessor::PollRenderDocCaptureTrigger() {
+  if (cvars::renderdoc_trigger_poll_frames <= 0) {
+    return;
+  }
+  if (frame_current_ % uint64_t(cvars::renderdoc_trigger_poll_frames) != 0) {
+    return;
+  }
+
+  // Resolved lazily and once: the layer is injected before the first frame, so
+  // if it is absent here it will stay absent, and saying so plainly is the
+  // whole point - a silent no-op looks identical to "captured nothing".
+  if (!renderdoc_trigger_checked_) {
+    renderdoc_trigger_checked_ = true;
+    const ui::vulkan::VulkanInstance* instance =
+        static_cast<const ui::vulkan::VulkanProvider*>(
+            graphics_system_->provider())
+            ->vulkan_instance();
+    renderdoc_api_ = instance ? instance->renderdoc_api() : nullptr;
+    if (renderdoc_api_) {
+      XELOGI(
+          "RenderDocTrigger: RenderDoc is attached, watching {} every {} "
+          "frame(s)",
+          cvars::renderdoc_trigger_path,
+          cvars::renderdoc_trigger_poll_frames);
+    } else {
+      XELOGE(
+          "RenderDocTrigger: renderdoc_trigger_poll_frames is set but the "
+          "RenderDoc in-application API is NOT available - the capture layer "
+          "was not injected into this process. No capture can be taken.");
+    }
+  }
+  if (!renderdoc_api_) {
+    return;
+  }
+
+  FILE* trigger = std::fopen(cvars::renderdoc_trigger_path.c_str(), "rb");
+  if (!trigger) {
+    return;
+  }
+  std::fclose(trigger);
+  // Delete first, so a failed capture cannot leave the trigger armed and
+  // capture every frame from here on.
+  std::remove(cvars::renderdoc_trigger_path.c_str());
+
+  renderdoc_api_->api_1_0_0()->TriggerCapture();
+  XELOGI("RenderDocTrigger: capture requested at guest frame {}",
+         frame_current_);
+}
+
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                        uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
@@ -2330,9 +2495,12 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // Count one presented guest frame for the debug overlay's FPS / frame-time
   // stats (the game's real frame rate, independent of the host present path).
   xe::RecordGuestPresent();
+  // Same counter the GPU log lines stamp as "f:NNNNNNN", so a screenshot of the
+  // overlay can be joined to the exact log lines for that frame.
+  xe::PublishGuestFrameIndex(frame_current_);
 
   if (render_target_cache_) {
-    render_target_cache_->LogResolveDetailsOnFrameEnd();
+    render_target_cache_->LogResolveDetailsOnFrameEnd(frame_current_);
   }
 
   // Closes out the frame the inspector was capturing - reading back and writing
@@ -2340,6 +2508,41 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // requested run of frames is done.
   if (frame_inspector_ && frame_inspector_->active()) {
     frame_inspector_->OnGuestFrameEnd(frame_current_);
+  }
+
+  PollRenderDocCaptureTrigger();
+  PollPassExtentArmTrigger();
+
+  // One armed window drives EVERY GPU instrument, so their per-frame lines can
+  // be read side by side for the same frame instead of being captured in two
+  // separate runs that no longer describe the same moment.
+  const bool diagnostic_window_open =
+      cvars::log_render_pass_extents_arm_frames <= 0 ||
+      pass_extent_frames_remaining_ > 0;
+
+  // EDRAM ownership transfers, per frame, stamped with the frame the debug
+  // overlay shows. This is briefing #25's section 8.1 lead: the seam is a strip
+  // boundary and the pass structure of a banded frame is identical to a good
+  // one, so what remains is the transfers that move each strip out of EDRAM and
+  // back. Called from HERE, not from RenderTargetCache::BeginFrame, which
+  // nothing on the Vulkan path has ever called.
+  if (render_target_cache_) {
+    render_target_cache_->ReportEdramTransferCoverage(frame_current_);
+    // Applies from the next frame, this being frame end.
+    render_target_cache_->SetDiagnosticLogWindowOpen(diagnostic_window_open);
+  }
+
+  // Written every frame, including when the count is zero: #24 4.6's EdramGap
+  // checker was built with no such line, so "no hits" and "the check never ran"
+  // were indistinguishable and the result could not be trusted.
+  if (cvars::log_render_pass_extents != 0 && diagnostic_window_open) {
+    XELOGI(
+        "PassExtentSummary: f:{} {} pass(es) checked, {} with draws exceeding "
+        "the framebuffer",
+        frame_current_, pass_extent_passes_this_frame_,
+        pass_extent_clipped_this_frame_);
+    pass_extent_passes_this_frame_ = 0;
+    pass_extent_clipped_this_frame_ = 0;
   }
 
   if (cvars::log_gpu_frame_time_breakdown) {
@@ -3490,6 +3693,88 @@ void VulkanCommandProcessor::EndRenderPass() {
   } else {
     deferred_command_buffer_.CmdVkEndRenderPass();
   }
+  // Artifact diagnosis: the framebuffer's height is derived from the render
+  // target's EDRAM tile count, and the render area is always that full extent,
+  // so a pass whose framebuffer is shorter than its own draws clips them on a
+  // tile boundary. Printed before current_framebuffer_ is cleared.
+  // When arming is configured, stay completely silent outside the window.
+  const bool pass_extents_active =
+      cvars::log_render_pass_extents_arm_frames <= 0 ||
+      pass_extent_frames_remaining_ > 0;
+  if (cvars::log_render_pass_extents != 0 && current_framebuffer_ &&
+      pass_extents_active) {
+    static std::atomic<int32_t> render_pass_extent_lines_used{0};
+    if (cvars::log_render_pass_extents < 0 ||
+        render_pass_extent_lines_used.load(std::memory_order_relaxed) <
+            cvars::log_render_pass_extents) {
+      // Judge clipping on the DRAW scissors alone. The union with clear rects
+      // is useless for this: a guest clear covers the full EDRAM range for the
+      // pitch, so every pass containing one reported a drawn height of exactly
+      // 8192 and looked clipped. That produced 10,039 false positives out of
+      // 88,052 passes and no true ones.
+      const uint32_t draw_width =
+          deferred_command_buffer_.pass_draw_scissor_width();
+      const uint32_t draw_height =
+          deferred_command_buffer_.pass_draw_scissor_height();
+      const uint32_t union_width = deferred_command_buffer_.pass_drawn_width();
+      const uint32_t union_height =
+          deferred_command_buffer_.pass_drawn_height();
+      const uint32_t draws = deferred_command_buffer_.pass_recorded_draws();
+      const uint32_t viewport_width =
+          deferred_command_buffer_.pass_draw_viewport_width();
+      const uint32_t viewport_height =
+          deferred_command_buffer_.pass_draw_viewport_height();
+      const VkExtent2D& host_extent = current_framebuffer_->host_extent;
+      // Only the height can clip on a tile boundary here - the width comes
+      // from the pitch, which the guest sets explicitly.
+      //
+      // Judge on the INTERSECTION of viewport and scissor. Neither alone works:
+      // measured, every scissor-flagged pass had a scissor of exactly 8192 (the
+      // full EDRAM range, because Xenia leaves it open unless the guest narrows
+      // it), and passes turned up with an 8192 viewport against a 16x16 scissor
+      // - wide open on one axis of the test and clamped to nothing on the
+      // other. Geometry can only land where both permit.
+      const uint32_t effective_height = std::min(viewport_height, draw_height);
+      const bool clipped = draws && effective_height > host_extent.height;
+      ++pass_extent_passes_this_frame_;
+      if (clipped) {
+        ++pass_extent_clipped_this_frame_;
+      }
+      // The render targets carry their EDRAM base and pitch in tiles, which is
+      // what turns this log into something that can be matched against the
+      // artifact: the band's seam is quantised to EDRAM TILE ROWS (16 guest
+      // scanlines), measured at guest row 464 = tile row 29 in the festival
+      // scene. A pass whose tile span stops at the seam row is the thing to
+      // look for. Every line is already stamped "f:NNNNNNN" by the logger, and
+      // the debug overlay now shows the same counter, so a banded screenshot
+      // can be joined straight to the passes of that exact frame.
+      const std::string render_targets =
+          render_target_cache_
+              ? render_target_cache_->GetLastUpdateRenderTargetsDebugName()
+              : std::string("(no cache)");
+      XELOGI(
+          "PassExtent: fb {}x{} draws {} effective {}x{} [viewport {}x{} "
+          "scissor {}x{} clears {}x{}] rt {}{}",
+          host_extent.width, host_extent.height, draws,
+          std::min(viewport_width, draw_width), effective_height,
+          viewport_width, viewport_height, draw_width, draw_height, union_width,
+          union_height, render_targets,
+          clipped ? "  *** DRAWS EXCEED THE FRAMEBUFFER - CLIPPED ***" : "");
+      render_pass_extent_lines_used.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      // Past the line budget - keep counting so the per-frame summary stays
+      // truthful even once the detailed log has stopped.
+      const uint32_t draws = deferred_command_buffer_.pass_recorded_draws();
+      ++pass_extent_passes_this_frame_;
+      if (draws &&
+          std::min(deferred_command_buffer_.pass_draw_viewport_height(),
+                   deferred_command_buffer_.pass_draw_scissor_height()) >
+              current_framebuffer_->host_extent.height) {
+        ++pass_extent_clipped_this_frame_;
+      }
+    }
+  }
+
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
   in_render_pass_ = false;
@@ -3848,6 +4133,10 @@ void VulkanCommandProcessor::BindExternalComputePipeline(VkPipeline pipeline) {
 }
 
 void VulkanCommandProcessor::SetViewport(const VkViewport& viewport) {
+  // Unconditionally, before the change check below: the Vk command is only
+  // emitted when the viewport changes, so tracking it there would leave the
+  // diagnostic reading a stale value on every pass that did not need an update.
+  deferred_command_buffer_.SetTrackedViewport(viewport);
   if (!dynamic_viewport_update_needed_) {
     dynamic_viewport_update_needed_ |= dynamic_viewport_.x != viewport.x;
     dynamic_viewport_update_needed_ |= dynamic_viewport_.y != viewport.y;

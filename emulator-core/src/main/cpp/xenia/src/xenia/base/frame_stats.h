@@ -35,7 +35,32 @@ inline std::atomic<float>& frame_fps() {
   static std::atomic<float> v{0.0f};
   return v;
 }
+inline std::atomic<uint64_t>& guest_frame_index() {
+  static std::atomic<uint64_t> v{0};
+  return v;
+}
 }  // namespace internal
+
+// Publishes the command processor's own frame counter - the SAME number the
+// GPU logs stamp their lines with as "f:NNNNNNN".
+//
+// The point is joining the two halves of the evidence. Screenshots could show
+// that a frame was wrong and the logs could show what the GPU did, but nothing
+// tied a particular screenshot to a particular log line, so every conclusion
+// had to be drawn from aggregates - which can exclude a hypothesis but can
+// never identify one. With this on the debug overlay, a screenshot carries the
+// exact frame it came from.
+//
+// Must be the command processor's counter and not a count of calls to
+// RecordGuestPresent, or the numbers would drift apart and the join would
+// silently line up the wrong frames.
+inline void PublishGuestFrameIndex(uint64_t frame_index) {
+  internal::guest_frame_index().store(frame_index, std::memory_order_relaxed);
+}
+
+inline uint64_t GetGuestFrameIndex() {
+  return internal::guest_frame_index().load(std::memory_order_relaxed);
+}
 
 // Call once per presented guest frame (single producer thread).
 // FPS is a RenderDoc-style average over a ~1s sliding time window (framerate

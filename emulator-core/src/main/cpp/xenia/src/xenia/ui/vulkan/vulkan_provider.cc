@@ -13,6 +13,7 @@
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/ui/vulkan/vulkan_diagnostics.h"
 #include "xenia/ui/vulkan/vulkan_immediate_drawer.h"
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 
@@ -92,9 +93,14 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(
       XELOGW(
           "Couldn't choose a compatible Vulkan physical device or initialize a "
           "Vulkan logical device");
+      GpuDiagnosticReportDevices(provider->vulkan_instance_.get(),
+                                 physical_devices, nullptr);
       return nullptr;
     }
   }
+
+  GpuDiagnosticReportDevices(provider->vulkan_instance_.get(), physical_devices,
+                             provider->vulkan_device_.get());
 
   if (with_presentation) {
     provider->ui_samplers_ = UISamplers::Create(provider->vulkan_device_.get());
