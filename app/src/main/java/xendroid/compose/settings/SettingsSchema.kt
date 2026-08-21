@@ -95,6 +95,14 @@ object SettingsSchema {
             b("Kernel", "apply_title_update", "Apply title update", true),
             b("Kernel", "kernel_debug_monitor", "Kernel debug monitor", false),
             b("Kernel", "network_enabled", "Networking", true),
+            // This list is hand-maintained, not generated from the cvars, so a
+            // setting that is not written here simply does not exist as far as
+            // the user is concerned - which is what happened to network_mode
+            // for its whole life. Xbox Live (2) is deliberately NOT offered:
+            // it is unimplemented and falls through to offline behaviour, and
+            // an option that silently does nothing is worse than no option.
+            l("Kernel", "network_mode", "Network mode", "1",
+                "0" to "Offline", "1" to "System Link (LAN)"),
         )),
 
         SettingsCategory("Controller", listOf(

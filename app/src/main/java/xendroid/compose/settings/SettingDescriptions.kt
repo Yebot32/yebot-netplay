@@ -67,8 +67,11 @@ object SettingDescriptions {
         "kernel_display_gamma_type" to "Display gamma curve reported to games; BT.709 best matches a 360 on an HDTV",
         "ask_players_on_start" to "Asks which profile each controller plays as when more " +
             "than one controller is connected",
-        "network_enabled" to "Lets games open network sockets. They cannot reach a real peer, but " +
-            "some games crash when socket creation fails. Turn off only for a game that hangs online",
+        "network_enabled" to "Lets games open network sockets at all. Some games crash when " +
+            "socket creation fails, so leave this on; turn it off only for a game that hangs online",
+        "network_mode" to "System Link plays with other consoles on your own network. Offline " +
+            "reports no usable network address, which is what a game sees with no internet. " +
+            "Xbox Live is not emulated and behaves as Offline",
         "kernel_pix" to "Exposes the PIX GPU profiler interface to the game for debug captures",
         "license_mask" to "Content license mask: 0 = none, 1 = full-version license (unlocks XBLA trials), -1 = all",
         "log_safepoint_pc" to "Records where each guest thread last reached a yield point, so a freeze report can say where a stuck thread actually is instead of only where it last called from. Slows the emulator slightly; turn on only when chasing a freeze",

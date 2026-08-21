@@ -48,15 +48,30 @@ DEFINE_bool(network_enabled, true,
 // implemented here - XBOXLIVE needs XLiveAPI, which does not build against
 // Edge yet, and is deliberately left to fall through to OFFLINE behaviour.
 //
-// DEFAULT IS OFFLINE, which is exactly what the stubs did before. System Link
-// is opt-in until it has been verified against a second console; flipping this
-// default is a decision to make on evidence, not on the code compiling.
-DEFINE_int32(network_mode, 0,
+// DEFAULT IS LAN. It was OFFLINE - what the stubs did before - and the note
+// here said System Link stays opt-in "until it has been verified against a
+// second console". That verification happened on 2026-08-22: two devices, DiRT
+// 3, discovery over the real subnet, the host's XNADDR resolved to its machine
+// id, a TCP connection opened to it, and the host listed in the joining
+// console's game browser. The precondition was met, so the default moves.
+//
+// Leaving it at 0 had a cost that was easy to miss: nothing in the frontend
+// ever wrote this cvar, so a fresh install had System Link silently dead with
+// no setting to turn it on. It is a list option under Kernel now.
+//
+// XBOXLIVE (2) is still not implemented - it needs XLiveAPI, which does not
+// build against Edge - and deliberately falls through to OFFLINE behaviour.
+DEFINE_int32(network_mode, 1,
              "0 = offline, the console reports no usable network address. "
              "1 = LAN, System Link over the host's own subnet: the guest is "
              "handed the real local IP and peers resolve to their real "
              "addresses. 2 = Xbox Live, NOT IMPLEMENTED, treated as offline.",
              "Kernel");
+// Without this the new default reaches nobody: SaveConfig() writes every cvar,
+// so any device that has run this build once has 0 pinned in its TOML and a
+// changed default is inert there. Only a config still sitting on the old
+// default moves; anyone who picked Offline deliberately keeps it.
+UPDATE_from_int32(network_mode, 2026, 8, 22, 2, 0);
 
 namespace NETWORK_MODE {
 constexpr int32_t OFFLINE = 0;
