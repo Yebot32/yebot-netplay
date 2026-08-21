@@ -1165,7 +1165,8 @@ class DeferredCommandBuffer {
   }
 
   void AccumulateDrawnRect(const VkRect2D& rect) {
-    if (render_area_patch_offset_ == kNoRenderAreaPatch) {
+    if (!track_pass_draw_extents_ ||
+        render_area_patch_offset_ == kNoRenderAreaPatch) {
       return;
     }
     pass_drawn_width_ =
@@ -1177,7 +1178,8 @@ class DeferredCommandBuffer {
   }
 
   void AccumulateDrawnScissor() {
-    if (render_area_patch_offset_ == kNoRenderAreaPatch) {
+    if (!track_pass_draw_extents_ ||
+        render_area_patch_offset_ == kNoRenderAreaPatch) {
       return;
     }
     ++pass_recorded_draws_;
@@ -1211,6 +1213,13 @@ class DeferredCommandBuffer {
   size_t command_stream_size_ = 0;
   // Snapshot of cvars::vulkan_deferred_cmd_size_cursor at construction.
   bool use_size_cursor_;
+  // Whether anything actually CONSUMES the per-draw extent counters. The two
+  // consumers are render_area_dirty_extent (which patches the render area from
+  // pass_drawn_*) and log_render_pass_extents. Both are startup-only cvars, so
+  // a snapshot is exact - see rule 103, there is no cvar reload on Android.
+  // With both off the accumulation was still running on every single draw, and
+  // FH2 issues 3,053-3,330 of them per frame.
+  bool track_pass_draw_extents_;
 };
 
 }  // namespace vulkan

@@ -25,6 +25,10 @@
 
 DECLARE_bool(log_gpu_frame_time_breakdown);
 DECLARE_int32(log_artifact_draw_state);
+// The two consumers of the per-draw extent counters - see
+// track_pass_draw_extents_.
+DECLARE_bool(render_area_dirty_extent);
+DECLARE_int32(log_render_pass_extents);
 
 DEFINE_bool(vulkan_deferred_cmd_size_cursor, true,
             "Track the deferred command buffer's recorded length with a size "
@@ -40,7 +44,9 @@ namespace vulkan {
 DeferredCommandBuffer::DeferredCommandBuffer(
     const VulkanCommandProcessor& command_processor, size_t initial_size)
     : command_processor_(command_processor),
-      use_size_cursor_(cvars::vulkan_deferred_cmd_size_cursor) {
+      use_size_cursor_(cvars::vulkan_deferred_cmd_size_cursor),
+      track_pass_draw_extents_(cvars::render_area_dirty_extent ||
+                               cvars::log_render_pass_extents != 0) {
   command_stream_.reserve(initial_size / sizeof(uintmax_t));
 }
 
