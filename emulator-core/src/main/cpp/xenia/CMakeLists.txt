@@ -413,17 +413,31 @@ else()
     $<$<CONFIG:Debug>:_NO_DEBUG_HEAP=1>
   )
 
-  # Release keeps -g so crashes in the field have resolvable frames.
+  # Android Gradle maps its release variants to CMake's RelWithDebInfo rather
+  # than Release, so everything gated on $<CONFIG:Release> silently never
+  # applied to a shipping APK: the core was built at the toolchain default -O2
+  # with no LTO. Align it with the optimized desktop policy - the same -O3,
+  # inlining, unrolling and ThinLTO - keeping -g either way. The one deliberate
+  # difference is the frame pointer; see below.
+
+  set(XE_OPTIMIZED_CONFIG
+      "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>")
+
+  # Optimized builds keep -g so crashes in the field have resolvable frames.
   add_compile_definitions(
     $<$<CONFIG:Release>:NDEBUG>
     $<$<CONFIG:Release>:_NO_DEBUG_HEAP=1>
   )
   add_compile_options(
-    $<$<CONFIG:Release>:-O3>
-    $<$<CONFIG:Release>:-finline-functions>
-    $<$<CONFIG:Release>:-funroll-loops>
+    $<${XE_OPTIMIZED_CONFIG}:-O3>
+    $<${XE_OPTIMIZED_CONFIG}:-finline-functions>
+    $<${XE_OPTIMIZED_CONFIG}:-funroll-loops>
+    # NOT RelWithDebInfo: that is the Android shipping config, the project sets
+    # -fno-omit-frame-pointer globally, and xendroid-core/build.gradle keeps -g
+    # there specifically so simpleperf can symbolise a release APK. Dropping
+    # the frame pointer would take that away for a fraction of a percent.
     $<$<CONFIG:Release>:-fomit-frame-pointer>
-    $<$<CONFIG:Release>:-g>
+    $<${XE_OPTIMIZED_CONFIG}:-g>
   )
   # ThinLTO. On Linux/Windows use lld (faster and what LLVM tests ThinLTO
   # against upstream). On macOS use Apple's ld64, which handles ThinLTO
@@ -431,10 +445,10 @@ else()
   # XENIA_ENABLE_LTO so -DXENIA_ENABLE_LTO=OFF produces a Release binary
   # with no LTO, which links an order of magnitude faster during iteration.
   if(XENIA_ENABLE_LTO)
-    add_compile_options($<$<CONFIG:Release>:-flto=thin>)
-    add_link_options($<$<CONFIG:Release>:-flto=thin>)
+    add_compile_options($<${XE_OPTIMIZED_CONFIG}:-flto=thin>)
+    add_link_options($<${XE_OPTIMIZED_CONFIG}:-flto=thin>)
     if(NOT APPLE)
-      add_link_options($<$<CONFIG:Release>:-fuse-ld=lld>)
+      add_link_options($<${XE_OPTIMIZED_CONFIG}:-fuse-ld=lld>)
     endif()
     # Use llvm-ar / llvm-ranlib when available to avoid LTO plugin
     # version mismatch between system ar/ranlib and clang's bitcode.
