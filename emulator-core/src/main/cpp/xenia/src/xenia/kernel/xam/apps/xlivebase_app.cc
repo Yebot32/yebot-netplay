@@ -20,6 +20,15 @@ struct XONLINE_SERVICE_INFO {
   xe::be<uint16_t> reserved;
 };
 
+// Argument to XUserMuteListQuery. Layout from AdrianCassar/xenia-canary
+// netplay_canary_experimental, xnet.h.
+struct X_MUTE_SET_STATE {
+  xe::be<uint32_t> user_index;
+  xe::be<uint64_t> remote_xuid;
+  xe::be<uint32_t> set_muted;
+};
+static_assert_size(X_MUTE_SET_STATE, 0x18);
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -144,6 +153,13 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
              buffer_ptr, buffer_length);
       return X_E_FAIL;
     }
+    case 0x0005800E: {
+      XELOGD("XUserMuteListQuery({:08X}, {:08X})", buffer_ptr, buffer_length);
+      // buffer_length is NOT a length here - it is the guest pointer the
+      // result is written to. Measured: buffer=701EF0A0 "len"=701EF110, and
+      // upstream reads it the same way.
+      return XUserMuteListQuery(buffer_ptr, buffer_length);
+    }
     case 0x00058023: {
       XELOGD(
           "CXLiveMessaging::XMessageGameInviteGetAcceptedInfo({:08X}, {:08X}) "
@@ -191,6 +207,46 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       "arg2={:08X}",
       app_id(), message, buffer_ptr, buffer_length);
   return X_E_FAIL;
+}
+
+/*
+ * "Is this remote player on my mute list?" - asked once per remote player as a
+ * System Link lobby forms.
+ *
+ * MEASURED 2026-08-22, DiRT 3, two devices: the host called this 529 times in
+ * a parked poll loop and got X_E_FAIL every time, while the joining console -
+ * which had already found the session, resolved the host's XNADDR and opened a
+ * TCP connection to it - gave up six frames later, unregistered its session
+ * keys and closed every socket. The PC netplay build implements this; that
+ * makes it one of only two XLiveBase differences that fire during a join.
+ *
+ * Upstream answers from a friends_manager backed by the Xbox Live services
+ * this build has no client for. It does not need one: a System Link lobby has
+ * no friends list and no mute list, so the true answer here is always "not
+ * muted". Writing that is the whole implementation - and unlike returning
+ * X_E_FAIL, it is an answer the guest can proceed from.
+ *
+ * Deliberately more permissive than upstream in one place: upstream rejects a
+ * remote XUID that is not an online XUID with X_E_INVALIDARG, and System Link
+ * peers are exactly the players who may not have one. Rejecting them would put
+ * the caller back in the same loop for a different reason.
+ */
+X_HRESULT XLiveBaseApp::XUserMuteListQuery(uint32_t buffer_ptr,
+                                           uint32_t mute_state_ptr) {
+  if (!buffer_ptr || !mute_state_ptr) {
+    return X_E_INVALIDARG;
+  }
+
+  const auto* request =
+      memory_->TranslateVirtual<const X_MUTE_SET_STATE*>(buffer_ptr);
+  if (request->user_index >= XUserMaxUserCount) {
+    return X_E_INVALIDARG;
+  }
+
+  auto* muted = memory_->TranslateVirtual<xe::be<uint32_t>*>(mute_state_ptr);
+  *muted = 0;
+
+  return X_E_SUCCESS;
 }
 
 }  // namespace apps
