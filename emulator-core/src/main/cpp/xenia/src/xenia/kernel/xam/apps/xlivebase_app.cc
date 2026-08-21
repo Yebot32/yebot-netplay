@@ -35,6 +35,11 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
                                             uint32_t buffer_length) {
   // NOTE: buffer_length may be zero or valid.
   auto buffer = memory_->TranslateVirtual(buffer_ptr);
+  // XENRA: same reason as the XGI entry log - presence, invites and XStorage
+  // land here, and this build implements a fraction of what the PC netplay one
+  // does, so a triage run needs to see which of them a title asks for.
+  XELOGI("XLiveBase: msg={:08X}, buffer={:08X}, len={}", message, buffer_ptr,
+         buffer_length);
   switch (message) {
     case 0x0005008C: {
       // Called on startup of blades dashboard v1888 to v2858

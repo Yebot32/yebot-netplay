@@ -104,12 +104,64 @@ struct XUSER_ANID {
 
 XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
 
+/*
+ * XENRA: name the session messages this build does not implement.
+ *
+ * The switch below handles a handful of XGI messages and drops the rest into
+ * one "Unimplemented XGI message" line carrying only a hex id, which says
+ * nothing about which title needs what. Netplay support is bounded by exactly
+ * this list, so every id gets a name here and the entry log below prints it -
+ * one play session per title then reads back as the list of calls that title
+ * makes, in order, without a second run to decode them.
+ *
+ * Names follow AdrianCassar/xenia-canary netplay_canary_experimental, the PC
+ * build that implements them.
+ */
+static const char* XgiMessageName(uint32_t message) {
+  switch (message) {
+    case 0x000B0006: return "XGIUserSetContext";
+    case 0x000B0007: return "XGIUserSetProperty";
+    case 0x000B0008: return "XGIUserGetContext";
+    case 0x000B0010: return "XSessionCreate";
+    case 0x000B0011: return "XSessionDelete";
+    case 0x000B0012: return "XSessionJoinLocal";
+    case 0x000B0013: return "XSessionLeaveLocal";
+    case 0x000B0014: return "XSessionStart";
+    case 0x000B0015: return "XSessionEnd";
+    case 0x000B0016: return "XSessionSearch";
+    case 0x000B0018: return "XSessionModify";
+    case 0x000B0019: return "XSessionGetInvitationData";
+    case 0x000B001A: return "XSessionArbitrationRegister";
+    case 0x000B001B: return "XSessionSearchByID";
+    case 0x000B001C: return "XSessionSearchEx";
+    case 0x000B001D: return "XSessionGetDetails";
+    case 0x000B001E: return "XSessionMigrateHost";
+    case 0x000B001F: return "XSessionModifySkill";
+    case 0x000B0020: return "XUserResetStatsView";
+    case 0x000B0021: return "XUserReadStats";
+    case 0x000B0025: return "XSessionWriteStats";
+    case 0x000B0026: return "XSessionFlushStats";
+    case 0x000B0036: return "XInvalidateGamerTileCache";
+    case 0x000B003D: return "XUserGetANID";
+    case 0x000B0041: return "XGIUserGetProperty";
+    case 0x000B0060: return "XSessionSearchByIDs";
+    case 0x000B0065: return "XSessionSearchWeighted";
+    case 0x000B0071: return "XUserAwardAvatarAssets";
+    default: return "unknown";
+  }
+}
+
 // http://mb.mirage.org/bugzilla/xliveless/main.c
 
 X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                       uint32_t buffer_length) {
   // NOTE: buffer_length may be zero or valid.
   auto buffer = memory_->TranslateVirtual(buffer_ptr);
+  // XENRA: info, not debug - a title's session calls have to be readable in
+  // the same log_level 2 capture as everything else, and they are far too
+  // infrequent for the line to cost anything.
+  XELOGI("XGI: {} (msg={:08X}, buffer={:08X}, len={})",
+         XgiMessageName(message), message, buffer_ptr, buffer_length);
   switch (message) {
     case 0x000B0006: {
       assert_true(!buffer_length ||
@@ -222,7 +274,28 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       // Allow offline session creation, but do not allow Xbox Live featured
       // session creation.
 
-      if (IsXboxLiveSession(static_cast<SessionFlags>(flags))) {
+      // XENRA: the single most important line for netplay triage. LIVE_FEATURES
+      // is PRESENCE|STATS|MATCHMAKING|ARBITRATION, and GROUP_LOBBY is
+      // PRESENCE|PEER_NETWORK - so a System Link lobby that merely advertises
+      // presence is refused here, at the FIRST session call, before any of the
+      // messages this build does not implement are ever reached. Whether a
+      // stubborn title dies on this branch or later is exactly what the log
+      // has to answer.
+      const bool refused_as_live =
+          IsXboxLiveSession(static_cast<SessionFlags>(flags));
+      XELOGI(
+          "XSessionCreate: flags={:08X} [{}{}{}{}{}{}] public={} private={} -> "
+          "{}",
+          flags, (flags & SessionFlags::HOST) ? "HOST " : "",
+          (flags & SessionFlags::PRESENCE) ? "PRESENCE " : "",
+          (flags & SessionFlags::STATS) ? "STATS " : "",
+          (flags & SessionFlags::MATCHMAKING) ? "MATCHMAKING " : "",
+          (flags & SessionFlags::ARBITRATION) ? "ARBITRATION " : "",
+          (flags & SessionFlags::PEER_NETWORK) ? "PEER_NETWORK" : "",
+          num_slots_public, num_slots_private,
+          refused_as_live ? "REFUSED (not logged on)" : "allowed");
+
+      if (refused_as_live) {
         return 0x80155209;  // X_ONLINE_E_SESSION_NOT_LOGGED_ON
       }
 
