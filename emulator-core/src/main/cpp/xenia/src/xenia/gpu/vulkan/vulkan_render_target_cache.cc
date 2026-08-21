@@ -1455,6 +1455,11 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
 }
 
 void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+  // pending_draw_pass_render_targets_ holds raw RenderTarget pointers. Dropping
+  // the queue before the targets are destroyed keeps a later flush from
+  // dereferencing freed memory.
+  ClearPendingDrawPassTransfers();
+
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -1628,6 +1633,10 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
 }
 
 void VulkanRenderTargetCache::ClearCache() {
+  // Same reason as Shutdown(): the queue points at render targets this is about
+  // to destroy.
+  ClearPendingDrawPassTransfers();
+
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -2809,6 +2818,24 @@ bool VulkanRenderTargetCache::Resolve(
     uint32_t& written_length_out, reg::RB_COPY_DEST_INFO* copy_dest_info_out,
     bool* written_scaled_out) {
   SCOPE_profile_cpu_f("gpu");
+  // Resolving READS the render targets, so anything still queued for a draw
+  // pass has to have been applied to them first.
+  //
+  // Update() already flushes on entry, which covers draw -> draw: a draw whose
+  // pipeline was not ready returns success without ever entering the pass that
+  // would have encoded the queue, and the next draw's Update() catches it. It
+  // does NOT cover draw -> resolve. Without this, a resolve that follows a
+  // skipped draw copies out a target whose prior EDRAM contents were never
+  // restored, and what reaches guest memory is the region's clear and nothing
+  // else - a strip that keeps only its clear.
+  //
+  // Upstream guards the same window in the Metal backend this path was ported
+  // from; see xenia-edge d026b5f54, "Resolve() flushes the queue as well, since
+  // it reads the render targets".
+  if (!FlushPendingDrawPassTransfers()) {
+    return false;
+  }
+
   written_address_out = 0;
   written_length_out = 0;
   if (written_scaled_out) {
