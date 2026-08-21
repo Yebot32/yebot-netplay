@@ -14,7 +14,7 @@
 #include "xenia/base/logging.h"
 
 DEFINE_int32(
-    gpu_upstream_conformance, 15,
+    gpu_upstream_conformance, 14,
     "Force the GPU cvars that exist ONLY in this Android fork back to Xenia "
     "Edge's PC behaviour, and log every override.\n"
     "A BITMASK, so a fault can be narrowed to one group without a rebuild - "
@@ -32,12 +32,35 @@ DEFINE_int32(
     "ranges, geometry-shader avoidance. These CAN legitimately change output "
     "and may render worse on some devices, which is why they are not in the "
     "default\n"
-    "  15 (default) every group whose options exist purely for speed - so "
-    "turning them off cannot change what the guest asked for, only how fast it "
-    "arrives\n"
+    "  14 (default) 2|4|8 - everything EXCEPT render targets, so this fork's "
+    "in-pass transfer and resolve fast paths stay live\n"
+    "  15 every group whose options exist purely for speed. This was the "
+    "default until 2026-08-21 and is the fallback if a picture fault ever "
+    "returns\n"
     "  31 all of the above\n"
-    "Groups 1-8 cost frame rate; that is what those options were added to buy.",
+    "Groups 1-8 cost frame rate; that is what those options were added to buy.\n"
+    "*** WHY GROUP 1 LEFT THE DEFAULT. *** It was in it to mask a picture "
+    "fault, not because the render-target fast paths are unsound: a resolve "
+    "copied out a target whose queued EDRAM ownership transfers had never "
+    "been encoded, so a strip of it held only its clear. Resolve() now drains "
+    "that queue before it copies (f81171d13), the way the Metal backend this "
+    "path was ported from always did, and the fault no longer reproduces at "
+    "14 in the titles it was found in. What left the queue full is NOT "
+    "established - no draw is ever skipped at this setting (measured: zero "
+    "\"Draw skipped\" lines across five logged runs), so the skipped-draw "
+    "path that guard was written for is not the answer. Forcing group 1 makes "
+    "every "
+    "transfer and resolve break the render pass, and on a tiler each break "
+    "costs a full tile store and reload; that is where 216 render passes per "
+    "frame came from. Putting it back to 15 buys nothing now and costs that.",
     "GPU");
+// 15 -> 14 once the picture fault group 1 was masking stopped reproducing.
+// Without this
+// line the new default reaches nothing: SaveConfig() writes every cvar, so any
+// device that has run this build once has 15 pinned in its TOML and a changed
+// default is inert there. Only a config still sitting on the old default moves;
+// anyone who picked a value deliberately keeps it.
+UPDATE_from_int32(gpu_upstream_conformance, 2026, 8, 21, 12, 15);
 
 // Fork-only, level 1: scheduling, caching and fast paths.
 DECLARE_bool(vulkan_in_pass_transfers);
