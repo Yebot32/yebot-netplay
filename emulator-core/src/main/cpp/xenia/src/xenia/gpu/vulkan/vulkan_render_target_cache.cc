@@ -1632,6 +1632,22 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   }
 }
 
+void VulkanRenderTargetCache::BeginFrame() {
+  // A frame boundary is one of the windows where the queue can survive with
+  // nothing to encode it: the pass it was queued for belongs to the frame that
+  // just ended. Flushed rather than dropped - these transfers restore EDRAM
+  // contents the next frame's draws expect to read back.
+  //
+  // Straight from MetalRenderTargetCache::BeginFrame (xenia-edge), which the
+  // in-pass transfer machinery as a whole was ported from. Edge's Vulkan and
+  // D3D12 backends do not call the render target cache's BeginFrame at all -
+  // they have no queue to drain - which is why the port inherited a Vulkan
+  // command processor that never called it, and the guard came across missing.
+  (void)FlushPendingDrawPassTransfers();
+
+  RenderTargetCache::BeginFrame();
+}
+
 void VulkanRenderTargetCache::ClearCache() {
   // Same reason as Shutdown(): the queue points at render targets this is about
   // to destroy.

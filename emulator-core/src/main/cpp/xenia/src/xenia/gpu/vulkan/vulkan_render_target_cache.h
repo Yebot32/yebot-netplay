@@ -115,6 +115,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   void Shutdown(bool from_destructor = false);
   void ClearCache() override;
 
+  // Drains the in-pass transfer queue at the frame boundary, then the base
+  // implementation. Ported from MetalRenderTargetCache::BeginFrame, which is
+  // where the in-pass transfer machinery itself came from: Edge's Metal
+  // backend guards the queue here as well as at Shutdown, ClearCache, Update
+  // and Resolve, and this was the one guard site the port did not carry.
+  void BeginFrame() override;
+
   void CompletedSubmissionUpdated();
   void EndSubmission();
   // Debug names of the guest render targets backing the last update, for

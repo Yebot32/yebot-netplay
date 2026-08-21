@@ -5086,6 +5086,23 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // way the transfers change pipeline / dynamic / binding state, so re-emit it
   // before the actual guest draw below.
   if (render_target_cache_->HasPendingDrawPassTransfers()) {
+    // An occlusion query already counting on this pass would count the
+    // transfer draws too, inflating the guest's visibility result - and both
+    // test titles are racing games that cull by occlusion. Closing the segment
+    // makes the next draw reopen it on a fresh pool slot, the only legal way
+    // to resume counting mid-pass.
+    //
+    // Ported from Edge's Metal command processor, which does exactly this
+    // immediately before EncodePendingDrawPassTransfers. FSI counter segments
+    // are left alone: they don't use vkCmdBeginQuery/vkCmdEndQuery and stay
+    // logically open, the same exception EndRenderPass makes.
+    if (GetZPDMode() != ZPDMode::kFake && zpd_active_segment_.segment_active &&
+        !zpd_active_query_is_fsi_) {
+      CloseQuerySegment();
+      if (zpd_active_segment_.logical_active) {
+        zpd_active_segment_.segment_pending_begin = true;
+      }
+    }
     if (!render_target_cache_->EncodePendingDrawPassTransfers()) {
       if (!render_target_cache_->FlushPendingDrawPassTransfers()) {
         return false;
@@ -6876,6 +6893,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     }
 
     primitive_processor_->BeginFrame();
+
+    // Never called on this backend before: Edge's Vulkan and D3D12 command
+    // processors omit it too, and the port inherited the omission along with
+    // the Metal in-pass transfer feature that DOES need it - Edge's Metal
+    // command processor calls it right here, between the primitive processor
+    // and the texture cache. Without it the transfer queue has no frame-
+    // boundary drain, and the base implementation's per-frame
+    // ResetAccumulatedRenderTargets never runs either.
+    render_target_cache_->BeginFrame();
 
     texture_cache_->BeginFrame();
   }
