@@ -24,6 +24,34 @@ void Patcher::ApplyPatchesForTitle(Memory* memory, const uint32_t title_id,
   patch_db_->LoadPatches();
   const auto title_patches = patch_db_->GetTitlePatches(title_id, hash);
 
+  // Both ways a patch can be ignored used to be silent, which is worse than
+  // useless to anyone wondering why the patch they installed did nothing.
+  if (title_patches.empty()) {
+    for (const PatchFileEntry& candidate : patch_db_->GetAllPatches()) {
+      if (candidate.title_id != title_id) {
+        continue;
+      }
+      XELOGW(
+          "Patcher: {} has patches for this title, but for a different build - "
+          "this copy hashes to {:016X} and the file lists {} other hash(es). "
+          "The patch will not be applied.",
+          candidate.title_name, hash.value_or(0), candidate.hashes.size());
+    }
+  }
+
+  size_t enabled_count = 0;
+  for (const PatchFileEntry& patchFile : title_patches) {
+    for (const PatchInfoEntry& patchEntry : patchFile.patch_info) {
+      enabled_count += patchEntry.is_enabled ? 1 : 0;
+    }
+  }
+  if (!title_patches.empty() && enabled_count == 0) {
+    XELOGW(
+        "Patcher: a patch file matches this title and this build, but every "
+        "patch in it is switched off (is_enabled = false). Turn one on in the "
+        "game's patch list.");
+  }
+
   for (const PatchFileEntry& patchFile : title_patches) {
     for (const PatchInfoEntry& patchEntry : patchFile.patch_info) {
       if (!patchEntry.is_enabled) {
