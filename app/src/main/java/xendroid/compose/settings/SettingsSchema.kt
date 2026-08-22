@@ -137,14 +137,33 @@ object SettingsSchema {
         SettingsCategory("Display", listOf(
             b("Display", "present_letterbox", "Present letterbox", true),
             b("Display", "postprocess_dither", "Postprocess dither", true),
-            l("Display", "postprocess_scaling_and_sharpening", "Scaling & sharpening", "",
-                "bilinear" to "bilinear", "cas" to "cas", "fsr" to "fsr"),  // "" => bilinear (no selection)
+            // postprocess_scaling_and_sharpening moved to the AI category - it
+            // is the same feature the OG side calls its scaler, and having one
+            // console keep it under Display meant the AI tab was half empty on
+            // the other.
             b("Display", "present_render_pass_clear", "Present render-pass clear", true),
             l("Display", "postprocess_antialiasing", "Antialiasing", "",
                 "none" to "none", "fxaa" to "fxaa", "fxaa_extreme" to "fxaa_extreme"), // "" => none
             // host_present_from_non_ui_thread intentionally NOT exposed: forced true on Android
             // (false black-screens the app), so there is no valid user choice to make.
             b("Display", "show_debug_overlay", "Show debug overlay", false),
+        )),
+
+        // The AI tab. Frame generation and the scalers, on both consoles - the
+        // Original Xbox half lives in the app's own settings pane because xemu
+        // has no cvar system to hang it off.
+        SettingsCategory("AI", listOf(
+            l("Display", "postprocess_scaling_and_sharpening", "Scaler", "",
+                // "" is what the cvar ships as and means bilinear; it is listed
+                // explicitly rather than left as an empty row.
+                "" to "Bilinear (no processing)",
+                "cas" to "Sharpen only (CAS)",
+                "fsr" to "FSR (upscale + sharpen)"),
+            // Was defined but never exposed - a cvar missing from this list has
+            // no UI at all. Each pass doubles, so 1 is enough below 4K and the
+            // higher settings only bite on a very high-resolution display.
+            i("Display", "postprocess_ffx_fsr_max_upsampling_passes",
+                "FSR upsampling passes", 4, 1, 4),
         )),
 
         SettingsCategory("GPU", listOf(
