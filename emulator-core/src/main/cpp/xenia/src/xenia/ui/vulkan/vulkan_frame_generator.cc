@@ -40,10 +40,43 @@ constexpr uint32_t DivideRoundingUp(uint32_t value, uint32_t divisor) {
 
 }  // namespace
 
+uint32_t VulkanFrameGenerator::block_size() const {
+  switch (quality_) {
+    case Quality::kLow:
+      return 32;
+    case Quality::kHigh:
+      return 8;
+    default:
+      return 16;
+  }
+}
+
+void VulkanFrameGenerator::fallback_range(float& lo_out, float& hi_out) const {
+  switch (quality_) {
+    case Quality::kLow:
+      // The coarse field is the least trustworthy, so give up on a doubtful
+      // match sooner. A frame that is briefly the previous one reads as slight
+      // judder; a blend of two wrong answers reads as a ghost, and the eye
+      // finds the ghost immediately.
+      lo_out = 0.10f;
+      hi_out = 0.30f;
+      break;
+    case Quality::kHigh:
+      lo_out = 0.22f;
+      hi_out = 0.55f;
+      break;
+    default:
+      lo_out = 0.16f;
+      hi_out = 0.42f;
+      break;
+  }
+}
+
 std::unique_ptr<VulkanFrameGenerator> VulkanFrameGenerator::Create(
-    VulkanDevice* const vulkan_device, const UISamplers* const ui_samplers) {
+    VulkanDevice* const vulkan_device, const UISamplers* const ui_samplers,
+    const Quality quality) {
   auto generator = std::unique_ptr<VulkanFrameGenerator>(
-      new VulkanFrameGenerator(vulkan_device, ui_samplers));
+      new VulkanFrameGenerator(vulkan_device, ui_samplers, quality));
   if (!generator->Initialize()) {
     return nullptr;
   }
@@ -293,8 +326,9 @@ bool VulkanFrameGenerator::EnsureResources(uint32_t width, uint32_t height) {
   const uint32_t fine_height = DivideRoundingUp(height, kLumaFineDiv);
   const uint32_t coarse_width = DivideRoundingUp(width, kLumaCoarseDiv);
   const uint32_t coarse_height = DivideRoundingUp(height, kLumaCoarseDiv);
-  const uint32_t block_width = DivideRoundingUp(width, kBlockSize);
-  const uint32_t block_height = DivideRoundingUp(height, kBlockSize);
+  const uint32_t block = block_size();
+  const uint32_t block_width = DivideRoundingUp(width, block);
+  const uint32_t block_height = DivideRoundingUp(height, block);
 
   bool ok = CreateImage(history_, width, height, kColorFormat, "history");
   ok = CreateImage(generated_, width, height, kColorFormat, "generated") && ok;
@@ -574,28 +608,34 @@ bool VulkanFrameGenerator::RecordGenerateAndCapture(
            owned(luma_coarse_[cur_slot]), owned(mv_coarse_), mv_coarse_, push);
   BarrierComputeToCompute(command_buffer);
 
-  // 3. Refinement, over the 1/4 luma, predicted by the coarse result.
-  push.src_texel[0] = 1.0f / float(luma_fine_[cur_slot].width);
-  push.src_texel[1] = 1.0f / float(luma_fine_[cur_slot].height);
-  push.dst_size[0] = float(mv_fine_.width);
-  push.dst_size[1] = float(mv_fine_.height);
-  push.px_per_texel[0] = float(kLumaFineDiv);
-  push.px_per_texel[1] = float(kLumaFineDiv);
-  push.lambda = 0.010f;
-  push.mode = 1;
-  push.use_pred = 1;
-  Dispatch(command_buffer, kPipelineSearch, owned(luma_fine_[prev_slot]),
-           owned(luma_fine_[cur_slot]), owned(mv_coarse_), mv_fine_, push);
-  BarrierComputeToCompute(command_buffer);
+  // 3. Refinement, over the 1/4 luma, predicted by the coarse result. Skipped
+  //    at the lowest quality, where it is the single most expensive thing left
+  //    after the grid size.
+  const Image& searched = refines() ? mv_fine_ : mv_coarse_;
+  if (refines()) {
+    push.src_texel[0] = 1.0f / float(luma_fine_[cur_slot].width);
+    push.src_texel[1] = 1.0f / float(luma_fine_[cur_slot].height);
+    push.dst_size[0] = float(mv_fine_.width);
+    push.dst_size[1] = float(mv_fine_.height);
+    push.px_per_texel[0] = float(kLumaFineDiv);
+    push.px_per_texel[1] = float(kLumaFineDiv);
+    push.lambda = 0.010f;
+    push.mode = 1;
+    push.use_pred = 1;
+    Dispatch(command_buffer, kPipelineSearch, owned(luma_fine_[prev_slot]),
+             owned(luma_fine_[cur_slot]), owned(mv_coarse_), mv_fine_, push);
+    BarrierComputeToCompute(command_buffer);
+  }
 
-  // 4. Smooth the field.
+  // 4. Smooth the field. Always runs - it is cheap, and it is what stops one
+  //    block that found a spurious match from shearing its neighbours.
   push = PushConstants();
-  push.src_texel[0] = 1.0f / float(mv_fine_.width);
-  push.src_texel[1] = 1.0f / float(mv_fine_.height);
+  push.src_texel[0] = 1.0f / float(searched.width);
+  push.src_texel[1] = 1.0f / float(searched.height);
   push.dst_size[0] = float(mv_smooth_.width);
   push.dst_size[1] = float(mv_smooth_.height);
-  Dispatch(command_buffer, kPipelineSmooth, owned(mv_fine_), owned(mv_fine_),
-           owned(mv_fine_), mv_smooth_, push);
+  Dispatch(command_buffer, kPipelineSmooth, owned(searched), owned(searched),
+           owned(searched), mv_smooth_, push);
   BarrierComputeToCompute(command_buffer);
 
   // 5. Warp both ends to the midpoint. The history still holds the PREVIOUS
@@ -606,6 +646,7 @@ bool VulkanFrameGenerator::RecordGenerateAndCapture(
   push.dst_size[0] = float(width);
   push.dst_size[1] = float(height);
   push.t = t;
+  fallback_range(push.fallback_lo, push.fallback_hi);
   Dispatch(command_buffer, kPipelineWarp, owned(history_), guest,
            owned(mv_smooth_), generated_, push);
   BarrierComputeToCompute(command_buffer);

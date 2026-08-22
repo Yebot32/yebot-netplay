@@ -40,8 +40,29 @@ namespace vulkan {
 // buffer, the queue and the synchronization.
 class VulkanFrameGenerator {
  public:
+  // How much work the motion search is allowed to do, and how readily the warp
+  // gives up on a match it does not trust.
+  //
+  // The lever that actually matters for cost is the vector grid: halving the
+  // block size quadruples the number of searches. Refinement is the second
+  // pass over the finer luma level and roughly doubles what is left.
+  enum class Quality {
+    // One vector per 32x32 block, no refinement, and a guard that bails to the
+    // nearer frame early. Roughly an eighth of the work of kMedium and the
+    // least likely to show a ghost, at the cost of a coarser field that can
+    // smear small fast objects.
+    kLow,
+    // One vector per 16x16 block with refinement.
+    kMedium,
+    // One vector per 8x8 block with refinement, and a guard that trusts the
+    // match further. Follows small objects best and costs about four times
+    // kMedium - worth it only where there is GPU headroom to spare.
+    kHigh,
+  };
+
   static std::unique_ptr<VulkanFrameGenerator> Create(
-      VulkanDevice* vulkan_device, const UISamplers* ui_samplers);
+      VulkanDevice* vulkan_device, const UISamplers* ui_samplers,
+      Quality quality);
 
   VulkanFrameGenerator(const VulkanFrameGenerator& generator) = delete;
   VulkanFrameGenerator& operator=(const VulkanFrameGenerator& generator) =
@@ -112,6 +133,8 @@ class VulkanFrameGenerator {
     int32_t steps;
     int32_t use_pred;
     int32_t flip;
+    float fallback_lo;
+    float fallback_hi;
   };
 
   struct Image {
@@ -122,10 +145,6 @@ class VulkanFrameGenerator {
     uint32_t height = 0;
   };
 
-  // Full-resolution pixels per motion vector. Fine enough to follow an object
-  // across the screen, coarse enough that the search is affordable and that
-  // noise averages out over the block.
-  static constexpr uint32_t kBlockSize = 16;
   static constexpr uint32_t kLumaFineDiv = 4;
   static constexpr uint32_t kLumaCoarseDiv = 16;
   static constexpr uint32_t kLocalSize = 8;
@@ -136,9 +155,18 @@ class VulkanFrameGenerator {
   // descriptor that has been overwritten mid-flight.
   static constexpr uint32_t kDescriptorSetRingSize = 48;
 
-  explicit VulkanFrameGenerator(VulkanDevice* const vulkan_device,
-                                const UISamplers* const ui_samplers)
-      : vulkan_device_(vulkan_device), ui_samplers_(ui_samplers) {}
+  VulkanFrameGenerator(VulkanDevice* const vulkan_device,
+                       const UISamplers* const ui_samplers, Quality quality)
+      : vulkan_device_(vulkan_device),
+        ui_samplers_(ui_samplers),
+        quality_(quality) {}
+
+  // Full-resolution pixels per motion vector, for the configured quality.
+  uint32_t block_size() const;
+  // Whether the fine refinement pass runs.
+  bool refines() const { return quality_ != Quality::kLow; }
+  // Disocclusion guard edges for the configured quality.
+  void fallback_range(float& lo_out, float& hi_out) const;
 
   bool Initialize();
   bool EnsureResources(uint32_t width, uint32_t height);
@@ -175,6 +203,7 @@ class VulkanFrameGenerator {
 
   VulkanDevice* vulkan_device_;
   const UISamplers* ui_samplers_;
+  Quality quality_;
 
   VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;

@@ -154,6 +154,10 @@ object SettingsSchema {
         // has no cvar system to hang it off.
         SettingsCategory("AI", listOf(
             b("Display", "frame_generation", "Frame generation", false),
+            l("Display", "frame_generation_quality", "Frame generation quality", "1",
+                "0" to "Low (fastest, softer motion)",
+                "1" to "Medium",
+                "2" to "High (slowest, follows detail)"),
             l("Display", "postprocess_scaling_and_sharpening", "Scaler", "",
                 // "" is what the cvar ships as and means bilinear; it is listed
                 // explicitly rather than left as an empty row.

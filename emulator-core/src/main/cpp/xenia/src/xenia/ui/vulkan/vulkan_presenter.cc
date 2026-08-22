@@ -53,6 +53,23 @@ DEFINE_bool(
     "own rate instead of doubling what you see, so it turns itself off.",
     "Display");
 
+DEFINE_int32(
+    frame_generation_quality, 1,
+    "How much work frame generation's motion search may do.\n"
+    "The cost is dominated by the vector grid, so each step is a large change, "
+    "not a nudge:\n"
+    " 0 (low):\n"
+    "  One vector per 32x32 block and no refinement pass - roughly an eighth "
+    "of the work of medium. The guard against bad matches also gives up "
+    "sooner, so it ghosts less and smears small fast objects more.\n"
+    " 1 (medium):\n"
+    "  One vector per 16x16 block with refinement.\n"
+    " 2 (high):\n"
+    "  One vector per 8x8 block with refinement, trusting matches further. "
+    "Follows small objects best and costs about four times medium.\n"
+    "Read once, when the renderer starts.",
+    "Display");
+
 // Note: If the priorities in the description are changed, update the actual
 // present mode selection logic.
 DEFINE_bool(
@@ -2744,7 +2761,20 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
   // Failing to build it is not a reason to fail the presenter - it just means
   // presenting the way we always did.
   if (cvars::frame_generation) {
-    frame_generator_ = VulkanFrameGenerator::Create(vulkan_device_, ui_samplers_);
+    VulkanFrameGenerator::Quality quality;
+    switch (cvars::frame_generation_quality) {
+      case 0:
+        quality = VulkanFrameGenerator::Quality::kLow;
+        break;
+      case 2:
+        quality = VulkanFrameGenerator::Quality::kHigh;
+        break;
+      default:
+        quality = VulkanFrameGenerator::Quality::kMedium;
+        break;
+    }
+    frame_generator_ =
+        VulkanFrameGenerator::Create(vulkan_device_, ui_samplers_, quality);
     if (!frame_generator_) {
       XELOGE(
           "VulkanPresenter: Frame generation could not be initialized - "

@@ -26,7 +26,7 @@ void main() {
   // image that gives frame generation its reputation. Committing to the nearer
   // frame is wrong for one frame; a ghost is wrong and also draws the eye.
   float disagree = length(a - b);
-  float fallback = smoothstep(0.16, 0.42, disagree);
+  float fallback = smoothstep(xe_fg.fallback_lo, xe_fg.fallback_hi, disagree);
   vec3 nearer = (xe_fg.t < 0.5) ? a : b;
 
   imageStore(xe_fg_dst, coord, vec4(mix(blended, nearer, fallback), 1.0));

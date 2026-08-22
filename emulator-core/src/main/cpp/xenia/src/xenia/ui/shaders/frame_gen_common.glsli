@@ -21,6 +21,12 @@ layout(push_constant) uniform XeFgPush {
   int steps;         // First step size of the coarse search.
   int use_pred;      // Whether src2 holds a usable prediction.
   int flip;          // Flip the sampled image vertically.
+  // Where the disocclusion guard starts and finishes taking over. Lower pairs
+  // bail out to the nearer frame sooner, which trades a little judder on a
+  // moving edge for less of the transparent double image that makes generated
+  // frames obvious.
+  float fallback_lo;
+  float fallback_hi;
 } xe_fg;
 
 const vec3 kLumaWeights = vec3(0.299, 0.587, 0.114);
