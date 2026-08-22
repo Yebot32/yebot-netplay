@@ -65,10 +65,19 @@ DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
 
 DECLARE_bool(apu_aaudio_log_stats);
 
-DEFINE_bool(use_dedicated_xma_thread, true,
-            "Enables XMA decoding on separate thread. Disabled should produce "
-            "better results, but decrease performance a bit.",
+// Defaults OFF here, unlike upstream. Upstream's dedicated thread was
+// fire-and-forget, so it bought real parallelism. Ours is not: the kick in
+// WriteRegister blocks in WaitForKick until the worker has serviced that exact
+// kick, so the guest thread waits either way. All the thread adds is two
+// context switches and a sweep of every context on the critical path of each
+// kick, which is audible as instability. Inline decode is tighter. Flipping
+// this back is a decision to make on a listening test.
+DEFINE_bool(use_dedicated_xma_thread, false,
+            "Decodes XMA on a separate thread. Because a kick waits for the "
+            "worker to service it, this adds latency without adding "
+            "parallelism; inline decode is steadier.",
             "APU");
+UPDATE_from_bool(use_dedicated_xma_thread, 2026, 8, 22, 3, true);
 
 DEFINE_string(
     xma_decoder, "new",

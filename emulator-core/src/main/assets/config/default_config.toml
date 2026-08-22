@@ -6,7 +6,7 @@ apu_max_queued_frames = 8                         	# Allows changing max buffere
 enable_xmp = true                                 	# Enables Music Player playback.
 ffmpeg_verbose = false                            	# Verbose FFmpeg output (debug and above)
 mute = false                                      	# Mutes all audio output.
-use_dedicated_xma_thread = true                   	# Enables XMA decoding on separate thread. Disabled should produce better results, but decrease performance a bit.
+use_dedicated_xma_thread = false                  	# Decodes XMA on a separate thread. Because a kick waits for the worker to service it, this adds latency without adding parallelism; inline decode is steadier.
 xma_decoder = "new"                               	# Decoder version used to process XMA audio. Use: [fake, master, old, new]. 'old' has an edge-case stall on some streams; 'new' is the maintained default.
 
 

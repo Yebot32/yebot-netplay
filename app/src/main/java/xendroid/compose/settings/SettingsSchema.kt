@@ -265,7 +265,7 @@ object SettingsSchema {
             b("APU", "enable_xmp", "Enable XMP", true),
             l("APU", "xma_decoder", "XMA decoder", "new",
                 "new" to "new", "old" to "old", "master" to "master", "fake" to "fake"),
-            b("APU", "use_dedicated_xma_thread", "Use dedicated XMA thread", true),
+            b("APU", "use_dedicated_xma_thread", "Use dedicated XMA thread", false),
             l("APU", "apu", "APU backend", "aaudio",
                 "nop" to "nop", "aaudio" to "aaudio", "opensles" to "opensles"),
         )),

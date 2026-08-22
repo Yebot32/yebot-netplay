@@ -120,7 +120,7 @@ object SettingDescriptions {
         "trace_gpu_stream" to "Trace all GPU command packets for debugging; very slow",
         "turnip_debug" to "Comma-separated TU_DEBUG flags for the Turnip driver; e.g. sysmem disables tiled rendering (Turnip only)",
         "use_50Hz_mode" to "Runs PAL games in 50Hz (PAL-50) mode instead of 60Hz",
-        "use_dedicated_xma_thread" to "Decodes XMA audio on its own thread; disabling may sound better but costs performance",
+        "use_dedicated_xma_thread" to "Decodes XMA audio on its own thread; off is steadier, because a decode request waits for that thread either way",
         "user_country" to "Console country/region ID reported to games",
         "user_language" to "Console language ID reported to games (1=English, 2=Japanese, 3=German, ...)",
         "validate_hir" to "Runs extra validation on the JIT's intermediate code during compilation; slow, for debugging",
