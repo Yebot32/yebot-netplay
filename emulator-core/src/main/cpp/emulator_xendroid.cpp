@@ -1109,6 +1109,7 @@ static void j_setup_uri_info_list_file(JNIEnv* env,jobject self,jstring jpath ){
 }
 
 // Toggled by the "Display|show_debug_overlay" cvar (defined in presenter.cc).
+DECLARE_bool(frame_generation);
 DECLARE_bool(show_debug_overlay);
 DECLARE_bool(show_touch_overlay);
 
@@ -1159,6 +1160,27 @@ static jdouble j_average_fps(JNIEnv* env, jobject thiz) {
     return (jdouble)fps;
 }
 
+// Frames per second reaching the display, generated ones included. Equal to
+// average_fps until frame generation is on, higher after - the gap between the
+// two IS the feature, which is why the HUD shows both.
+static jdouble j_output_fps(JNIEnv* env, jobject thiz) {
+    const float host_fps = xe::GetHostPresentFps();
+    if (host_fps > 0.f) {
+        return (jdouble)host_fps;
+    }
+    // Before the first window closes there is no host figure yet; the guest
+    // rate is the honest answer, not zero.
+    float instant_ms = 0.f, avg_ms = 0.f, fps = 0.f;
+    xe::GetFrameStats(instant_ms, avg_ms, fps);
+    return (jdouble)fps;
+}
+
+// Whether generated frames are actually being presented, as opposed to the
+// setting merely being on.
+static jboolean j_frame_generation_active(JNIEnv* env, jobject thiz) {
+    return xe::IsFrameGenerationActive() ? JNI_TRUE : JNI_FALSE;
+}
+
 // The command processor's guest frame counter - the same number the GPU logs stamp
 // as "f:NNNNNNN". Shown on the debug overlay so a screenshot can be joined to the
 // exact log lines for the frame it captured.
@@ -1172,6 +1194,13 @@ static jlong j_guest_frame_index(JNIEnv* env, jobject thiz) {
 // POLL this post-boot instead of reading the global TOML file once at onCreate --
 // otherwise a game-specific override (global off, per-game on) is never seen. Cheap
 // read-only bool; safe from any thread.
+// Display|frame_generation, so the HUD and the renderer cannot disagree about
+// whether the feature is on. Note this is the SETTING, not whether generation
+// is happening - see frame_generation_active for that.
+static jboolean j_frame_generation_enabled(JNIEnv* env, jobject thiz) {
+    return cvars::frame_generation ? JNI_TRUE : JNI_FALSE;
+}
+
 static jboolean j_show_debug_overlay_enabled(JNIEnv* env, jobject thiz) {
     return cvars::show_debug_overlay ? JNI_TRUE : JNI_FALSE;
 }
@@ -1800,8 +1829,11 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"debug_overlay_text", "()Ljava/lang/String;", (void *) j_debug_overlay_text}
             ,{"instant_fps", "()D", (void *) j_instant_fps}
             ,{"average_fps", "()D", (void *) j_average_fps}
+            ,{"output_fps", "()D", (void *) j_output_fps}
+            ,{"frame_generation_active", "()Z", (void *) j_frame_generation_active}
             ,{"guest_frame_index", "()J", (void *) j_guest_frame_index}
             ,{"last_frame_time_ms", "()D", (void *) j_last_frame_time_ms}
+            ,{"frame_generation_enabled", "()Z", (void *) j_frame_generation_enabled}
             ,{"show_debug_overlay_enabled", "()Z", (void *) j_show_debug_overlay_enabled}
             ,{"show_touch_overlay_enabled", "()Z", (void *) j_show_touch_overlay_enabled}
             ,{"set_show_touch_overlay", "(Z)V", (void *) j_set_show_touch_overlay}

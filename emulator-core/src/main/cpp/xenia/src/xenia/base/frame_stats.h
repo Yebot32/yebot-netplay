@@ -39,6 +39,22 @@ inline std::atomic<uint64_t>& guest_frame_index() {
   static std::atomic<uint64_t> v{0};
   return v;
 }
+// Frames per second reaching the DISPLAY, which is the guest rate until frame
+// generation is on and higher after. Separate from frame_fps() on purpose: one
+// is what the console produced and the other is what was shown, and collapsing
+// them would hide exactly the thing frame generation does.
+inline std::atomic<float>& host_present_fps() {
+  static std::atomic<float> v{0.0f};
+  return v;
+}
+// steady_clock nanoseconds of the last generated frame presented, or 0. Read as
+// a recency test rather than a flag because generation stops on its own
+// whenever the guest stops producing new images - on a pause, or a still menu -
+// and a flag would have to be cleared from somewhere that knows that happened.
+inline std::atomic<uint64_t>& last_generated_present_ns() {
+  static std::atomic<uint64_t> v{0};
+  return v;
+}
 }  // namespace internal
 
 // Publishes the command processor's own frame counter - the SAME number the
@@ -119,6 +135,78 @@ inline void RecordGuestPresent() {
                                      std::memory_order_relaxed);
   internal::frame_avg_ms().store(float(avg_ms), std::memory_order_relaxed);
   internal::frame_fps().store(float(fps), std::memory_order_relaxed);
+}
+
+// Call once per present that actually reached the display, generated frames
+// included (single producer thread - whichever one paints).
+inline void RecordHostPresent(bool was_generated) {
+  using clock = std::chrono::steady_clock;
+  static constexpr double kWindowMs = 1000.0;
+  static constexpr size_t kCap = 1024;
+  static clock::time_point ts[kCap];
+  static size_t head = 0;
+  static size_t count = 0;
+  static clock::time_point last{};
+
+  const clock::time_point now = clock::now();
+  if (was_generated) {
+    internal::last_generated_present_ns().store(
+        uint64_t(now.time_since_epoch().count()), std::memory_order_relaxed);
+  }
+
+  const bool have_last = last != clock::time_point{};
+  const double instant_ms =
+      have_last ? std::chrono::duration<double, std::milli>(now - last).count()
+                : 0.0;
+  last = now;
+
+  // A long gap restarts the window, so the figure recovers within a second
+  // rather than being dragged by a stale outlier.
+  if (!have_last || instant_ms > kWindowMs) {
+    head = 0;
+    count = 1;
+    ts[0] = now;
+    internal::host_present_fps().store(0.0f, std::memory_order_relaxed);
+    return;
+  }
+
+  const size_t tail = (head + count) % kCap;
+  ts[tail] = now;
+  if (count < kCap) {
+    ++count;
+  } else {
+    head = (head + 1) % kCap;
+  }
+  while (count > 1 &&
+         std::chrono::duration<double, std::milli>(now - ts[head]).count() >
+             kWindowMs) {
+    head = (head + 1) % kCap;
+    --count;
+  }
+
+  const double span_ms =
+      std::chrono::duration<double, std::milli>(now - ts[head]).count();
+  const double fps =
+      (count > 1 && span_ms > 0.0) ? double(count - 1) * 1000.0 / span_ms : 0.0;
+  internal::host_present_fps().store(float(fps), std::memory_order_relaxed);
+}
+
+inline float GetHostPresentFps() {
+  return internal::host_present_fps().load(std::memory_order_relaxed);
+}
+
+// Whether generated frames are reaching the display right now. True while one
+// was presented within the last quarter second, which is long enough to ride
+// out a slow frame and short enough that the readout follows a pause.
+inline bool IsFrameGenerationActive() {
+  const uint64_t last_ns =
+      internal::last_generated_present_ns().load(std::memory_order_relaxed);
+  if (!last_ns) {
+    return false;
+  }
+  const uint64_t now_ns = uint64_t(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  return now_ns >= last_ns && (now_ns - last_ns) < 250000000ull;
 }
 
 // Read the latest published stats (any thread).

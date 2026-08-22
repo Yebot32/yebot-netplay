@@ -153,6 +153,7 @@ object SettingsSchema {
         // Original Xbox half lives in the app's own settings pane because xemu
         // has no cvar system to hang it off.
         SettingsCategory("AI", listOf(
+            b("Display", "frame_generation", "Frame generation", false),
             l("Display", "postprocess_scaling_and_sharpening", "Scaler", "",
                 // "" is what the cvar ships as and means bilinear; it is listed
                 // explicitly rather than left as an empty row.

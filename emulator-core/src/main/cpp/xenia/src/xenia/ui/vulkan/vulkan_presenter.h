@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -22,6 +23,7 @@
 #include "xenia/ui/presenter.h"
 #include "xenia/ui/surface.h"
 #include "xenia/ui/vulkan/ui_samplers.h"
+#include "xenia/ui/vulkan/vulkan_frame_generator.h"
 #include "xenia/ui/vulkan/vulkan_device.h"
 #include "xenia/ui/vulkan/vulkan_gpu_completion_timeline.h"
 #include "xenia/ui/vulkan/vulkan_instance.h"
@@ -163,6 +165,8 @@ class VulkanPresenter final : public Presenter {
       bool& is_8bpc_out_ref) override;
 
   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
+  bool WantsRepeatPaint() const override { return frame_gen_repeat_paint_; }
+  void PaceRepeatPaint() override;
 
  private:
   // Usable for both the guest output image itself and for intermediate images.
@@ -333,9 +337,13 @@ class VulkanPresenter final : public Presenter {
           kGuestOutputDescriptorSetGuestOutput0Sampled +
           kGuestOutputMailboxSize,
 
-      kGuestOutputDescriptorSetCount =
+      // The frame generator's output, painted through the same effect chain as
+      // a real guest image and therefore needing a set of the same layout.
+      kGuestOutputDescriptorSetGenerated =
           kGuestOutputDescriptorSetIntermediate0Sampled +
           kMaxGuestOutputPaintEffects - 1,
+
+      kGuestOutputDescriptorSetCount,
     };
 
     struct UISetupCommandBuffer {
@@ -491,6 +499,25 @@ class VulkanPresenter final : public Presenter {
   std::array<GuestOutputImageInstance, kGuestOutputMailboxSize>
       guest_output_images_;
   VulkanGPUCompletionTimeline guest_output_image_refresher_completion_timeline_;
+
+  // Frame generation. Null when it could not be brought up, which is a reason
+  // to present normally rather than to fail.
+  std::unique_ptr<VulkanFrameGenerator> frame_generator_;
+  // The refresh count the last generated frame was made against, so a paint
+  // that has seen no new guest image does not invent motion that did not
+  // happen.
+  uint64_t frame_gen_last_refresh_count_ = 0;
+  // The generated image version the descriptor was written for.
+  uint64_t frame_gen_descriptor_version_ = UINT64_MAX;
+  // Set by a paint that presented an invented frame, to ask for the real one
+  // to be painted immediately after. Cleared at the head of every paint.
+  bool frame_gen_repeat_paint_ = false;
+  // Whether the paint currently being recorded is of the generated image
+  // rather than the guest one.
+  bool frame_gen_painting_generated_ = false;
+  // When the invented frame was handed to the presentation engine, so the real
+  // one that follows can be held back for its share of the interval.
+  std::chrono::steady_clock::time_point frame_gen_generated_present_time_{};
 
   // UI submission completion timeline with the submission index that can be
   // given to UI drawers (accessible from the UI thread only, at any time).

@@ -128,6 +128,20 @@ class EmulatorSession {
 
     fun averageFps(): Double = if (booted) core.average_fps() else 0.0
 
+    /** Frames per second reaching the display, generated ones included. Equal
+     *  to [averageFps] until frame generation is on. */
+    fun outputFps(): Double = if (booted) core.output_fps() else 0.0
+
+    /** Whether generated frames are being presented at this instant - not
+     *  whether the setting is on. Generation stops on its own whenever the
+     *  guest stops producing new images. */
+    fun frameGenerationActive(): Boolean =
+        if (booted) core.frame_generation_active() else false
+
+    /** The frame generation SETTING, as the core booted with it. */
+    fun frameGenerationEnabled(): Boolean =
+        if (booted) core.frame_generation_enabled() else false
+
     /** Guest frame counter, matching the "f:NNNNNNN" stamp on the GPU log lines.
      *  Shown on the debug overlay so a screenshot can be tied to the exact
      *  frame's log output. */

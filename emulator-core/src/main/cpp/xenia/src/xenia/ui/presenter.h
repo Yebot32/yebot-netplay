@@ -702,6 +702,31 @@ class Presenter {
   // Call via PaintAndPresent.
   virtual PaintResult PaintAndPresentImpl(bool execute_ui_drawers) = 0;
 
+  // How many times the guest output has been refreshed. A backend compares it
+  // against the value it last saw to tell a genuinely new guest image from the
+  // same one being painted again.
+  uint64_t GetGuestOutputRefreshCount() const {
+    return guest_output_refresh_count_.load(std::memory_order_relaxed);
+  }
+
+  // Whether the backend wants PaintAndPresentImpl called once more, right now,
+  // for the same guest output.
+  //
+  // This exists for frame generation, which presents the invented frame first
+  // and then the real frame it was interpolating towards - the real one has to
+  // be held back so there is something on both sides of the invention. Only
+  // consulted after a paint that actually presented, and only ever honoured
+  // once, so a backend that never clears the flag cannot spin.
+  virtual bool WantsRepeatPaint() const { return false; }
+
+  // Called between the two paints of a repeat, before the second.
+  //
+  // Presenting both in the same instant would gain nothing: the invented frame
+  // would be replaced before any scanout could show it, and the only thing left
+  // of the feature would be its cost. This is where the invented frame is given
+  // its share of the interval to be on screen for.
+  virtual void PaceRepeatPaint() {}
+
   // For calling from the painting implementations if requested.
   void ExecuteUIDrawersFromUIThread(UIDrawContext& ui_draw_context);
 

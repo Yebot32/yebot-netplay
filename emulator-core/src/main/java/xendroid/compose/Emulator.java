@@ -40,6 +40,15 @@ public class Emulator extends xendroid.emulator.Emulator{
     // RenderDoc-style average fps over a ~1s sliding window (0 before first present).
     public native double average_fps();
 
+    /** Frames per second reaching the display, generated ones included. */
+    public native double output_fps();
+
+    /** Whether generated frames are being presented at this instant. */
+    public native boolean frame_generation_active();
+
+    /** The frame generation SETTING, as the core booted with it. */
+    public native boolean frame_generation_enabled();
+
     /** Command processor guest frame counter - matches the GPU logs' "f:NNNNNNN" stamp. */
     public native long guest_frame_index();
     // Effective Display|show_debug_overlay (the live cvar, with any per-game config

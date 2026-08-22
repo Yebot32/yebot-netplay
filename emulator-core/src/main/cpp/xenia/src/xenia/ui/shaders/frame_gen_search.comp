@@ -1,0 +1,89 @@
+#version 450
+// Motion search.
+//
+// The match is anchored at the MIDPOINT between the two frames: it looks for
+// the displacement that makes prev(x - mv/2) and cur(x + mv/2) agree, because
+// the midpoint is where the invented frame lives. Anchoring at the previous
+// frame instead is cheaper, and is what makes a moving object tear away from
+// its own edge.
+//
+// Cost is a sum of absolute differences plus a penalty pulling the answer
+// toward the prediction. Without that penalty a flat region - a wall, the sky -
+// matches equally well at every displacement, and every block picks a different
+// arbitrary winner.
+#include "frame_gen_common.h"
+
+layout(local_size_x = XE_FG_LOCAL_SIZE, local_size_y = XE_FG_LOCAL_SIZE) in;
+layout(set = 0, binding = 3, rg32f) uniform writeonly image2D xe_fg_dst;
+
+// half_mv is half the displacement, in texels of the level being searched.
+float SearchCost(vec2 uv, vec2 half_mv, vec2 pred) {
+  float sad = 0.0;
+  for (int y = -1; y <= 1; ++y) {
+    for (int x = -1; x <= 1; ++x) {
+      vec2 o = vec2(float(x), float(y)) * xe_fg.src_texel;
+      float a = texture(xe_fg_src0, uv + o - half_mv * xe_fg.src_texel).r;
+      float b = texture(xe_fg_src1, uv + o + half_mv * xe_fg.src_texel).r;
+      sad += abs(a - b);
+    }
+  }
+  vec2 full = half_mv * 2.0 * xe_fg.px_per_texel;
+  return sad + xe_fg.lambda * length(full - pred);
+}
+
+void main() {
+  ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+  if (any(greaterThanEqual(vec2(coord), xe_fg.dst_size))) {
+    return;
+  }
+  vec2 uv = (vec2(coord) + 0.5) / xe_fg.dst_size;
+
+  vec2 pred = (xe_fg.use_pred != 0) ? texture(xe_fg_src2, uv).xy : vec2(0.0);
+  vec2 best = pred / (2.0 * xe_fg.px_per_texel);
+  float best_cost = SearchCost(uv, best, pred);
+
+  if (xe_fg.mode == 0) {
+    // Three-step search: a 3x3 probe at a step that halves each round.
+    float step = float(xe_fg.steps);
+    for (int i = 0; i < 3; ++i) {
+      vec2 centre = best;
+      for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+          if (x == 0 && y == 0) {
+            continue;
+          }
+          vec2 cand = centre + vec2(float(x), float(y)) * step;
+          float c = SearchCost(uv, cand, pred);
+          if (c < best_cost) {
+            best_cost = c;
+            best = cand;
+          }
+        }
+      }
+      step *= 0.5;
+      if (step < 0.5) {
+        break;
+      }
+    }
+  } else {
+    // Refinement: exhaustive at half-texel steps around the prediction.
+    for (int y = -2; y <= 2; ++y) {
+      for (int x = -2; x <= 2; ++x) {
+        if (x == 0 && y == 0) {
+          continue;
+        }
+        vec2 cand = best + vec2(float(x), float(y)) * 0.5;
+        float c = SearchCost(uv, cand, pred);
+        if (c < best_cost) {
+          best_cost = c;
+          best = cand;
+        }
+      }
+    }
+  }
+
+  // Stored as the FULL displacement in full-resolution pixels, so the next
+  // level and the warp need not know which level produced it.
+  imageStore(xe_fg_dst, coord,
+             vec4(best * 2.0 * xe_fg.px_per_texel, 0.0, 0.0));
+}

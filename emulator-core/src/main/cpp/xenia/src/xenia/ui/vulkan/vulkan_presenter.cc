@@ -9,10 +9,14 @@
 
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/frame_stats.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
@@ -30,6 +34,24 @@
 #if XE_PLATFORM_WIN32
 #include "xenia/ui/surface_win.h"
 #endif
+
+DEFINE_bool(
+    frame_generation, false,
+    "Present an invented frame between each pair the game produces, so the "
+    "picture updates twice as often.\n"
+    "Motion is estimated from the two frames themselves - the guest provides "
+    "no motion vectors - so fast movement and anything appearing from behind a "
+    "moving object are where the invention shows.\n"
+    "It is not free in either sense. A real frame is held back so there is "
+    "something on both sides of the invented one, which adds about half a "
+    "frame of input delay, and the estimation costs GPU time, so on a game "
+    "that is already GPU-limited the game's own frame rate drops to pay for "
+    "the presented one. The performance HUD shows both numbers for that "
+    "reason.\n"
+    "Requires a swapchain that can present without waiting for vertical sync - "
+    "with plain FIFO, presenting twice per game frame would halve the game's "
+    "own rate instead of doubling what you see, so it turns itself off.",
+    "Display");
 
 // Note: If the priorities in the description are changed, update the actual
 // present mode selection logic.
@@ -153,6 +175,10 @@ VulkanPresenter::~VulkanPresenter() {
   // just one sleep will likely be needed.
   ui_completion_timeline_.AwaitAllSubmissions();
   guest_output_image_refresher_completion_timeline_.AwaitAllSubmissions();
+
+  // Before anything else it owns is destroyed, and while the device is still
+  // alive - it holds pipelines, images and a descriptor pool of its own.
+  frame_generator_.reset();
 
   const VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
@@ -1496,6 +1522,13 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
     return PaintResult::kNotPresented;
   }
 
+  // Per-paint frame generation state. Cleared here rather than where it is set,
+  // because a paint that never reaches the guest output branch - no image, no
+  // effects - would otherwise inherit the previous paint's answers and ask for
+  // a repeat that has nothing to show.
+  frame_gen_repeat_paint_ = false;
+  frame_gen_painting_generated_ = false;
+
   VkCommandBuffer draw_command_buffer = paint_submission.draw_command_buffer();
   VkCommandBufferBeginInfo command_buffer_begin_info;
   command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1694,6 +1727,69 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
         guest_output_image_descriptor_write.pTexelBufferView = nullptr;
         dfn.vkUpdateDescriptorSets(
             device, 1, &guest_output_image_descriptor_write, 0, nullptr);
+      }
+
+      // Frame generation.
+      //
+      // Runs here rather than in the refresher because this is the command
+      // buffer that already has the guest image in the layout the passes want,
+      // and because presenting is what has to happen twice.
+      //
+      if (frame_generator_) {
+        const uint64_t guest_output_refresh_count = GetGuestOutputRefreshCount();
+        if (guest_output_refresh_count != frame_gen_last_refresh_count_) {
+          // A new guest image. Anything else is the same picture again, and
+          // inventing a frame between a picture and itself would be inventing
+          // motion that did not happen.
+          frame_gen_last_refresh_count_ = guest_output_refresh_count;
+          const VkExtent2D& guest_output_extent = guest_output_image->extent();
+          if (frame_generator_->RecordGenerateAndCapture(
+                  draw_command_buffer, guest_output_image->view(),
+                  guest_output_extent.width, guest_output_extent.height,
+                  0.5f)) {
+            frame_gen_painting_generated_ = true;
+            frame_gen_repeat_paint_ = true;
+          } else {
+            // No history yet, or a size change - present this one as it is and
+            // keep it to interpolate from next time.
+            frame_generator_->RecordCaptureOnly(
+                draw_command_buffer, guest_output_image->view(),
+                guest_output_extent.width, guest_output_extent.height);
+          }
+        }
+      }
+      if (frame_gen_painting_generated_ &&
+          frame_gen_descriptor_version_ !=
+              frame_generator_->generated_version()) {
+        // The generated image only changes identity on a resize, so this hard
+        // wait costs nothing in steady state and avoids rewriting a descriptor
+        // a queued paint may still be reading.
+        paint_context_.completion_timeline.AwaitAllSubmissions();
+        frame_gen_descriptor_version_ = frame_generator_->generated_version();
+        VkDescriptorImageInfo generated_descriptor_image_info;
+        generated_descriptor_image_info.sampler = VK_NULL_HANDLE;
+        generated_descriptor_image_info.imageView =
+            frame_generator_->generated_view();
+        generated_descriptor_image_info.imageLayout =
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet generated_descriptor_write;
+        generated_descriptor_write.sType =
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        generated_descriptor_write.pNext = nullptr;
+        generated_descriptor_write.dstSet =
+            paint_context_.guest_output_descriptor_sets
+                [PaintContext::kGuestOutputDescriptorSetGenerated];
+        generated_descriptor_write.dstBinding = 0;
+        generated_descriptor_write.dstArrayElement = 0;
+        generated_descriptor_write.descriptorCount = 1;
+        generated_descriptor_write.descriptorType =
+            VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        generated_descriptor_write.pImageInfo =
+            &generated_descriptor_image_info;
+        generated_descriptor_write.pBufferInfo = nullptr;
+        generated_descriptor_write.pTexelBufferView = nullptr;
+        dfn.vkUpdateDescriptorSets(device, 1, &generated_descriptor_write, 0,
+                                   nullptr);
       }
 
       // Make sure intermediate textures of the needed size are available, and
@@ -1946,6 +2042,12 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
             effect_src_descriptor_set = PaintContext::GuestOutputDescriptorSet(
                 PaintContext::kGuestOutputDescriptorSetIntermediate0Sampled +
                 (i - 1));
+          } else if (frame_gen_painting_generated_) {
+            // Everything downstream - the scalers, the letterboxing, the
+            // dithering - is the same for an invented frame as for a real one.
+            // Only where the first pass reads from changes.
+            effect_src_descriptor_set =
+                PaintContext::kGuestOutputDescriptorSetGenerated;
           } else {
             effect_src_descriptor_set = PaintContext::GuestOutputDescriptorSet(
                 PaintContext::kGuestOutputDescriptorSetGuestOutput0Sampled +
@@ -2215,9 +2317,14 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
   }
   switch (present_result) {
     case VK_SUCCESS:
-      return PaintResult::kPresented;
     case VK_SUBOPTIMAL_KHR:
-      return PaintResult::kPresentedSuboptimal;
+      xe::RecordHostPresent(frame_gen_painting_generated_);
+      if (frame_gen_painting_generated_) {
+        frame_gen_generated_present_time_ = std::chrono::steady_clock::now();
+      }
+      return present_result == VK_SUCCESS
+                 ? PaintResult::kPresented
+                 : PaintResult::kPresentedSuboptimal;
     case VK_ERROR_DEVICE_LOST:
       XELOGE(
           "VulkanPresenter: Failed to present the swapchain image as the "
@@ -2247,6 +2354,44 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
       // kNotPresented.
       return PaintResult::kNotPresentedConnectionOutdated;
   }
+}
+
+void VulkanPresenter::PaceRepeatPaint() {
+  // With FIFO the presentation engine already spaces the pair - the second
+  // present waits for the next vertical blank on its own, which is exactly the
+  // gap wanted. The cost there is that the guest is held to half the display
+  // refresh, which is inherent to showing two frames for every one it makes.
+  if (paint_context_.swapchain_is_fifo) {
+    return;
+  }
+
+  // Without it, both presents would land in the same instant and the invented
+  // frame would be replaced before any scanout could show it - all of the cost
+  // and none of the effect. Hold the real frame back for half of the guest's
+  // own frame interval, which is where the invented one belongs in time.
+  float instant_ms = 0.0f;
+  float avg_ms = 0.0f;
+  float fps = 0.0f;
+  xe::GetFrameStats(instant_ms, avg_ms, fps);
+  if (!(avg_ms > 0.0f)) {
+    // No measurement yet - better to present immediately than to guess an
+    // interval and stall on it.
+    return;
+  }
+  // Clamped: a huge avg_ms from a load screen must not park the paint thread,
+  // and a tiny one is not worth a syscall.
+  const float target_ms = std::min(std::max(avg_ms * 0.5f, 1.0f), 25.0f);
+
+  const auto now = std::chrono::steady_clock::now();
+  const auto elapsed = std::chrono::duration<float, std::milli>(
+                           now - frame_gen_generated_present_time_)
+                           .count();
+  const float remaining_ms = target_ms - elapsed;
+  if (remaining_ms <= 0.0f) {
+    return;
+  }
+  std::this_thread::sleep_for(
+      std::chrono::duration<float, std::milli>(remaining_ms));
 }
 
 bool VulkanPresenter::InitializeSurfaceIndependent() {
@@ -2592,6 +2737,19 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
         "VulkanPresenter: Failed to allocate the guest output painting "
         "descriptor sets");
     return false;
+  }
+
+  // Frame generation is built only when it is switched on: it is five compute
+  // pipelines and a set of work images, and most sessions will not want it.
+  // Failing to build it is not a reason to fail the presenter - it just means
+  // presenting the way we always did.
+  if (cvars::frame_generation) {
+    frame_generator_ = VulkanFrameGenerator::Create(vulkan_device_, ui_samplers_);
+    if (!frame_generator_) {
+      XELOGE(
+          "VulkanPresenter: Frame generation could not be initialized - "
+          "presenting guest frames only");
+    }
   }
 
   return InitializeCommonSurfaceIndependent();

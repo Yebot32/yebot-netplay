@@ -1305,6 +1305,18 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_true(surface_paint_connection_state_ ==
               SurfacePaintConnectionState::kConnectedPaintable);
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  // Frame generation presents what it invented, then asks for the real frame
+  // to follow it immediately. Once only - see WantsRepeatPaint.
+  if ((result == PaintResult::kPresented ||
+       result == PaintResult::kPresentedSuboptimal) &&
+      WantsRepeatPaint()) {
+    PaceRepeatPaint();
+    PaintResult repeat_result = PaintAndPresentImpl(execute_ui_drawers);
+    // A failure on the follow-up is the one that matters: the invented frame
+    // is already on screen, and the connection state below has to reflect
+    // whatever happened last.
+    result = repeat_result;
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;
