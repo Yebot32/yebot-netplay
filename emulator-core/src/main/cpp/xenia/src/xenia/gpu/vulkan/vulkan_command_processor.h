@@ -246,9 +246,25 @@ class VulkanCommandProcessor final : public CommandProcessor {
       uint32_t src_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
       uint32_t dst_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
       bool skip_if_equal = true);
+  // Which subsystem needed the barrier flush, so the pass break it causes can
+  // be attributed. MEASURED 2026-08-24: 101 of ~103 render passes per frame in
+  // Halo 3 end because a barrier had to be recorded outside the pass, and
+  // NONE end from a render-target change - so this is the whole question.
+  enum class BarrierSource {
+    kRenderTargets,  // EDRAM ownership transfers and resolves
+    kSharedMemory,   // guest RAM uploads into the shared buffer
+    kTextures,       // texture uploads and layout transitions
+    kCommandProcessor,
+    kOther,
+  };
+
   // Returns whether any barriers have been submitted - if true is returned, the
   // render pass will also be closed.
-  bool SubmitBarriers(bool force_end_render_pass);
+  // |site_line| is __LINE__ at the call, so the command-processor sites - the
+  // largest single group - can be told apart without eleven enum members.
+  bool SubmitBarriers(bool force_end_render_pass,
+                      BarrierSource source = BarrierSource::kOther,
+                      uint32_t site_line = 0);
 
   // If [base_bytes, base_bytes + size_bytes) holds memexport output (which
   // under two-buffer routing lives in the host-imported buffer aliasing guest
@@ -271,10 +287,25 @@ class VulkanCommandProcessor final : public CommandProcessor {
       VkRenderPass render_pass,
       const VulkanRenderTargetCache::Framebuffer* framebuffer,
       VkImageView transfer_dest_view, bool transfer_dest_is_depth);
+  // Why a render pass was ended, for the per-frame breakdown in VkFrameSync.
+  //
+  // MEASURED 2026-08-24 on an Adreno 750: the 360 renderer issues ~158 render
+  // passes per guest frame, and on a tiler every one of those is a full GMEM
+  // store and reload - the single most expensive thing a mobile GPU does. The
+  // count alone does not say what to fix, so each break is attributed to the
+  // thing that forced it. Costs one increment per pass end.
+  enum class PassEndReason {
+    kBarrier,        // a pipeline barrier had to be recorded outside the pass
+    kRenderTargets,  // the guest bound a different render target set
+    kQuery,          // an occlusion query had to open or reset outside it
+    kSubmissionEnd,  // end of a submission or of the frame - unavoidable
+    kOther,
+  };
+
   // Must be called before doing anything outside the render pass scope,
   // including adding pipeline barriers that are not a part of the render pass
   // scope. Submission must be open.
-  void EndRenderPass();
+  void EndRenderPass(PassEndReason reason = PassEndReason::kOther);
 
   VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
       SingleTransientDescriptorLayout transient_descriptor_layout) const {
@@ -702,12 +733,34 @@ class VulkanCommandProcessor final : public CommandProcessor {
     // Draw/pass structure counters.
     uint64_t draws = 0;
     uint64_t render_pass_begins = 0;
+    // Pass ends attributed to what forced them - see PassEndReason. Only ends
+    // that actually closed an open pass are counted, so these sum to the
+    // number of passes rather than to the number of EndRenderPass calls.
+    uint64_t pass_end_barrier = 0;
+    uint64_t pass_end_rts = 0;
+    uint64_t pass_end_query = 0;
+    uint64_t pass_end_submission = 0;
+    uint64_t pass_end_other = 0;
+    // Of the barrier-caused breaks above, which subsystem asked for the flush.
+    uint64_t barrier_rts = 0;
+    uint64_t barrier_shmem = 0;
+    uint64_t barrier_tex = 0;
+    uint64_t barrier_cp = 0;
+    uint64_t barrier_other = 0;
+    // Barriers pending at a command-processor flush, split by kind.
+    uint64_t cp_flush_buffer_barriers = 0;
+    uint64_t cp_flush_image_barriers = 0;
     uint64_t primary_buffer_splits = 0;
     uint64_t rb_uma_direct = 0;
     uint64_t rb_uma_first_use = 0;
     uint64_t last_report_ns = 0;
   };
   VkFrameSyncStats vk_frame_sync_stats_;
+  // Flushes per command-processor call site, keyed by __LINE__. Reported as
+  // the top few and cleared with the rest of the window.
+  std::map<uint32_t, uint64_t> cp_barrier_sites_;
+  // (oldLayout<<16 | newLayout) -> count, for the same window.
+  std::map<uint32_t, uint64_t> cp_flush_layouts_;
 
  public:
   VkFrameSyncStats& vk_frame_sync_stats() { return vk_frame_sync_stats_; }

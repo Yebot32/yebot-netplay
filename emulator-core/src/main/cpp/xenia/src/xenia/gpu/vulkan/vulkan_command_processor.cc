@@ -2560,7 +2560,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           "| submit->fence avg={:.1f}ms max={:.1f}ms | blocking={:.1f} "
           "delta avg={:.2f} | gpu exec avg={:.1f}ms max={:.1f}ms "
           "gap avg={:.1f}ms | resolve_ms={:.2f} avg={:.3f} max={:.2f} "
-          "dropped={} | draws={:.0f} rp_begins={:.0f} splits={:.1f}",
+          "dropped={} | draws={:.0f} rp_begins={:.0f} splits={:.1f} "
+          "| pass ends/fr: barrier={:.1f} rts={:.1f} query={:.1f} "
+          "submit={:.1f} other={:.1f} | barrier src/fr: rts={:.1f} "
+          "shmem={:.1f} tex={:.1f} cp={:.1f} other={:.1f} "
+          "| cp flush pending: buf={:.1f} img={:.1f}",
           s.frames, s.awaits / f, s.await_ns / f / 1e6, s.submissions / f,
           s.resolves / f, s.memexport_awaits / f, s.readback_awaits / f,
           s.sub_completions
@@ -2583,7 +2587,44 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                     static_cast<double>(s.resolve_gpu_samples) / 1e6
               : 0.0,
           s.resolve_gpu_max_ns / 1e6, s.resolve_ts_dropped, s.draws / f,
-          s.render_pass_begins / f, s.primary_buffer_splits / f);
+          s.render_pass_begins / f, s.primary_buffer_splits / f,
+          s.pass_end_barrier / f, s.pass_end_rts / f, s.pass_end_query / f,
+          s.pass_end_submission / f, s.pass_end_other / f,
+          s.barrier_rts / f, s.barrier_shmem / f, s.barrier_tex / f,
+          s.barrier_cp / f, s.barrier_other / f,
+          s.cp_flush_buffer_barriers / f, s.cp_flush_image_barriers / f);
+      if (!cp_flush_layouts_.empty()) {
+        std::vector<std::pair<uint32_t, uint64_t>> ls(cp_flush_layouts_.begin(),
+                                                      cp_flush_layouts_.end());
+        std::sort(ls.begin(), ls.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string top;
+        for (size_t i = 0; i < ls.size() && i < 5; ++i) {
+          top += fmt::format("{}{}->{}:{:.1f}", i ? " " : "", ls[i].first >> 16,
+                             ls[i].first & 0xFFFFu, ls[i].second / f);
+        }
+        XELOGI("VkFlushLayouts (old->new:per frame): {}", top);
+        cp_flush_layouts_.clear();
+      }
+      if (!cp_barrier_sites_.empty()) {
+        std::vector<std::pair<uint32_t, uint64_t>> sites(
+            cp_barrier_sites_.begin(), cp_barrier_sites_.end());
+        std::sort(sites.begin(), sites.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string top;
+        for (size_t i = 0; i < sites.size() && i < 6; ++i) {
+          const char* who = "cp";
+          switch (sites[i].first >> 16) {
+            case 2: who = "rtc"; break;
+            case 3: who = "tex"; break;
+            default: break;
+          }
+          top += fmt::format("{}{}:{}:{:.1f}", i ? " " : "", who,
+                             sites[i].first & 0xFFFFu, sites[i].second / f);
+        }
+        XELOGI("VkBarrierSites (who:line:per frame): {}", top);
+        cp_barrier_sites_.clear();
+      }
       // Per-render-pass-bucket GPU time (key: WxH, bit31 = ownership transfer).
       if (!pass_bucket_stats_.empty()) {
         for (const auto& kv : pass_bucket_stats_) {
@@ -2872,7 +2913,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_IGNORED,
                 VK_QUEUE_FAMILY_IGNORED, false);
-            SubmitBarriers(true);
+            SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
             InsertDebugMarker("Gamma Ramp Upload: %u bytes",
                               static_cast<uint32_t>(gamma_ramp_size));
             VkBufferCopy gamma_ramp_buffer_copy;
@@ -2942,7 +2983,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         }
 
         // End the current render pass before inserting barriers.
-        SubmitBarriers(true);
+        SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
 
         PushDebugMarker("Apply Gamma Ramp: %s%s",
                         use_pwl_gamma_ramp ? "PWL" : "256-entry table",
@@ -3082,7 +3123,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_GENERAL);
           }
-          SubmitBarriers(true);
+          SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
 
           // Bind FXAA pipeline.
           deferred_command_buffer_.CmdVkBindPipeline(
@@ -3347,16 +3388,62 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
   return true;
 }
 
-bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass,
+                                            BarrierSource source,
+                                            uint32_t site_line) {
   assert_true(submission_open_);
   SplitPendingBarrier();
   if (pending_barriers_.empty()) {
     if (force_end_render_pass) {
-      EndRenderPass();
+      EndRenderPass(PassEndReason::kBarrier);
     }
     return false;
   }
-  EndRenderPass();
+  // What is actually pending at a flush, so the biggest site can be chased to
+  // whoever pushed the barrier rather than guessed at. Buffers point at the
+  // shared-memory / scratch paths, images at textures and render targets.
+  // Guarded: the counters are diagnostics, and a std::map insert per barrier
+  // flush is not something to charge every user for. Off, this costs one
+  // already-hot bool test.
+  if (cvars::log_gpu_frame_time_breakdown && in_render_pass_ &&
+      source == BarrierSource::kCommandProcessor) {
+    vk_frame_sync_stats_.cp_flush_buffer_barriers +=
+        pending_barriers_buffer_memory_barriers_.size();
+    vk_frame_sync_stats_.cp_flush_image_barriers +=
+        pending_barriers_image_memory_barriers_.size();
+    // Which transition, so a layout that oscillates between two states every
+    // few draws is visible as such rather than as an anonymous count.
+    for (const VkImageMemoryBarrier& b :
+         pending_barriers_image_memory_barriers_) {
+      ++cp_flush_layouts_[(uint32_t(b.oldLayout) << 16) |
+                          uint32_t(b.newLayout & 0xFFFF)];
+    }
+  }
+  // Counted only here, where the flush is real. A call that found no pending
+  // barriers cost nothing and must not appear as a cause.
+  if (cvars::log_gpu_frame_time_breakdown && in_render_pass_) {
+    switch (source) {
+      case BarrierSource::kRenderTargets:
+        ++vk_frame_sync_stats_.barrier_rts;
+        ++cp_barrier_sites_[0x20000u | site_line];
+        break;
+      case BarrierSource::kSharedMemory:
+        ++vk_frame_sync_stats_.barrier_shmem;
+        break;
+      case BarrierSource::kTextures:
+        ++vk_frame_sync_stats_.barrier_tex;
+        ++cp_barrier_sites_[0x30000u | site_line];
+        break;
+      case BarrierSource::kCommandProcessor:
+        ++vk_frame_sync_stats_.barrier_cp;
+        ++cp_barrier_sites_[0x10000u | site_line];
+        break;
+      case BarrierSource::kOther:
+        ++vk_frame_sync_stats_.barrier_other;
+        break;
+    }
+  }
+  EndRenderPass(PassEndReason::kBarrier);
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend();
        ++it) {
     auto it_next = std::next(it);
@@ -3447,7 +3534,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     VkRenderPass render_pass,
     const VulkanRenderTargetCache::Framebuffer* framebuffer) {
   SCOPE_profile_cpu_f("gpu");
-  SubmitBarriers(false);
+  SubmitBarriers(false, BarrierSource::kCommandProcessor, __LINE__);
 
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
   bool use_dynamic_rendering = cvars::vulkan_dynamic_rendering &&
@@ -3470,7 +3557,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   // End current render pass/rendering if active, via EndRenderPass so any open
   // occlusion query segment is closed first. A query begun inside the pass must
   // be ended before the pass is. Also closes the fork's pass timestamp.
-  EndRenderPass();
+  EndRenderPass(PassEndReason::kRenderTargets);
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
@@ -3553,7 +3640,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     const VulkanRenderTargetCache::Framebuffer* framebuffer,
     VkImageView transfer_dest_view, bool transfer_dest_is_depth) {
   SCOPE_profile_cpu_f("gpu");
-  SubmitBarriers(false);
+  SubmitBarriers(false, BarrierSource::kCommandProcessor, __LINE__);
 
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
   bool use_dynamic_rendering = cvars::vulkan_dynamic_rendering &&
@@ -3576,7 +3663,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   // End current render pass/rendering if active, via EndRenderPass so any open
   // occlusion query segment is closed first. A query begun inside the pass must
   // be ended before the pass is. Also closes the fork's pass timestamp.
-  EndRenderPass();
+  EndRenderPass(PassEndReason::kRenderTargets);
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
@@ -3657,10 +3744,32 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   OpenQuerySegment(false);
 }
 
-void VulkanCommandProcessor::EndRenderPass() {
+void VulkanCommandProcessor::EndRenderPass(PassEndReason reason) {
   assert_true(submission_open_);
   if (!in_render_pass_) {
     return;
+  }
+  // Attributed here rather than at the call sites so an end that found no open
+  // pass - which most of the unconditional calls are - is not counted as a
+  // break that cost anything. Diagnostic only, so gated with the rest.
+  if (cvars::log_gpu_frame_time_breakdown) {
+    switch (reason) {
+      case PassEndReason::kBarrier:
+        ++vk_frame_sync_stats_.pass_end_barrier;
+        break;
+      case PassEndReason::kRenderTargets:
+        ++vk_frame_sync_stats_.pass_end_rts;
+        break;
+      case PassEndReason::kQuery:
+        ++vk_frame_sync_stats_.pass_end_query;
+        break;
+      case PassEndReason::kSubmissionEnd:
+        ++vk_frame_sync_stats_.pass_end_submission;
+        break;
+      case PassEndReason::kOther:
+        ++vk_frame_sync_stats_.pass_end_other;
+        break;
+    }
   }
   // Close native Vulkan occlusion queries before ending the pass. FSI counter
   // segments don't use vkCmdBeginQuery / vkCmdEndQuery and can stay logically
@@ -5371,7 +5480,7 @@ bool VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
                           VkDeviceSize(size_bytes), read_stages,
                           VK_PIPELINE_STAGE_TRANSFER_BIT, read_access,
                           VK_ACCESS_TRANSFER_WRITE_BIT);
-  SubmitBarriers(true);
+  SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
 
   VkBufferCopy copy_region;
   copy_region.srcOffset = base_bytes;
@@ -5519,7 +5628,7 @@ bool VulkanCommandProcessor::IssueCopy() {
             VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_ACCESS_HOST_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
             VK_QUEUE_FAMILY_IGNORED, false);
-        SubmitBarriers(true);
+        SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
         if (!AwaitAllQueueOperationsCompletion()) {
           XELOGE("VulkanCommandProcessor: uma resolve readback drain failed");
           PopDebugMarker();
@@ -5565,7 +5674,7 @@ bool VulkanCommandProcessor::IssueCopy() {
           VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
           VK_ACCESS_TRANSFER_WRITE_BIT);
-      SubmitBarriers(true);
+      SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
       InsertDebugMarker("Resolve Sync (guest RAM): 0x%08X, %u bytes",
                         written_address, written_length);
       VkBufferCopy copy_region = {};
@@ -5868,7 +5977,7 @@ bool VulkanCommandProcessor::IssueCopy() {
                                descriptor_writes.data(), 0, nullptr);
 
     // End any active render pass and submit barriers
-    SubmitBarriers(true);
+    SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
 
     // Barrier for source buffer - ensure resolve copy compute shader writes
     // are complete before readback compute shader reads.
@@ -6137,7 +6246,7 @@ CommandProcessor::QueryOpenResult VulkanCommandProcessor::OpenZPDQuery(
       if (in_render_pass_) {
         saved_render_pass = current_render_pass_;
         saved_framebuffer = current_framebuffer_;
-        EndRenderPass();
+        EndRenderPass(PassEndReason::kQuery);
       }
       if (!EndSubmission(false)) {
         return QueryOpenResult::kFailed;
@@ -6196,7 +6305,7 @@ CommandProcessor::QueryOpenResult VulkanCommandProcessor::OpenZPDQuery(
         VkRenderPass saved_render_pass = current_render_pass_;
         const VulkanRenderTargetCache::Framebuffer* saved_framebuffer =
             current_framebuffer_;
-        EndRenderPass();
+        EndRenderPass(PassEndReason::kQuery);
         zpd_host_query_pool_->ClearFSICounter(deferred_command_buffer_,
                                               zpd_active_query_index_);
 
@@ -6391,7 +6500,7 @@ bool VulkanCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
       }
       pipeline_cache_->AwaitPipelineCompletion();
     }
-    EndRenderPass();
+    EndRenderPass(PassEndReason::kSubmissionEnd);
     if (!EndSubmission(false)) {
       return false;
     }
@@ -7031,7 +7140,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   if (submission_open_) {
     assert_false(scratch_buffer_used_);
 
-    EndRenderPass();
+    EndRenderPass(PassEndReason::kSubmissionEnd);
 
     render_target_cache_->EndSubmission();
 
@@ -7096,7 +7205,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     // Can't cross command buffer boundaries. Close the active segment first.
     CloseQuerySegment();
 
-    SubmitBarriers(true);
+    SubmitBarriers(true, BarrierSource::kCommandProcessor, __LINE__);
 
     assert_false(command_buffers_writable_.empty());
     CommandBuffer command_buffer = command_buffers_writable_.back();
