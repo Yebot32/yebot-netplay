@@ -743,6 +743,14 @@ dword_result_t XamSwapDisc_entry(
   // Mount to Cdrom0 so the game: symlink points to the new disc
   auto mount_path = "\\Device\\Cdrom0";
 
+  // Drop the alias a Games on Demand boot leaves on the drive before anything
+  // real is mounted there. Emulator::LaunchPath points Cdrom0 at Package_0 so
+  // that GOD content has a drive to answer for it at all; a genuine disc going
+  // in has to replace that, and ResolvePath expands symlinks BEFORE it looks
+  // for a device, so leaving it would silently shadow the disc just inserted
+  // with the package that was already mounted.
+  filesystem->UnregisterSymbolicLink(mount_path);
+
   // Unmount the current disc
   if (filesystem->ResolvePath(mount_path) != NULL) {
     filesystem->UnregisterDevice(mount_path);

@@ -739,7 +739,32 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
     case FileSignatureType::CON:
     case FileSignatureType::PIRS: {
       mount_result = MountPath(path, "\\Device\\Package_0");
-      return mount_result ? mount_result : LaunchStfsContainer(path);
+      if (mount_result) {
+        return mount_result;
+      }
+      // *** GIVE STFS/GOD CONTENT A DISC DEVICE TOO. ***
+      //
+      // On a real console the disc drive ALWAYS exists - it simply has
+      // no media in it while a Games on Demand title runs from the hard
+      // disk. Here the device was not registered at all for non-disc
+      // content, so a title that probes the drive got "device not
+      // found", which is a different failure from "no disc" and one a
+      // title has no reason to expect.
+      //
+      // MEASURED on Grand Theft Auto V (title 545408A7), a GOD title:
+      // it reaches its menu and then asks for the disc device once per
+      // frame, forever, and never gets past it. Nothing else is wrong -
+      // the payload is complete and its executable loads.
+      //
+      // Aliased rather than registered as an empty device, because for
+      // a Games on Demand title the package IS the disc: the files the
+      // game would read off the drive are the ones inside it.
+      // ResolvePath expands symlinks before it looks for a device, so
+      // this costs nothing at boot and nothing on a lookup that misses.
+      file_system_->UnregisterSymbolicLink("\\Device\\Cdrom0");
+      file_system_->RegisterSymbolicLink("\\Device\\Cdrom0",
+                                         "\\Device\\Package_0");
+      return LaunchStfsContainer(path);
     } break;
     case FileSignatureType::XISO: {
       mount_result = MountPath(path, "\\Device\\Cdrom0");
