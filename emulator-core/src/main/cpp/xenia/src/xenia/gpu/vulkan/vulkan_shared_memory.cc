@@ -634,7 +634,8 @@ bool VulkanSharedMemory::InitializeTraceSubmitDownloads() {
   }
 
   Use(Usage::kRead);
-  command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kSharedMemory);
   DeferredCommandBuffer& command_buffer =
       command_processor_.deferred_command_buffer();
 
@@ -797,7 +798,8 @@ bool VulkanSharedMemory::UploadRanges(
                 << page_size_log2()));
     // Submit barriers (may end render pass) before pushing debug marker so
     // EndRenderPass is not inside the SharedMem Upload marker.
-    command_processor_.SubmitBarriers(true);
+    command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kSharedMemory);
 
     uint32_t total_upload_bytes =
         (range_back.first + range_back.second - range_front.first)

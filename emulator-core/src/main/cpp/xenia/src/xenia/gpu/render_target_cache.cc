@@ -1914,7 +1914,9 @@ void RenderTargetCache::ChangeOwnership(
           !it_pre->second.IsOwnedBy(dest, host_depth_encoding_different)) {
         // Different render target overlapping the range - split the head.
         ownership_mutated = true;
-        ownership_ranges_.emplace(extent_start, it_pre->second);
+        // Hinted: the insert position is already known, so this is O(1)
+        // instead of another search of the map. Same for the tail split below.
+        ownership_ranges_.emplace_hint(it, extent_start, it_pre->second);
         it_pre->second.end_tiles = extent_start;
         // Let the next loop do the transfer and needed merging and splitting
         // starting from the added tail.
@@ -1937,7 +1939,7 @@ void RenderTargetCache::ChangeOwnership(
       ownership_mutated = true;
       if (it->second.end_tiles > extent_end) {
         // Split the tail.
-        ownership_ranges_.emplace(extent_end, it->second);
+        ownership_ranges_.emplace_hint(std::next(it), extent_end, it->second);
         it->second.end_tiles = extent_end;
       }
       if (transfers_append_out) {

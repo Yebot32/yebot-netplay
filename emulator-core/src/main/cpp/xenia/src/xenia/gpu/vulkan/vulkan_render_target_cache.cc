@@ -2808,7 +2808,8 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
       command_buffer.CmdVkBindDescriptorSets(
           VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0,
           uint32_t(xe::countof(descriptor_sets)), descriptor_sets, 0, nullptr);
-      command_processor_.SubmitBarriers(true);
+      command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kRenderTargets, __LINE__);
       command_buffer.CmdVkDispatch((constants.thread_count_x + 7u) >> 3,
                                    (constants.thread_count_y + 7u) >> 3, 1);
     }
@@ -3205,7 +3206,8 @@ bool VulkanRenderTargetCache::Resolve(
                 copy_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 sizeof(copy_shader_constants), &copy_shader_constants);
           }
-          command_processor_.SubmitBarriers(true);
+          command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kRenderTargets, __LINE__);
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y,
                                        1);
 
@@ -3314,7 +3316,8 @@ bool VulkanRenderTargetCache::Resolve(
           command_buffer.CmdVkPushConstants(
               resolve_fsi_clear_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
               0, sizeof(depth_clear_constants), &depth_clear_constants);
-          command_processor_.SubmitBarriers(true);
+          command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kRenderTargets, __LINE__);
           command_buffer.CmdVkDispatch(clear_group_count.first,
                                        clear_group_count.second, 1);
         }
@@ -3338,7 +3341,8 @@ bool VulkanRenderTargetCache::Resolve(
                 resolve_fsi_clear_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
                 0, sizeof(color_clear_constants), &color_clear_constants);
           }
-          command_processor_.SubmitBarriers(true);
+          command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kRenderTargets, __LINE__);
           command_buffer.CmdVkDispatch(clear_group_count.first,
                                        clear_group_count.second, 1);
         }
@@ -7878,7 +7882,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             uint32_t(offsetof(HostDepthStoreConstants, rectangle)),
             sizeof(host_depth_store_rectangle_constant),
             &host_depth_store_rectangle_constant);
-        command_processor_.SubmitBarriers(true);
+        command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kRenderTargets, __LINE__);
         command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
         MarkEdramBufferModified();
       }
@@ -9418,7 +9423,8 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
             sizeof(uint32_t) * kDumpPushConstantOffsets, sizeof(last_offsets),
             &last_offsets);
       }
-      command_processor_.SubmitBarriers(true);
+      command_processor_.SubmitBarriers(
+      true, VulkanCommandProcessor::BarrierSource::kRenderTargets, __LINE__);
       // The native layout has a 1x1 footprint.
       command_buffer.CmdVkDispatch(
           ((native_layout ? 1 : draw_resolution_scale_x()) *
