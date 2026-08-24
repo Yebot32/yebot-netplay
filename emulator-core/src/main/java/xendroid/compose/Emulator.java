@@ -77,6 +77,14 @@ public class Emulator extends xendroid.emulator.Emulator{
     // under their account XUID, everything else under machine XUID 0. Returns X_STATUS
     // (0 == success). Blocking VFS walk -- MUST be called off the main thread.
     public native int install_content(String srcPath, String contentRoot);
+
+    // As install_content, but names the account a SAVED GAME belongs to.
+    // ContentManager resolves a save against the signed-in profile, so one
+    // installed under machine XUID 0 is invisible to the title that owns it.
+    // profileXuid is the 16-hex-digit account id; null or blank means "no
+    // profile", which reproduces install_content exactly.
+    public native int install_content_for(String srcPath, String contentRoot,
+                                          String profileXuid);
     public native DiscContentItem[] list_disc_content(String discPath);
     public native int install_disc_content(String discPath, String innerPath,
                                            String contentRoot, String scratchDir);

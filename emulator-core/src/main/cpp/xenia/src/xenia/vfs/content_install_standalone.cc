@@ -25,7 +25,8 @@ namespace vfs {
 
 X_STATUS InstallContentPackageStandalone(
     const std::filesystem::path& src_path,
-    const std::filesystem::path& content_root, ContentProgress& progress) {
+    const std::filesystem::path& content_root, ContentProgress& progress,
+    uint64_t profile_xuid) {
   progress.current.store(0);
   progress.total.store(0);
 
@@ -48,6 +49,17 @@ X_STATUS InstallContentPackageStandalone(
   // XUID as the leaf (ProfileManager scans for that path, no .header sidecar).
   // Everything else -- DLC, title updates, arcade/GoD -- lives under machine
   // XUID 0, which is where the per-game manager lists + deletes it.
+  //
+  // A SAVED GAME is the exception: ContentManager::ResolvePackagePath forces
+  // XUID 0 for kMarketplaceContent ONLY, and resolves everything else against
+  // the signed-in account. A save written to XUID 0 is therefore invisible to
+  // the title that owns it. MEASURED 2026-08-24: a GTA V save installed to
+  // XUID 0 never appeared in-game, while the save the emulator itself had
+  // written sat under the account XUID with its header beside it.
+  //
+  // The XUID inside the package is deliberately NOT used: it is the account of
+  // whoever made the save, which for anything downloaded is some other
+  // console's. The account that will read it is the one signed in here.
   uint64_t xuid;
   uint32_t place_title_id;
   std::string leaf;
@@ -62,7 +74,9 @@ X_STATUS InstallContentPackageStandalone(
     leaf = fmt::format("{:016X}", pkg_xuid);
     write_header = false;
   } else {
-    xuid = 0ull;
+    xuid = content_type == static_cast<uint32_t>(XContentType::kSavedGame)
+               ? profile_xuid
+               : 0ull;
     place_title_id = device->title_id();
     leaf = src_path.filename().string();
     write_header = true;

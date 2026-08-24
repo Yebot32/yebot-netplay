@@ -23,12 +23,20 @@ struct ContentProgress {
 // Extract an STFS/SVOD package's inner file tree into the on-disk content tree,
 // kernel-free (no Emulator / kernel_state). Placement is content-type aware:
 // profiles go under kDashboardID with the account XUID as the leaf (so
-// ProfileManager discovers them); everything else (DLC, title updates,
-// arcade/GoD) stays under machine XUID 0. Returns X_STATUS (0 == success).
+// ProfileManager discovers them); a SAVED GAME goes under |profile_xuid|, the
+// account that will load it; everything else (DLC, title updates, arcade/GoD)
+// stays under machine XUID 0. Returns X_STATUS (0 == success).
+//
+// |profile_xuid| 0 means "no profile known", and a saved game then falls back
+// to machine XUID 0 - which is where it was always going before, and where the
+// runtime resolver will not find it. Pass the signed-in account whenever there
+// is one.
+//
 // Blocking VFS walk -- caller MUST run off the main thread.
 X_STATUS InstallContentPackageStandalone(
     const std::filesystem::path& src_path,
-    const std::filesystem::path& content_root, ContentProgress& progress);
+    const std::filesystem::path& content_root, ContentProgress& progress,
+    uint64_t profile_xuid = 0);
 
 struct DiscContentItem {
   std::string inner_path;  // path inside the disc image, e.g. \content\...\pkg

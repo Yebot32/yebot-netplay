@@ -37,6 +37,7 @@
 #include "xenia/kernel/xam/profile_standalone.h"       // CreateStandaloneProfile / ListStandaloneProfiles / RenameStandaloneProfile
 
 #include <cstdio>
+#include <cstdlib>
 
 #include "cpuinfo.h"
 #include "vkapi.h"
@@ -1153,8 +1154,19 @@ static jdouble j_instant_fps(JNIEnv* env, jobject thiz) {
     return instant_ms > 0.f ? (jdouble)(1000.0 / (double)instant_ms) : (jdouble)0.0;
 }
 
-// RenderDoc-style average fps over a ~1s window.
+// The guest frame rate for the on-screen readout, over a ~0.4s window.
+//
+// It used to be the ~1s average, which is what the frame generator's pacing
+// still reads. A second-wide average is the right input for pacing and the
+// wrong one for a number a person is watching - it lags a change by a full
+// second and drifts toward it rather than moving. The short window is a
+// separate figure computed from the same ring, so neither use compromises the
+// other. Falls back to the 1s figure while the short one has too few samples.
 static jdouble j_average_fps(JNIEnv* env, jobject thiz) {
+    const float fast = xe::GetGuestPresentFpsFast();
+    if (fast > 0.f) {
+        return (jdouble)fast;
+    }
     float instant_ms = 0.f, avg_ms = 0.f, fps = 0.f;
     xe::GetFrameStats(instant_ms, avg_ms, fps);
     return (jdouble)fps;
@@ -1164,7 +1176,9 @@ static jdouble j_average_fps(JNIEnv* env, jobject thiz) {
 // average_fps until frame generation is on, higher after - the gap between the
 // two IS the feature, which is why the HUD shows both.
 static jdouble j_output_fps(JNIEnv* env, jobject thiz) {
-    const float host_fps = xe::GetHostPresentFps();
+    const float host_fps = xe::GetHostPresentFpsFast() > 0.f
+                               ? xe::GetHostPresentFpsFast()
+                               : xe::GetHostPresentFps();
     if (host_fps > 0.f) {
         return (jdouble)host_fps;
     }
@@ -1294,11 +1308,20 @@ static jfloat j_installProgress(JNIEnv* env, jobject self) {
 }
 
 // public native int install_content(String srcPath, String contentRoot);
+// public native int install_content_for(String srcPath, String contentRoot,
+//                                       String profileXuid);
 // Extract an STFS/SVOD package into contentRoot. The standalone helper places it
-// by content type: profiles under their account XUID, everything else under XUID
-// 0. Returns X_STATUS (0 == success). Blocking VFS walk -- off the main thread.
-static jint j_install_content(JNIEnv* env, jobject self, jstring srcPath,
-                              jstring contentRoot) {
+// by content type: profiles under their account XUID, a saved game under
+// |profileXuid|, everything else under XUID 0. Returns X_STATUS (0 == success).
+// Blocking VFS walk -- off the main thread.
+//
+// The three-argument form exists because a SAVED GAME is only visible to the
+// account it sits under, and the caller is the only one that knows which
+// account is signed in - this helper runs with no kernel. The two-argument
+// form stays for callers with no profile to name; a save then lands under
+// XUID 0, which is what every caller did before.
+static jint j_install_content_for(JNIEnv* env, jobject self, jstring srcPath,
+                                  jstring contentRoot, jstring profileXuid) {
 #if XE_PLATFORM_xendroid
     using namespace xe;  // X_STATUS (xbox.h) so the X_STATUS_* macros resolve.
     if (!srcPath || !contentRoot) return (jint)X_STATUS_INVALID_PARAMETER;
@@ -1310,14 +1333,30 @@ static jint j_install_content(JNIEnv* env, jobject self, jstring srcPath,
     env->ReleaseStringUTFChars(srcPath, sp);
     env->ReleaseStringUTFChars(contentRoot, cr);
 
+    // Hex, as the tree spells it. Anything unparseable is "no profile", which
+    // is the pre-existing behaviour rather than a failure.
+    uint64_t xuid = 0;
+    if (profileXuid) {
+        const char* px = env->GetStringUTFChars(profileXuid, nullptr);
+        if (px && *px) {
+            xuid = std::strtoull(px, nullptr, 16);
+        }
+        env->ReleaseStringUTFChars(profileXuid, px);
+    }
+
     g_content_progress.current.store(0);
     g_content_progress.total.store(0);
     xe::X_STATUS s = xe::vfs::InstallContentPackageStandalone(
-            src, root, g_content_progress);
+            src, root, g_content_progress, xuid);
     return (jint)s;
 #else
     return (jint)X_STATUS_UNSUCCESSFUL;
 #endif
+}
+
+static jint j_install_content(JNIEnv* env, jobject self, jstring srcPath,
+                              jstring contentRoot) {
+    return j_install_content_for(env, self, srcPath, contentRoot, nullptr);
 }
 
 // public native Emulator.DiscContentItem[] list_disc_content(String discPath);
@@ -1840,6 +1879,7 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"compressIsoToZar", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_compressIsoToZar}
             ,{"compressProgress", "()F", (void *) j_compressProgress}
             ,{"install_content", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_install_content}
+            ,{"install_content_for", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I", (void *) j_install_content_for}
             ,{"list_disc_content", "(Ljava/lang/String;)[Lxendroid/compose/Emulator$DiscContentItem;", (void *) j_list_disc_content}
             ,{"install_disc_content", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I", (void *) j_install_disc_content}
             ,{"installProgress", "()F", (void *) j_installProgress}
