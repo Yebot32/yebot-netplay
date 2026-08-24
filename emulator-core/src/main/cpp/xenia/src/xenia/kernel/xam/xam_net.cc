@@ -19,9 +19,11 @@
 #include <thread>
 #include <vector>
 
+#include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/net_utils.h"
 #include "xenia/kernel/util/network_adapter_manager.h"
@@ -2307,9 +2309,57 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
         reinterpret_cast<int32_t*>(&timeout.tv_usec));
     timeout_in = &timeout;
   }
-  int ret = select(nfds, readfds ? &native_readfds : nullptr,
+  // A guest select with a null timeout blocks forever, and on the cooperative
+  // scheduler that pins the dispatch thread inside the host syscall: the fiber
+  // never reaches another safepoint, so no other guest thread sharing that CPU
+  // runs again. MEASURED on 2026-08-23: GTA V's network thread calls this at
+  // boot and wedged the whole title on a black screen at ~f:440, with every
+  // other fiber blocked on it. Poll with a zero timeout and park between
+  // passes instead - the same shape XSocket::RunCooperatively already uses for
+  // a blocking recv or send.
+  XThread* self =
+      GuestScheduler::enabled() ? XThread::GetCurrentFiberThread() : nullptr;
+  int ret;
+  if (self) {
+    const uint64_t deadline_ms =
+        timeout_in ? Clock::QueryHostUptimeMillis() +
+                         static_cast<uint64_t>(timeout.tv_sec) * 1000 +
+                         static_cast<uint64_t>(timeout.tv_usec) / 1000
+                   : 0;
+    auto* scheduler = self->kernel_state()->guest_scheduler();
+    while (true) {
+      // select() rewrites the sets it is handed, so rebuild them every pass.
+      // Store() zeroes first, and the host_set itself is only narrowed by
+      // UpdateFrom, which does not run until the loop is done.
+      if (readfds) {
+        host_readfds.Store(&native_readfds);
+      }
+      if (writefds) {
+        host_writefds.Store(&native_writefds);
+      }
+      if (exceptfds) {
+        host_exceptfds.Store(&native_exceptfds);
+      }
+      timeval poll_immediately = {0, 0};
+      ret = select(nfds, readfds ? &native_readfds : nullptr,
                    writefds ? &native_writefds : nullptr,
-                   exceptfds ? &native_exceptfds : nullptr, timeout_in);
+                   exceptfds ? &native_exceptfds : nullptr, &poll_immediately);
+      // Ready descriptors, or an error the guest has to see.
+      if (ret != 0) {
+        break;
+      }
+      // ret == 0 is "nothing ready yet", which is only an answer once the
+      // guest's own timeout has run out. A null timeout means wait forever.
+      if (timeout_in && Clock::QueryHostUptimeMillis() >= deadline_ms) {
+        break;
+      }
+      scheduler->BlockCurrentThread();
+    }
+  } else {
+    ret = select(nfds, readfds ? &native_readfds : nullptr,
+                 writefds ? &native_writefds : nullptr,
+                 exceptfds ? &native_exceptfds : nullptr, timeout_in);
+  }
   if (readfds) {
     host_readfds.UpdateFrom(&native_readfds);
     host_readfds.Store(readfds);
