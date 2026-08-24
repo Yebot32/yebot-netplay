@@ -296,3 +296,23 @@ DEFINE_bool(
     "multiplies in every gradient texture fetch, which is measurable where "
     "fragment shading is the bottleneck.",
     "GPU");
+
+DEFINE_int32(
+    gpu_upstream_shader_fixes, 0,
+    "Enable guest-shader correctness fixes taken from upstream Xenia Edge that "
+    "this fork was rebased away from. A BITMASK, so each can be bisected on "
+    "device with one config edit and no rebuild:\n"
+    "  1  scalar ALU `b` operand reads Z, not X, when the co-issued vector "
+    "operation uses source 3 (edge 92ada8ebc, 2026-08-11). Affects the ucode "
+    "parse for EVERY shader in every title, which is why it is a switch\n"
+    "  2  unnormalized 2D texture fetches with a locked mip (MipMinLevel == "
+    "MipMaxLevel) divide by that mip's size instead of the base level's (edge "
+    "8486e97a0, 2026-07-30). Upstream reports it fixes visibility popping in "
+    "555308B6 and 5553080B\n"
+    "  3  both\n"
+    "DEFAULT 0. Both are upstream-authored and believed correct there, but "
+    "they went into this fork together and DiRT 3 (434D083D) showed artifacts "
+    "on the build that carried them, having been clean on the build before. "
+    "Nothing has yet attributed that to either one - the point of the switch "
+    "is to find out. Turn 1 and 2 on separately before turning both on.",
+    "GPU");
