@@ -41,6 +41,16 @@ class EntryTable {
 
   Entry* Get(uint32_t address);
   Entry::Status GetOrCreate(uint32_t address, Entry** out_entry);
+  // Publishes the result of compiling `entry` (obtained via GetOrCreate
+  // returning STATUS_NEW) under the same lock GetOrCreate's spin-wait uses to
+  // read entry->status. Callers must go through these instead of writing
+  // entry->status/function/end_address directly -- unsynchronized writes here
+  // raced against the lock-protected reads in GetOrCreate's spin-wait, so a
+  // waiting thread on a weak memory model (which is every device this ships
+  // to) could observe STATUS_READY before entry->function was actually
+  // visible, and return a stale or torn function pointer.
+  void MarkReady(Entry* entry, Function* function, uint32_t end_address);
+  void MarkFailed(Entry* entry);
   void Delete(uint32_t address);
 
   std::vector<Function*> FindWithAddress(uint32_t address);
