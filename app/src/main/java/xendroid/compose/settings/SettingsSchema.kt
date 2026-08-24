@@ -154,6 +154,10 @@ object SettingsSchema {
         // has no cvar system to hang it off.
         SettingsCategory("AI", listOf(
             b("Display", "frame_generation", "Frame generation", false),
+            l("Display", "frame_generation_mode", "Frame generation amount", "1",
+                "0" to "1.25x (one added frame in four)",
+                "1" to "1.5x (one in two)",
+                "2" to "2x (one in one)"),
             l("Display", "frame_generation_quality", "Frame generation quality", "1",
                 "0" to "Low (fastest, softer motion)",
                 "1" to "Medium",

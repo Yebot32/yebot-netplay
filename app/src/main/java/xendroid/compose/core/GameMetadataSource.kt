@@ -42,10 +42,11 @@ class GameMetadataSource {
         }
     }
 
-    /** Boot-free combined name+icon(+titleId) read from a real path for ISO/XEX_FOLDER/ZAR. */
+    /** Boot-free combined name+icon(+titleId) read from a real path for
+     *  ISO/XEX_FOLDER/XEX_FILE/ZAR. */
     fun readXexMetaPath(path: String, format: GameFormat): XexMeta? {
         if (format != GameFormat.ISO && format != GameFormat.XEX_FOLDER &&
-            format != GameFormat.ZAR) return null
+            format != GameFormat.XEX_FILE && format != GameFormat.ZAR) return null
         val code = format.titleIdCode ?: return null
         val emu = EmulatorRuntime.emulator ?: return null
         return try {

@@ -66,7 +66,7 @@ class GameLibraryRepository(
         when (game.format) {
             GameFormat.GOD -> metadata.readGodPath(game.launchUri)?.titleId
             GameFormat.STFS -> metadata.readContentHeader(game.launchUri)?.titleId
-            GameFormat.ISO, GameFormat.XEX_FOLDER, GameFormat.ZAR ->
+            GameFormat.ISO, GameFormat.XEX_FOLDER, GameFormat.XEX_FILE, GameFormat.ZAR ->
                 metadata.readTitleIdPath(game.launchUri, game.format)
         }
     }
@@ -192,7 +192,7 @@ class GameLibraryRepository(
     private fun classifyFile(child: File): Game? {
         val name = child.name
         return when (GameFormat.fromFileName(name)) {
-            GameFormat.ISO, GameFormat.ZAR -> {
+            GameFormat.ISO, GameFormat.ZAR, GameFormat.XEX_FILE -> {
                 val fmt = GameFormat.fromFileName(name)!!
                 val path = child.absolutePath
                 cachedOrExtract(path, signatureOf(child), fmt) {
