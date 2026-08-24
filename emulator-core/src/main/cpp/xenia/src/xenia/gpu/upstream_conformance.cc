@@ -14,7 +14,7 @@
 #include "xenia/base/logging.h"
 
 DEFINE_int32(
-    gpu_upstream_conformance, 14,
+    gpu_upstream_conformance, 6,
     "Force the GPU cvars that exist ONLY in this Android fork back to Xenia "
     "Edge's PC behaviour, and log every override.\n"
     "A BITMASK, so a fault can be narrowed to one group without a rebuild - "
@@ -32,8 +32,11 @@ DEFINE_int32(
     "ranges, geometry-shader avoidance. These CAN legitimately change output "
     "and may render worse on some devices, which is why they are not in the "
     "default\n"
-    "  14 (default) 2|4|8 - everything EXCEPT render targets, so this fork's "
-    "in-pass transfer and resolve fast paths stay live\n"
+    "  6  (default) 2|4 - the command stream and the descriptor caches, so "
+    "this fork's in-pass transfer and resolve fast paths and its host-visible "
+    "shared memory all stay live\n"
+    "  14 2|4|8 - as above plus memory. This was the default until "
+    "2026-08-23; see WHY GROUP 8 LEFT below\n"
     "  15 every group whose options exist purely for speed. This was the "
     "default until 2026-08-21 and is the fallback if a picture fault ever "
     "returns\n"
@@ -52,7 +55,19 @@ DEFINE_int32(
     "every "
     "transfer and resolve break the render pass, and on a tiler each break "
     "costs a full tile store and reload; that is where 216 render passes per "
-    "frame came from. Putting it back to 15 buys nothing now and costs that.",
+    "frame came from. Putting it back to 15 buys nothing now and costs that.\n"
+    "*** WHY GROUP 8 LEFT THE DEFAULT. *** It was never chosen for a fault; "
+    "it came along when the default became 14. Forcing "
+    "vulkan_shared_memory_host_visible off leaves the shared-memory buffer "
+    "unmapped, and resolve readback then has nowhere to land: on Adreno guest "
+    "RAM cannot be host-IMPORTED either (no VK_EXT_external_memory_host), so "
+    "the uma path was the only route and readback stopped happening at all. "
+    "The log says so once, at f:0, in a line that scrolls past - \"Resolve "
+    "readback is enabled but guest RAM is neither host-imported nor "
+    "host-mapped\". MEASURED 2026-08-23: every shipped build carried it, for "
+    "every title. Readback is not only a speed setting - it is how the guest "
+    "CPU sees what the GPU drew - so this was a correctness regression that "
+    "happened to be silent.",
     "GPU");
 // 15 -> 14 once the picture fault group 1 was masking stopped reproducing.
 // Without this
@@ -61,6 +76,11 @@ DEFINE_int32(
 // default is inert there. Only a config still sitting on the old default moves;
 // anyone who picked a value deliberately keeps it.
 UPDATE_from_int32(gpu_upstream_conformance, 2026, 8, 21, 12, 15);
+// 14 -> 6 once group 8 was found to be silently disabling resolve readback.
+// Same reasoning as the line above: without it every device that has run a
+// build since 2026-08-21 has 14 pinned in its TOML and the new default is
+// inert there.
+UPDATE_from_int32(gpu_upstream_conformance, 2026, 8, 23, 16, 14);
 
 // Fork-only, level 1: scheduling, caching and fast paths.
 DECLARE_bool(vulkan_in_pass_transfers);
