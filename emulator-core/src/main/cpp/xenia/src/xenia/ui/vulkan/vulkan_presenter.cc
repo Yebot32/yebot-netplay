@@ -37,8 +37,10 @@
 
 DEFINE_bool(
     frame_generation, false,
-    "Present an invented frame between each pair the game produces, so the "
-    "picture updates twice as often.\n"
+    "Present invented frames between the ones the game produces, so the "
+    "picture updates more often than the game can manage. How many are "
+    "invented is frame_generation_mode - by default one for every two game "
+    "frames, not one for every frame.\n"
     "Motion is estimated from the two frames themselves - the guest provides "
     "no motion vectors - so fast movement and anything appearing from behind a "
     "moving object are where the invention shows.\n"
@@ -49,8 +51,9 @@ DEFINE_bool(
     "the presented one. The performance HUD shows both numbers for that "
     "reason.\n"
     "Requires a swapchain that can present without waiting for vertical sync - "
-    "with plain FIFO, presenting twice per game frame would halve the game's "
-    "own rate instead of doubling what you see, so it turns itself off.",
+    "with plain FIFO, the extra present would wait for the next vertical blank "
+    "and cost the game a frame of its own rate instead of adding one to what "
+    "you see, so it turns itself off.",
     "Display");
 
 DEFINE_int32(
@@ -67,6 +70,31 @@ DEFINE_int32(
     " 2 (high):\n"
     "  One vector per 8x8 block with refinement, trusting matches further. "
     "Follows small objects best and costs about four times medium.\n"
+    "Read once, when the renderer starts.",
+    "Display");
+
+DEFINE_int32(
+    frame_generation_mode, 1,
+    "How many frames frame generation invents, as a share of the ones the "
+    "game produces.\n"
+    "An invented frame is the one that can look wrong, so how MANY of them "
+    "reach the screen matters as much as how good each one is. Inventing one "
+    "for every game frame puts an invented frame in every second position on "
+    "screen, which is what makes the estimator's mistakes read as a "
+    "texture over the whole picture rather than an occasional glitch. The "
+    "lower steps fill one gap in two or one in four instead, so most of what "
+    "is on screen is the game's own work.\n"
+    " 0 (1.25x):\n"
+    "  One invented frame every four game frames. From 30 fps, about 37 on "
+    "screen.\n"
+    " 1 (1.5x):\n"
+    "  One every two. From 30 fps, about 45 on screen.\n"
+    " 2 (2x):\n"
+    "  One every frame - what the feature did before this setting existed. "
+    "From 30 fps, about 60 on screen.\n"
+    "Every game frame is still shown, at its own moment; only the gaps "
+    "between them are filled. Below 2x that makes the output cadence uneven "
+    "by construction, which is what buying fewer invented frames costs.\n"
     "Read once, when the renderer starts.",
     "Display");
 
@@ -1760,15 +1788,31 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
           // motion that did not happen.
           frame_gen_last_refresh_count_ = guest_output_refresh_count;
           const VkExtent2D& guest_output_extent = guest_output_image->extent();
-          if (frame_generator_->RecordGenerateAndCapture(
+          // Whether this gap is one of the ones that gets filled. Below 2x
+          // most of them are not, and the cheap path is the point: the history
+          // is still kept, but no motion search, no warp and no second present
+          // - the game's own frame goes straight to the screen.
+          bool fill_this_gap = false;
+          if (++frame_gen_frames_since_gen_ >= frame_gen_period_) {
+            frame_gen_frames_since_gen_ = 0;
+            fill_this_gap = true;
+          }
+          if (fill_this_gap &&
+              frame_generator_->RecordGenerateAndCapture(
                   draw_command_buffer, guest_output_image->view(),
                   guest_output_extent.width, guest_output_extent.height,
                   0.5f)) {
             frame_gen_painting_generated_ = true;
             frame_gen_repeat_paint_ = true;
           } else {
-            // No history yet, or a size change - present this one as it is and
-            // keep it to interpolate from next time.
+            // Not this game frame's turn, or no history yet, or a size change
+            // - present this one as it is and keep it to interpolate from next
+            // time.
+            if (fill_this_gap) {
+              // RecordGenerateAndCapture declined, so nothing was invented and
+              // this gap does not count as filled.
+              frame_gen_frames_since_gen_ = frame_gen_period_ - 1;
+            }
             frame_generator_->RecordCaptureOnly(
                 draw_command_buffer, guest_output_image->view(),
                 guest_output_extent.width, guest_output_extent.height);
@@ -2773,6 +2817,19 @@ bool VulkanPresenter::InitializeSurfaceIndependent() {
         quality = VulkanFrameGenerator::Quality::kMedium;
         break;
     }
+    // Guest frames per invented frame. The ratio is (period + 1) / period.
+    switch (cvars::frame_generation_mode) {
+      case 0:
+        frame_gen_period_ = 4;
+        break;
+      case 2:
+        frame_gen_period_ = 1;
+        break;
+      default:
+        frame_gen_period_ = 2;
+        break;
+    }
+    frame_gen_frames_since_gen_ = 0;
     frame_generator_ =
         VulkanFrameGenerator::Create(vulkan_device_, ui_samplers_, quality);
     if (!frame_generator_) {

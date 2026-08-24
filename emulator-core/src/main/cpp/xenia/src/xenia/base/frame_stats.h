@@ -55,6 +55,52 @@ inline std::atomic<uint64_t>& last_generated_present_ns() {
   static std::atomic<uint64_t> v{0};
   return v;
 }
+// The same two rates over a SHORT window, for the on-screen readout.
+//
+// The one-second figures above are what the frame generator's pacing reads,
+// and they must stay a second wide - PaceRepeatPaint holds a real frame back
+// for half of avg_ms and wants a steady estimate, not a twitchy one. A number
+// a person is watching wants the opposite, so it gets its own pair rather than
+// the two uses fighting over one window.
+inline std::atomic<float>& frame_fps_fast() {
+  static std::atomic<float> v{0.0f};
+  return v;
+}
+inline std::atomic<float>& host_present_fps_fast() {
+  static std::atomic<float> v{0.0f};
+  return v;
+}
+// How much of the ring the display figures look at.
+inline constexpr double kFastWindowMs = 400.0;
+// Frames per second over the newest kFastWindowMs of a timestamp ring, or 0
+// when it holds too little to say. `ts` is the ring, `head` its oldest entry.
+template <typename Clock, size_t kCap>
+inline float FastFpsFromRing(const typename Clock::time_point (&ts)[kCap],
+                             size_t head, size_t count,
+                             typename Clock::time_point now) {
+  size_t used = 0;
+  typename Clock::time_point oldest = now;
+  // Walk back from the newest sample, not forward from the oldest: the point
+  // is the most recent slice, and the ring may hold two and a half times it.
+  for (size_t i = 0; i < count; ++i) {
+    const typename Clock::time_point& t = ts[(head + count - 1 - i) % kCap];
+    if (std::chrono::duration<double, std::milli>(now - t).count() >
+        kFastWindowMs) {
+      break;
+    }
+    oldest = t;
+    ++used;
+  }
+  if (used < 2) {
+    return 0.0f;
+  }
+  const double span_ms =
+      std::chrono::duration<double, std::milli>(now - oldest).count();
+  if (!(span_ms > 0.0)) {
+    return 0.0f;
+  }
+  return float(double(used - 1) * 1000.0 / span_ms);
+}
 }  // namespace internal
 
 // Publishes the command processor's own frame counter - the SAME number the
@@ -135,6 +181,10 @@ inline void RecordGuestPresent() {
                                      std::memory_order_relaxed);
   internal::frame_avg_ms().store(float(avg_ms), std::memory_order_relaxed);
   internal::frame_fps().store(float(fps), std::memory_order_relaxed);
+  const float fast_fps =
+      internal::FastFpsFromRing<clock, kCap>(ts, head, count, now);
+  internal::frame_fps_fast().store(fast_fps > 0.0f ? fast_fps : float(fps),
+                                   std::memory_order_relaxed);
 }
 
 // Call once per present that actually reached the display, generated frames
@@ -189,15 +239,33 @@ inline void RecordHostPresent(bool was_generated) {
   const double fps =
       (count > 1 && span_ms > 0.0) ? double(count - 1) * 1000.0 / span_ms : 0.0;
   internal::host_present_fps().store(float(fps), std::memory_order_relaxed);
+  const float fast_fps =
+      internal::FastFpsFromRing<clock, kCap>(ts, head, count, now);
+  internal::host_present_fps_fast().store(
+      fast_fps > 0.0f ? fast_fps : float(fps), std::memory_order_relaxed);
 }
 
 inline float GetHostPresentFps() {
   return internal::host_present_fps().load(std::memory_order_relaxed);
 }
 
-// Whether generated frames are reaching the display right now. True while one
-// was presented within the last quarter second, which is long enough to ride
-// out a slow frame and short enough that the readout follows a pause.
+// The two figures the on-screen readout uses - same measurements, short window.
+// See internal::kFastWindowMs for why they are separate.
+inline float GetGuestPresentFpsFast() {
+  return internal::frame_fps_fast().load(std::memory_order_relaxed);
+}
+inline float GetHostPresentFpsFast() {
+  return internal::host_present_fps_fast().load(std::memory_order_relaxed);
+}
+
+// Whether generated frames are reaching the display right now.
+//
+// The window has to cover the longest gap the feature legitimately leaves
+// between two invented frames, which is no longer one game frame: at the 1.25x
+// mode a gap is filled once every four of them, so a game at 15 fps invents
+// one only every 266ms. A quarter second used to be the window and would read
+// as "off" on exactly that case. Three quarters of a second covers it and is
+// still short enough that the readout follows a pause.
 inline bool IsFrameGenerationActive() {
   const uint64_t last_ns =
       internal::last_generated_present_ns().load(std::memory_order_relaxed);
@@ -206,7 +274,7 @@ inline bool IsFrameGenerationActive() {
   }
   const uint64_t now_ns = uint64_t(
       std::chrono::steady_clock::now().time_since_epoch().count());
-  return now_ns >= last_ns && (now_ns - last_ns) < 250000000ull;
+  return now_ns >= last_ns && (now_ns - last_ns) < 750000000ull;
 }
 
 // Read the latest published stats (any thread).

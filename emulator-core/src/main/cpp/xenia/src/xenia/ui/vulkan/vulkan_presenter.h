@@ -507,6 +507,10 @@ class VulkanPresenter final : public Presenter {
   // that has seen no new guest image does not invent motion that did not
   // happen.
   uint64_t frame_gen_last_refresh_count_ = 0;
+  // Game frames per invented frame, from frame_generation_mode: 4, 2 or 1.
+  int frame_gen_period_ = 2;
+  // New game images since the last gap was filled.
+  int frame_gen_frames_since_gen_ = 0;
   // The generated image version the descriptor was written for.
   uint64_t frame_gen_descriptor_version_ = UINT64_MAX;
   // Set by a paint that presented an invented frame, to ask for the real one

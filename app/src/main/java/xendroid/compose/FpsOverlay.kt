@@ -45,7 +45,7 @@ fun FpsOverlay(
     session: EmulatorSession,
     visible: Boolean,
     modifier: Modifier = Modifier,
-    pollHz: Int = 4,
+    pollHz: Int = 8,
 ) {
     if (!visible) return
 
@@ -56,7 +56,9 @@ fun FpsOverlay(
     var fps by remember { mutableStateOf(0.0) }
     var frameMs by remember { mutableStateOf(0.0) }
 
-    // ~4 Hz poll (250 ms) — enough for a human-readable readout while costing ~nothing.
+    // ~8 Hz poll (125 ms). The figures behind it come from a ~0.4s sliding window that is
+    // recomputed on every guest present, so they are fresh whenever they are read; polling is two
+    // relaxed atomic loads and costs ~nothing.
     LaunchedEffect(pollHz) {
         val periodMs = 1000L / pollHz.coerceIn(1, 30)
         while (true) {
