@@ -36,7 +36,8 @@ class StringBuffer {
   template <typename... Args>
   void AppendFormat(const char* format, const Args&... args) {
     auto s = fmt::format(fmt::runtime(format), args...);
-    Append(s.c_str());
+    // The string knows its own length; c_str() made Append measure it again.
+    Append(std::string_view(s));
   }
   void AppendHexUInt64(uint64_t value);
   void AppendHexUInt32(uint32_t value);
