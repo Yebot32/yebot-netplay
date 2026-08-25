@@ -89,6 +89,43 @@ bool IsWritableExecutableMemorySupported();
 // writable executable memory on a system with it.
 bool IsWritableExecutableMemoryPreferred();
 
+// How this process is allowed to generate and run code at runtime.
+//
+// An allocation succeeding is NOT the same as the page being executable.
+// Two hosts in this tree already get that wrong in opposite directions: macOS
+// under Rosetta hands back a shm+PROT_EXEC mapping that faults on the first
+// branch into it (see the comment in cpu/backend/code_cache_base.h), and iOS
+// grants W^X rather than RWX when code signing is relaxed by a debugger. So
+// QueryJitStatus() does not stop at mmap - it writes a single instruction and
+// calls it.
+enum class JitCapability {
+  // Not probed yet.
+  kUnknown,
+  // Generated code cannot be executed at all. Worth being blunt about what
+  // this costs: Xenia has no PowerPC interpreter (cpu/backend/ holds x64, a64
+  // and a non-executing null stub), so this is a hard stop for the guest, not
+  // a slow mode to fall back on.
+  kUnavailable,
+  // A single mapping is writable and executable at once, no ceremony.
+  kWritableExecutable,
+  // Executable, but writes must be bracketed by toggling the calling thread
+  // out of execute-only mode - pthread_jit_write_protect_np on Apple arm64.
+  kWriteProtectToggle,
+};
+
+struct JitStatus {
+  JitCapability capability = JitCapability::kUnknown;
+  // Short, already-human-readable reason. Safe to log or show in a HUD as-is.
+  std::string detail;
+};
+
+// Probes once, caches the answer, and reports whether this process can run
+// generated code. Safe to call before the emulator is initialised.
+const JitStatus& QueryJitStatus();
+
+// Stable short label for a capability - "ON", "OFF", "TOGGLE", "?".
+const char* JitCapabilityToShortString(JitCapability capability);
+
 // Allocates a block of memory at the given page-aligned base address.
 // Fails if the memory is not available.
 // Specify nullptr for base_address to leave it up to the system.

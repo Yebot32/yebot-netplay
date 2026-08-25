@@ -16,6 +16,14 @@
 #include <arm_neon.h>
 #endif
 
+#if XE_PLATFORM_MAC
+#include <csetjmp>
+#include <csignal>
+#include <cstring>
+#include <pthread.h>
+#include <sys/mman.h>
+#endif
+
 DEFINE_bool(
     writable_executable_memory, true,
     "Allow mapping memory with both write and execute access, for simulating "
@@ -28,6 +36,158 @@ namespace memory {
 bool IsWritableExecutableMemoryPreferred() {
   return IsWritableExecutableMemorySupported() &&
          cvars::writable_executable_memory;
+}
+
+const char* JitCapabilityToShortString(JitCapability capability) {
+  switch (capability) {
+    case JitCapability::kUnavailable:
+      return "OFF";
+    case JitCapability::kWritableExecutable:
+      return "ON";
+    case JitCapability::kWriteProtectToggle:
+      return "TOGGLE";
+    default:
+      return "?";
+  }
+}
+
+namespace {
+
+#if XE_PLATFORM_MAC
+
+// A lone `ret`. Enough to prove the page is genuinely executable: if the
+// branch into it faults, the mapping was never usable however happily mmap
+// returned it.
+#if XE_ARCH_ARM64
+constexpr uint32_t kProbeInstruction = 0xD65F03C0u;
+#else
+constexpr uint8_t kProbeInstruction = 0xC3u;
+#endif
+
+sigjmp_buf g_probe_jmp;
+volatile sig_atomic_t g_probe_faulted = 0;
+
+void ProbeSignalHandler(int) {
+  g_probe_faulted = 1;
+  siglongjmp(g_probe_jmp, 1);
+}
+
+// Calls into `code`, catching the fault instead of taking the process down
+// with it. SIGBUS is the one Apple actually raises for a non-executable page;
+// SIGSEGV and SIGILL are caught too so an unexpected shape is still a clean
+// "no" rather than a crash on launch.
+bool CallProbeGuarded(void* code) {
+  struct sigaction old_bus, old_segv, old_ill, probe {};
+  probe.sa_handler = ProbeSignalHandler;
+  sigemptyset(&probe.sa_mask);
+  probe.sa_flags = 0;
+  sigaction(SIGBUS, &probe, &old_bus);
+  sigaction(SIGSEGV, &probe, &old_segv);
+  sigaction(SIGILL, &probe, &old_ill);
+
+  g_probe_faulted = 0;
+  bool executed = false;
+  if (sigsetjmp(g_probe_jmp, 1) == 0) {
+    reinterpret_cast<void (*)()>(code)();
+    executed = true;
+  }
+
+  sigaction(SIGBUS, &old_bus, nullptr);
+  sigaction(SIGSEGV, &old_segv, nullptr);
+  sigaction(SIGILL, &old_ill, nullptr);
+  return executed && !g_probe_faulted;
+}
+
+JitStatus ProbeJitApple() {
+  JitStatus status;
+  const size_t size = page_size();
+
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_JIT
+  flags |= MAP_JIT;
+#endif
+  void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, flags,
+                    -1, 0);
+  if (code == MAP_FAILED) {
+    status.capability = JitCapability::kUnavailable;
+    status.detail = fmt::format("MAP_JIT mapping refused: {} ({})",
+                                strerror(errno), errno);
+    return status;
+  }
+
+  // Try the plain RWX shape first, then the toggled one. On iOS the first is
+  // expected to fail and the second to succeed; on entitled macOS the first
+  // succeeds outright.
+  auto write_probe = [&]() {
+    std::memcpy(code, &kProbeInstruction, sizeof(kProbeInstruction));
+    __builtin___clear_cache(reinterpret_cast<char*>(code),
+                            reinterpret_cast<char*>(code) +
+                                sizeof(kProbeInstruction));
+  };
+
+  bool needs_toggle = false;
+#if XE_ARCH_ARM64
+  // If the thread is already in execute-only mode the bare write faults, so
+  // ask for write mode first and remember that we had to.
+  pthread_jit_write_protect_np(0);
+  needs_toggle = true;
+#endif
+  write_probe();
+#if XE_ARCH_ARM64
+  pthread_jit_write_protect_np(1);
+#endif
+
+  const bool executed = CallProbeGuarded(code);
+  munmap(code, size);
+
+  if (!executed) {
+    status.capability = JitCapability::kUnavailable;
+    status.detail =
+        "mapping was granted but faulted on execute - no usable JIT";
+    return status;
+  }
+  status.capability = needs_toggle ? JitCapability::kWriteProtectToggle
+                                   : JitCapability::kWritableExecutable;
+  status.detail = needs_toggle
+                      ? "W^X: writes bracketed by pthread_jit_write_protect_np"
+                      : "RWX mapping is directly writable and executable";
+  return status;
+}
+
+#endif  // XE_PLATFORM_MAC
+
+JitStatus ProbeJit() {
+#if XE_PLATFORM_MAC
+  return ProbeJitApple();
+#else
+  // Android and the desktop POSIX/Windows hosts hand out RWX without asking,
+  // and are proven to by every build that has ever run. Deliberately NOT
+  // running the signal-guarded execute probe there: installing SIGBUS/SIGSEGV
+  // handlers during startup on a shipping platform is a real risk in exchange
+  // for confirming something already known.
+  JitStatus status;
+  status.capability = JitCapability::kWritableExecutable;
+  status.detail = "host allows writable executable memory";
+  return status;
+#endif
+}
+
+}  // namespace
+
+const JitStatus& QueryJitStatus() {
+  static const JitStatus status = []() {
+    JitStatus probed = ProbeJit();
+    if (probed.capability == JitCapability::kUnavailable) {
+      XELOGE("JIT unavailable: {}. Xenia has no PowerPC interpreter, so the "
+             "guest cannot run.",
+             probed.detail);
+    } else {
+      XELOGI("JIT available ({}): {}",
+             JitCapabilityToShortString(probed.capability), probed.detail);
+    }
+    return probed;
+  }();
+  return status;
 }
 
 using xe::swcache::CacheLine;
