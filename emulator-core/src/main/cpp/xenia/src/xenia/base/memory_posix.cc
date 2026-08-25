@@ -26,7 +26,12 @@
 
 #if XE_PLATFORM_MAC
 #include <mach/mach.h>
+#if !XE_PLATFORM_IOS
+// <mach/mach_vm.h> is `#error mach_vm.h unsupported.` on iOS - the whole
+// mach_vm_* family is unavailable there. vm_region_64 below is the same query
+// through the exported vm_map interface.
 #include <mach/mach_vm.h>
+#endif
 #include <mach/vm_region.h>
 #endif  // XE_PLATFORM_MAC
 
@@ -278,27 +283,40 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #if XE_PLATFORM_MAC
+#if XE_PLATFORM_IOS
+  // vm_address_t / vm_size_t are already 64-bit on arm64, so this is the same
+  // query with the same precision, just through the interface iOS exports.
+  vm_address_t address = reinterpret_cast<vm_address_t>(base_address);
+  vm_size_t region_size = 0;
+#else
   mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(base_address);
   mach_vm_size_t region_size = 0;
+#endif
   vm_region_basic_info_data_64_t info;
   mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
   mach_port_t object_name;
 
+#if XE_PLATFORM_IOS
+  kern_return_t kr = vm_region_64(
+      mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
+      reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+#else
   kern_return_t kr = mach_vm_region(
       mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
       reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+#endif
 
   if (kr != KERN_SUCCESS) {
     return false;
   }
 
-  if (address > reinterpret_cast<mach_vm_address_t>(base_address)) {
+  if (address > reinterpret_cast<decltype(address)>(base_address)) {
     return false;
   }
 
   length =
       static_cast<size_t>((address + region_size) -
-                          reinterpret_cast<mach_vm_address_t>(base_address));
+                          reinterpret_cast<decltype(address)>(base_address));
 
   if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)) ==
       (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)) {

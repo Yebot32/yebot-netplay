@@ -1597,7 +1597,11 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       NotifyAll();
     }
     if (is_current_thread) {
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && defined(__aarch64__)
+      // Leave the thread execute-protected before it exits. iOS has no such
+      // mode to return to - pthread_jit_write_protect_np is
+      // __API_UNAVAILABLE(ios) because MAP_JIT is not obtainable there - so
+      // skipping this is correct rather than a compromise.
       pthread_jit_write_protect_np(1);
 #endif
       pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -2115,7 +2119,7 @@ void Thread::Exit(int exit_code) {
     current_thread_->Terminate(exit_code);
   } else {
     // Should only happen with the main thread
-#if XE_PLATFORM_MAC && defined(__aarch64__)
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && defined(__aarch64__)
     pthread_jit_write_protect_np(1);
 #endif
     pthread_exit(reinterpret_cast<void*>(exit_code));
