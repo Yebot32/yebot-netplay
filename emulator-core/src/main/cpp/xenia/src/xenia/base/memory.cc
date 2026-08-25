@@ -98,6 +98,86 @@ bool CallProbeGuarded(void* code) {
   return executed && !g_probe_faulted;
 }
 
+// Writes the probe instruction and flushes it out of the D-cache into the
+// I-cache. On arm64 the two are not coherent, so skipping the flush gives a
+// page that is genuinely executable but runs stale bytes.
+void WriteProbeInstruction(void* code) {
+  std::memcpy(code, &kProbeInstruction, sizeof(kProbeInstruction));
+  __builtin___clear_cache(
+      reinterpret_cast<char*>(code),
+      reinterpret_cast<char*>(code) + sizeof(kProbeInstruction));
+}
+
+#if XE_PLATFORM_IOS
+
+JitStatus ProbeJitApple() {
+  JitStatus status;
+  const size_t size = page_size();
+
+  // Deliberately NOT the macOS shape. pthread_jit_write_protect_np is
+  // __API_UNAVAILABLE(ios) - a compile error, not a runtime no-op - and
+  // MAP_JIT on iOS is gated on the dynamic-codesigning entitlement, which
+  // Apple grants only to its own browser processes. No developer account buys
+  // it at any price.
+  //
+  // What a development-signed app CAN have, once a debugger has attached and
+  // the kernel marks the process CS_DEBUGGED, is permission to flip a page
+  // between writable and executable. That is W^X, not RWX, and it is the only
+  // shape worth probing here.
+
+  // 1. Straight RWX. Succeeds only where code signing has been relaxed for
+  //    this process; on a plain launch this is expected to fail, and that is
+  //    information rather than an error.
+  void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (code != MAP_FAILED) {
+    WriteProbeInstruction(code);
+    const bool executed = CallProbeGuarded(code);
+    munmap(code, size);
+    if (executed) {
+      status.capability = JitCapability::kWritableExecutable;
+      status.detail = "RWX mapping accepted - code signing is relaxed";
+      return status;
+    }
+  }
+
+  // 2. W^X: map writable, write, then flip to executable. This is the path a
+  //    debugger-enabled sideload actually gets, and the one the code cache
+  //    would have to be built on.
+  code = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+              -1, 0);
+  if (code == MAP_FAILED) {
+    status.capability = JitCapability::kUnavailable;
+    status.detail = fmt::format("even a plain RW mapping was refused: {} ({})",
+                                strerror(errno), errno);
+    return status;
+  }
+  WriteProbeInstruction(code);
+  if (mprotect(code, size, PROT_READ | PROT_EXEC) != 0) {
+    const int err = errno;
+    munmap(code, size);
+    status.capability = JitCapability::kUnavailable;
+    status.detail = fmt::format(
+        "mprotect to PROT_EXEC refused: {} ({}) - no debugger has attached, "
+        "so this process may not execute code it wrote",
+        strerror(err), err);
+    return status;
+  }
+  const bool executed = CallProbeGuarded(code);
+  munmap(code, size);
+  if (!executed) {
+    status.capability = JitCapability::kUnavailable;
+    status.detail =
+        "mprotect reported success but the page faulted on execute";
+    return status;
+  }
+  status.capability = JitCapability::kWriteProtectToggle;
+  status.detail = "W^X: page flipped from writable to executable via mprotect";
+  return status;
+}
+
+#else  // macOS
+
 JitStatus ProbeJitApple() {
   JitStatus status;
   const size_t size = page_size();
@@ -115,24 +195,14 @@ JitStatus ProbeJitApple() {
     return status;
   }
 
-  // Try the plain RWX shape first, then the toggled one. On iOS the first is
-  // expected to fail and the second to succeed; on entitled macOS the first
-  // succeeds outright.
-  auto write_probe = [&]() {
-    std::memcpy(code, &kProbeInstruction, sizeof(kProbeInstruction));
-    __builtin___clear_cache(reinterpret_cast<char*>(code),
-                            reinterpret_cast<char*>(code) +
-                                sizeof(kProbeInstruction));
-  };
-
   bool needs_toggle = false;
 #if XE_ARCH_ARM64
-  // If the thread is already in execute-only mode the bare write faults, so
-  // ask for write mode first and remember that we had to.
+  // Apple silicon starts a MAP_JIT thread in execute-only mode, so the bare
+  // write would fault; ask for write mode first and remember that we had to.
   pthread_jit_write_protect_np(0);
   needs_toggle = true;
 #endif
-  write_probe();
+  WriteProbeInstruction(code);
 #if XE_ARCH_ARM64
   pthread_jit_write_protect_np(1);
 #endif
@@ -153,6 +223,8 @@ JitStatus ProbeJitApple() {
                       : "RWX mapping is directly writable and executable";
   return status;
 }
+
+#endif  // XE_PLATFORM_IOS
 
 #endif  // XE_PLATFORM_MAC
 
