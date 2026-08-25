@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for xenra-ios.
+
+  This file is an INPUT to `codesign --entitlements`, not something that gets
+  copied into the bundle. Entitlements exist only inside a code signature; a
+  plist sitting in a .app grants nothing. The build is deliberately unsigned
+  (see XenDroid/cmake/ios.toolchain.cmake) and this is applied either by the CI
+  signing step when secrets are present, or by whatever tool the user signs
+  with on their own machine.
+
+  ============================================================================
+  DO NOT COPY <XEN>/xenia.entitlements. IT IS A macOS FILE.
+  ============================================================================
+  Every key in it is prefixed com.apple.security.cs.* - the "cs" is Code
+  Signing / Hardened Runtime, which is a macOS-only mechanism. In particular
+  com.apple.security.cs.allow-jit does NOTHING on iOS. It is not "ignored but
+  harmless as documentation": iOS has no Hardened Runtime, MAP_JIT on iOS is
+  gated on the process being debuggable rather than on an entitlement, and
+  believing that key is what turns JIT on will send you looking for the
+  problem in entirely the wrong place. What actually gates JIT on iOS is
+  com.apple.security.get-task-allow plus a debugger having attached at least
+  once - see XenDroid/docs/ios-build.md, which is the only place that story is
+  written down correctly.
+
+  get-task-allow is NOT listed here. It is not ours to grant: it comes from
+  the provisioning profile / signing flow (a development-signed build has it;
+  an ad-hoc or distribution-signed build does not), and listing it in a file
+  that a distribution signature then strips only creates a false sense that it
+  is handled.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Raises the app's jetsam (memory) limit from the default per-device cap
+	  toward the physical RAM ceiling. A 360 title's 512 MB guest RAM plus the
+	  JIT code cache plus host texture staging goes past the default limit on
+	  every device we care about, and exceeding it is an instant kill with no
+	  catchable signal.
+
+	  REQUIRES APPLE APPROVAL. This is a "restricted" entitlement: it only
+	  takes effect if it is present in a provisioning profile Apple issued for
+	  a team that requested and was granted it. On a free-account or
+	  self-signed build it is silently ignored - installation still succeeds,
+	  the app just gets the ordinary limit. So do not read a successful
+	  install as evidence that it is active; measure the limit at runtime.
+	-->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+
+	<!--
+	  Enables the 64-bit (rather than 36-bit) virtual address space for the
+	  process. The guest address space mapping in base/memory.cc reserves a
+	  large contiguous region and lets the OS choose the base (MapViewsMac);
+	  without extended addressing that reservation competes with everything
+	  else in a cramped VA space and fails intermittently, which presents as a
+	  startup crash on some devices and not others.
+
+	  Same caveat as above: restricted, requires Apple approval on the profile,
+	  silently inert without it.
+	-->
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+</dict>
+</plist>

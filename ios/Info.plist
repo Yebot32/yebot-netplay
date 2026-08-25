@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for xenra-ios (milestone 1: the pipeline-proof app).
+
+  Consumed via MACOSX_BUNDLE_INFO_PLIST in XenDroid/ios/CMakeLists.txt.
+
+  CFBundleIdentifier is written out LITERALLY, not as
+  ${MACOSX_BUNDLE_GUI_IDENTIFIER}. The target sets its bundle id through
+  XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER, which only the Xcode generator
+  reads - under Ninja that property is inert, the substitution variable is
+  empty, and the app ships with an EMPTY bundle identifier. installd then
+  refuses it with a message about the provisioning profile rather than about
+  the plist, and you lose an afternoon. If the id ever changes, change it in
+  both places.
+
+  The version/name placeholders below are safe because CMake fills them from
+  its own MACOSX_BUNDLE_* defaults under every generator.
+
+  Deliberately minimal. No scene manifest (UIApplicationSceneManifest): the
+  shell uses the pre-iOS-13 UIApplicationDelegate window path, which still
+  works and is one fewer moving part while proving the toolchain. No
+  storyboard keys either - the shell builds its view in code, and a missing
+  storyboard is a black screen that looks exactly like a Metal failure.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>Ali.Xanite.green.ios</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+	<key>CFBundleDisplayName</key>
+	<string>Xenra</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+	<key>CFBundleVersion</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+
+	<!-- Must match CMAKE_OSX_DEPLOYMENT_TARGET in cmake/ios.toolchain.cmake.
+	     If these disagree, installd rejects the app on a device running
+	     between the two versions with an unhelpful "incompatible" error. -->
+	<key>MinimumOSVersion</key>
+	<string>16.0</string>
+
+	<!-- arm64 device only. arm64e is NOT listed: pointer authentication on
+	     arm64e is hostile to a JIT that writes and then executes its own
+	     code, and third-party apps cannot ship arm64e on iOS anyway. -->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>metal</string>
+	</array>
+
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>  <!-- iPhone -->
+		<integer>2</integer>  <!-- iPad -->
+	</array>
+
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+
+	<!-- The status bar overlaps the whole-screen render target and there is
+	     nothing under it worth reading. -->
+	<key>UIStatusBarHidden</key>
+	<true/>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+
+	<!-- Lets UIKit deliver indirect pointer events (trackpad, mouse, and the
+	     iPad's pointer) rather than synthesising touches. Nothing to do with
+	     the idle timer - that is a runtime property, not a plist key. Set
+	     because an emulator is driven by real input devices, not taps. -->
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+
+	<key>UILaunchScreen</key>
+	<dict/>
+</dict>
+</plist>

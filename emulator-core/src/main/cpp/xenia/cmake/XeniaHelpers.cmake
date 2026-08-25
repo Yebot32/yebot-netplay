@@ -3,7 +3,7 @@
 include(CMakeParseArguments)
 
 set(XE_PLATFORM_SUFFIXES
-  _win _linux _posix _gnulinux _x11 _gtk _android _mac _amd64 _x64 _arm64
+  _win _linux _posix _gnulinux _x11 _gtk _android _mac _ios _amd64 _x64 _arm64
 )
 
 # xe_platform_sources(target base_path [RECURSIVE])

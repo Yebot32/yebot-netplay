@@ -1,0 +1,329 @@
+name: xenra-ios
+
+# MILESTONE 1: prove toolchain -> codegen -> bundle -> ipa -> device.
+# This does NOT build the emulator. It builds a minimal app that links the real
+# xenia-base and reports the real JIT probe + MTLDevice status on screen. See
+# docs/ios-build.md.
+#
+# ------------------------------------------------------------------------
+# COST. macOS runners bill at 10x the Linux rate against private-repo
+# minutes. One minute of this job costs what ten minutes of XenDroid.yml
+# costs, and Yebot32/xenra... is private. Three consequences, all deliberate:
+#   * paths filter - a change to Android/Kotlin/Gradle must not spend macOS
+#     minutes. Only the iOS plumbing and the parts of the xenia tree this
+#     build actually compiles trigger it.
+#   * ccache, aggressively. A cold configure of the xenia tree plus a build of
+#     xenia-base is the whole job; a warm one is a link.
+#   * no matrix, no LTO, one arch, one config.
+# If this starts costing real money, drop the push trigger and leave it on
+# workflow_dispatch. The push trigger is a convenience, not a requirement.
+# ------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+  push:
+    branches: main
+    paths:
+      - 'ios/**'
+      - 'cmake/ios.toolchain.cmake'
+      - '.github/workflows/xenra-ios.yml'
+      - 'emulator-core/src/main/cpp/xenia/CMakeLists.txt'
+      - 'emulator-core/src/main/cpp/xenia/cmake/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/base/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ios.*'
+  pull_request:
+    branches: main
+    paths:
+      - 'ios/**'
+      - 'cmake/ios.toolchain.cmake'
+      - '.github/workflows/xenra-ios.yml'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/base/**'
+
+permissions:
+  contents: read
+
+env:
+  # The CMake source root is THIS repo's root, not the xenia tree. The root
+  # CMakeLists.txt is the iOS entry point: it add_subdirectory()s the xenia
+  # tree, swaps base/system_mac.cc for ios/system_ios.mm (system() is
+  # __API_UNAVAILABLE(ios), a compile error rather than a runtime stub), then
+  # adds ios/ which defines xenra-ios. Android never parses that file - Gradle
+  # points externalNativeBuild straight at
+  # emulator-core/src/main/cpp/CMakeLists.txt - which is what keeps the two
+  # builds from being able to break each other.
+  XENIA_SRC: .
+
+jobs:
+  build-ios-arm64:
+    # PINNED, not macos-latest. macos-latest moved from 14 to 15 without notice
+    # and will move again; each move changes the Xcode version, which changes
+    # the iOS SDK, the clang, and the `xcrun metal` behaviour the shader rules
+    # depend on in milestone 2. A green build that goes red because GitHub
+    # rolled a label is the least useful kind of red. Bump this deliberately,
+    # in its own commit, so the blame is readable.
+    # macos-15 is Apple silicon and ships Xcode 16.x.
+    runs-on: macos-15
+
+    steps:
+
+    ##################################################################
+    # Checkout
+    ##################################################################
+    # Shallow, like XenDroid.yml. The only thing here that needs git is the
+    # version.h generation in <XEN>/CMakeLists.txt, which calls
+    # `git rev-parse HEAD` - depth 1 satisfies that, and the file has a
+    # zeroed-out fallback if git fails entirely.
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 1
+
+    - name: Configure Git
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    ##################################################################
+    # Toolchain
+    ##################################################################
+    # Pin Xcode explicitly rather than trusting the image default: the runner
+    # ships several and `xcode-select -p` points at whichever the image
+    # maintainers last set. Echo the SDK so a future "why did this break"
+    # has the version in the log.
+    - name: Select Xcode
+      run: |
+        sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer || \
+          echo "::warning::Xcode_16 not present, falling back to image default"
+        xcodebuild -version
+        xcrun --sdk iphoneos --show-sdk-path
+        xcrun --sdk iphoneos --show-sdk-version
+
+    - name: Install build tools
+      run: |
+        brew install ninja
+        ninja --version
+        cmake --version
+        python3 --version
+
+    ##################################################################
+    # Native compile cache (ccache)
+    ##################################################################
+    # Same action and shape as XenDroid.yml. Keyed on the toolchain file
+    # because changing the deployment target or sysroot invalidates every
+    # object anyway - a stale hit there surfaces as a link error that looks
+    # like a code problem.
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ runner.os }}-ios-arm64-${{ hashFiles('cmake/ios.toolchain.cmake') }}
+        max-size: 2G
+
+    - name: Get Git hash
+      id: git
+      run: echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    ##################################################################
+    # Configure
+    ##################################################################
+    # XENIA_BUILD_TESTS / XENIA_BUILD_MISC stay OFF (their defaults) - the
+    # trace viewers and demos are desktop executables that will not link
+    # against UIKit. XENIA_ENABLE_LTO is turned OFF explicitly even though its
+    # default is ON: ThinLTO turns a two-minute link into a ten-minute one on
+    # a runner that bills at 10x, and it cannot change the answer to "does the
+    # pipeline work".
+    - name: Configure
+      run: |
+        cmake -G Ninja \
+          -S "$XENIA_SRC" \
+          -B build-ios \
+          -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/cmake/ios.toolchain.cmake" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DXENIA_BUILD_TESTS=OFF \
+          -DXENIA_BUILD_MISC=OFF \
+          -DXENIA_ENABLE_LTO=OFF \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+
+    ##################################################################
+    # Build
+    ##################################################################
+    # ONLY the xenra-ios target. Naming it is what keeps this from building
+    # xenia-app, the Vulkan backend, wxWidgets and every other target the
+    # xenia root declares - none of which will link on iOS yet, and none of
+    # which milestone 1 needs.
+    - name: Build
+      run: cmake --build build-ios --target xenra-ios --parallel $(sysctl -n hw.ncpu)
+
+    ##################################################################
+    # Package the .ipa
+    ##################################################################
+    # An .ipa is a zip with the .app inside a TOP-LEVEL directory named
+    # exactly "Payload" - not "payload", not the app's name - and the .app
+    # must be a direct child of it. Get any of that wrong and installd rejects
+    # the archive with a message that says nothing useful.
+    #
+    # This produces an UNSIGNED ipa, and that is the default, not a failure
+    # mode. A user on Windows signs it with their own certificate via
+    # Sideloadly, and that path is the one that actually yields a
+    # get-task-allow signature. See docs/ios-build.md.
+    - name: Package unsigned IPA
+      id: package
+      run: |
+        set -euo pipefail
+        APP=$(find build-ios -maxdepth 5 -name 'xenra-ios.app' -type d | head -n 1)
+        if [ -z "$APP" ]; then
+          echo "::error::No xenra-ios.app produced by the build."
+          find build-ios -maxdepth 6 -name '*.app' || true
+          exit 1
+        fi
+        echo "Found app bundle: $APP"
+
+        # A bundle with no Mach-O in it zips fine, installs fine, and crashes
+        # on launch. Catch it here, where the message is readable.
+        if [ ! -f "$APP/xenra-ios" ]; then
+          echo "::error::Bundle has no executable at $APP/xenra-ios"
+          ls -la "$APP"
+          exit 1
+        fi
+        file "$APP/xenra-ios"
+
+        # Same for the Info.plist: an empty CFBundleIdentifier passes every
+        # build step and fails at install time blaming the provisioning
+        # profile. Assert it here instead.
+        BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+        if [ -z "$BUNDLE_ID" ]; then
+          echo "::error::CFBundleIdentifier is empty in $APP/Info.plist"
+          exit 1
+        fi
+        echo "Bundle identifier: $BUNDLE_ID"
+
+        rm -rf payload-staging
+        mkdir -p payload-staging/Payload
+        cp -R "$APP" payload-staging/Payload/
+
+        IPA="xenra-ios_${{ steps.git.outputs.hash }}.ipa"
+        # -y preserves symlinks (embedded frameworks use them); zip from
+        # inside the staging dir so "Payload" is the top-level entry rather
+        # than "payload-staging/Payload".
+        (cd payload-staging && zip -qry "../$IPA" Payload)
+        echo "ipa=$IPA" >> $GITHUB_OUTPUT
+        ls -la "$IPA"
+
+    ##################################################################
+    # Upload the unsigned artifact FIRST
+    ##################################################################
+    # Before any signing is attempted, so a signing misconfiguration still
+    # leaves a downloadable build behind. Signing is the optional part.
+    - name: Upload unsigned IPA
+      uses: actions/upload-artifact@v4
+      with:
+        name: xenra-ios-unsigned-${{ steps.git.outputs.hash }}
+        path: ${{ steps.package.outputs.ipa }}
+        if-no-files-found: error
+
+    ##################################################################
+    # Sign (OPTIONAL)
+    ##################################################################
+    # Everything below is conditional on the secrets existing. An absent
+    # secret is the NORMAL case - a fork, an outside PR, a fresh clone - and
+    # must never fail the build.
+    #
+    # Note what a CI signature can and cannot do. Signing with a DEVELOPMENT
+    # certificate and a development provisioning profile yields get-task-allow
+    # and therefore a JIT-capable build, but only for the device UDIDs listed
+    # in that profile. Signing with a DISTRIBUTION certificate yields an app
+    # that installs more widely and has NO JIT, because distribution
+    # signatures strip get-task-allow. Do not add a distribution path and call
+    # it done - read docs/ios-build.md first.
+    - name: Import signing certificate
+      if: ${{ secrets.IOS_CERT_P12 != '' }}
+      env:
+        IOS_CERT_P12: ${{ secrets.IOS_CERT_P12 }}
+        IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+      run: |
+        set -euo pipefail
+        KEYCHAIN="$RUNNER_TEMP/xenra-signing.keychain-db"
+        KEYCHAIN_PASS=$(uuidgen)
+        security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+        security set-keychain-settings -lut 900 "$KEYCHAIN"
+        security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+
+        echo "$IOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" \
+          -k "$KEYCHAIN" -P "$IOS_CERT_PASSWORD" \
+          -T /usr/bin/codesign -T /usr/bin/security
+        # Without this, codesign blocks on a GUI keychain-access prompt that
+        # nobody is there to answer and the job hangs until it times out.
+        security set-key-partition-list -S apple-tool:,apple: \
+          -s -k "$KEYCHAIN_PASS" "$KEYCHAIN" >/dev/null
+        security list-keychains -d user -s "$KEYCHAIN" \
+          $(security list-keychains -d user | tr -d '"')
+
+        rm -f "$RUNNER_TEMP/cert.p12"
+        echo "KEYCHAIN=$KEYCHAIN" >> $GITHUB_ENV
+
+    - name: Install provisioning profile
+      if: ${{ secrets.IOS_CERT_P12 != '' && secrets.IOS_PROVISIONING_PROFILE != '' }}
+      env:
+        IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+      run: |
+        set -euo pipefail
+        PROFILE="$RUNNER_TEMP/xenra.mobileprovision"
+        echo "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$PROFILE"
+        echo "PROFILE=$PROFILE" >> $GITHUB_ENV
+        # Report what the profile actually grants rather than assuming. If
+        # get-task-allow is false or absent here, the resulting ipa has no JIT
+        # no matter what xenra.entitlements says.
+        security cms -D -i "$PROFILE" > "$RUNNER_TEMP/profile.plist"
+        echo "--- provisioning profile entitlements ---"
+        /usr/libexec/PlistBuddy -c 'Print :Entitlements' "$RUNNER_TEMP/profile.plist" || true
+
+    - name: Sign IPA
+      if: ${{ secrets.IOS_CERT_P12 != '' && secrets.IOS_PROVISIONING_PROFILE != '' }}
+      env:
+        IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
+      run: |
+        set -euo pipefail
+        rm -rf signed && mkdir signed && cd signed
+        unzip -q "../${{ steps.package.outputs.ipa }}"
+        APP="Payload/xenra-ios.app"
+
+        # The profile must be embedded IN the bundle. codesign does not put it
+        # there and installd will not accept the app without it.
+        cp "$PROFILE" "$APP/embedded.mobileprovision"
+
+        IDENTITY="${IOS_SIGNING_IDENTITY:-}"
+        if [ -z "$IDENTITY" ]; then
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | head -n 1 | awk -F'"' '{print $2}')
+        fi
+        echo "Signing with: $IDENTITY"
+
+        codesign --force --timestamp=none \
+          --sign "$IDENTITY" \
+          --entitlements "$GITHUB_WORKSPACE/ios/xenra.entitlements" \
+          --keychain "$KEYCHAIN" \
+          "$APP"
+
+        # Print the entitlements that ended up in the signature. This is the
+        # authoritative answer to "does this build have JIT" - look for
+        # com.apple.security.get-task-allow.
+        echo "--- signed entitlements ---"
+        codesign -d --entitlements :- "$APP" || true
+
+        zip -qry "../xenra-ios_${{ steps.git.outputs.hash }}_signed.ipa" Payload
+
+    - name: Clean up keychain
+      # always(), so a failed signing step does not leave a certificate behind.
+      # Runners are ephemeral, but relying on that is a bad habit.
+      if: ${{ always() && env.KEYCHAIN != '' }}
+      run: security delete-keychain "$KEYCHAIN" || true
+
+    - name: Upload signed IPA
+      if: ${{ secrets.IOS_CERT_P12 != '' && secrets.IOS_PROVISIONING_PROFILE != '' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: xenra-ios-signed-${{ steps.git.outputs.hash }}
+        path: xenra-ios_${{ steps.git.outputs.hash }}_signed.ipa
+        if-no-files-found: warn
