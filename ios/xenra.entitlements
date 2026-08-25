@@ -2,7 +2,7 @@
 <!--
   Entitlements for xenra-ios.
 
-  This file is an INPUT to `codesign --entitlements`, not something that gets
+  This file is an INPUT to the codesign entitlements flag, not something that
   copied into the bundle. Entitlements exist only inside a code signature; a
   plist sitting in a .app grants nothing. The build is deliberately unsigned
   (see XenDroid/cmake/ios.toolchain.cmake) and this is applied either by the CI

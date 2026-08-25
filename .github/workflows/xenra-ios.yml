@@ -226,7 +226,23 @@ jobs:
         # (identity "-") needs no certificate and no keychain, embeds the
         # entitlements in the bundle, and leaves an ipa that Sideloadly/Xcode
         # re-sign with a real identity while keeping them.
-        codesign --force --deep --sign -           --entitlements "$GITHUB_WORKSPACE/ios/xenra.entitlements"           "$PAYLOAD_APP"
+        # Canonicalise the plist before handing it to codesign.
+        #
+        # The first attempt failed with "Failed to parse entitlements:
+        # AMFIUnserializeXML: syntax error near line 5". That was not AMFI
+        # being fussy - the file was genuinely malformed. A documentation
+        # comment contained the literal `--` (in `codesign --entitlements`),
+        # which XML forbids inside a comment. Fixed at the source.
+        #
+        # plutil stays as the guard rather than as the fix: it fails loudly
+        # here, in a step whose job is packaging, rather than letting a
+        # future malformed comment reach codesign and produce an error that
+        # points at line numbers in a file nobody suspects. It also strips
+        # comments, so the plist codesign sees is minimal regardless.
+        ENT="$RUNNER_TEMP/xenra.entitlements.clean.plist"
+        plutil -convert xml1 -o "$ENT" "$GITHUB_WORKSPACE/ios/xenra.entitlements"
+
+        codesign --force --deep --sign - --entitlements "$ENT" "$PAYLOAD_APP"
 
         # Report what the signature actually GRANTED, not what we asked for.
         # These can differ, and the difference is invisible until the app
