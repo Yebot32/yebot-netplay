@@ -29,6 +29,24 @@
 
 #if defined(TARGET_OS_MAC) && TARGET_OS_MAC
 #define XE_PLATFORM_MAC 1
+// TARGET_OS_MAC means "some Apple OS", NOT "macOS" - it is 1 on iOS as well.
+// That is relied on here rather than being a bug papered over: every
+// Apple-correct path in this tree is gated on XE_PLATFORM_MAC and is just as
+// right on iOS. MAP_JIT allocation (base/memory_posix.cc), the
+// pthread_jit_write_protect_np W^X toggle (cpu/backend/code_cache_base.h),
+// MapViewsMac's OS-chosen guest base instead of a fixed one (memory.cc), and
+// the Darwin arm64 signal handling (base/exception_handler_posix.cc) all want
+// to stay on. So iOS keeps XE_PLATFORM_MAC and adds XE_PLATFORM_IOS as a
+// NARROWER discriminator for the few places that must diverge from macOS -
+// tighter memory budgets in the Metal caches, the thread-stack retry in
+// threading_posix.cc, and eventually UIKit in place of AppKit.
+//
+// Defining XE_PLATFORM_IOS *instead* of XE_PLATFORM_MAC would silently drop
+// all of the above onto the generic POSIX paths, which is the opposite of what
+// is wanted and would fail in ways that look like a JIT problem.
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#define XE_PLATFORM_IOS 1
+#endif
 #elif defined(WIN32) || defined(_WIN32)
 #define XE_PLATFORM_WIN32 1
 #elif defined(__ANDROID__)
