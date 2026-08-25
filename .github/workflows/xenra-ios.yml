@@ -64,6 +64,18 @@ jobs:
     # macos-15 is Apple silicon and ships Xcode 16.x.
     runs-on: macos-15
 
+    # `secrets` is NOT an allowed context in a step-level `if`. Using it there
+    # does not disable the step - GitHub rejects the whole workflow file, and
+    # the run shows up named after the file path with no jobs at all, which is
+    # what the first push produced. Job-level env IS allowed to read secrets,
+    # so the optional signing steps test env.* instead. An unset secret becomes
+    # an empty string here, which is exactly the condition we want.
+    env:
+      IOS_CERT_P12: ${{ secrets.IOS_CERT_P12 }}
+      IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+      IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+      IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
+
     steps:
 
     ##################################################################
@@ -237,10 +249,7 @@ jobs:
     # signatures strip get-task-allow. Do not add a distribution path and call
     # it done - read docs/ios-build.md first.
     - name: Import signing certificate
-      if: ${{ secrets.IOS_CERT_P12 != '' }}
-      env:
-        IOS_CERT_P12: ${{ secrets.IOS_CERT_P12 }}
-        IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+      if: ${{ env.IOS_CERT_P12 != '' }}
       run: |
         set -euo pipefail
         KEYCHAIN="$RUNNER_TEMP/xenra-signing.keychain-db"
@@ -264,9 +273,7 @@ jobs:
         echo "KEYCHAIN=$KEYCHAIN" >> $GITHUB_ENV
 
     - name: Install provisioning profile
-      if: ${{ secrets.IOS_CERT_P12 != '' && secrets.IOS_PROVISIONING_PROFILE != '' }}
-      env:
-        IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+      if: ${{ env.IOS_CERT_P12 != '' && env.IOS_PROVISIONING_PROFILE != '' }}
       run: |
         set -euo pipefail
         PROFILE="$RUNNER_TEMP/xenra.mobileprovision"
@@ -280,9 +287,7 @@ jobs:
         /usr/libexec/PlistBuddy -c 'Print :Entitlements' "$RUNNER_TEMP/profile.plist" || true
 
     - name: Sign IPA
-      if: ${{ secrets.IOS_CERT_P12 != '' && secrets.IOS_PROVISIONING_PROFILE != '' }}
-      env:
-        IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
+      if: ${{ env.IOS_CERT_P12 != '' && env.IOS_PROVISIONING_PROFILE != '' }}
       run: |
         set -euo pipefail
         rm -rf signed && mkdir signed && cd signed
@@ -321,7 +326,7 @@ jobs:
       run: security delete-keychain "$KEYCHAIN" || true
 
     - name: Upload signed IPA
-      if: ${{ secrets.IOS_CERT_P12 != '' && secrets.IOS_PROVISIONING_PROFILE != '' }}
+      if: ${{ env.IOS_CERT_P12 != '' && env.IOS_PROVISIONING_PROFILE != '' }}
       uses: actions/upload-artifact@v4
       with:
         name: xenra-ios-signed-${{ steps.git.outputs.hash }}
