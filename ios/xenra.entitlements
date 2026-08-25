@@ -62,5 +62,23 @@
 	-->
 	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
 	<true/>
+
+	<!--
+	  Read/write access to files the user picks through the document picker.
+	  Not needed by milestone 1, which loads nothing, but it is how a game will
+	  ever get in: there is no general filesystem on iOS, so a title has to be
+	  handed over explicitly.
+
+	  Taken from XeniOS (github.com/xenios-jp/XeniOS, BSD-3-Clause, same licence
+	  as this tree), whose shipping iOS entitlements carry exactly this plus
+	  increased-memory-limit and nothing else. Notably they do NOT ship
+	  extended-virtual-addressing, which is some evidence that Xenia's guest
+	  reservation does not actually require it. Ours is kept because it is inert
+	  without Apple approval and costs nothing - but do not treat it as load
+	  bearing, and if the reservation misbehaves, that difference is the first
+	  thing to test.
+	-->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 </dict>
 </plist>

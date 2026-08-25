@@ -181,7 +181,7 @@ jobs:
     # mode. A user on Windows signs it with their own certificate via
     # Sideloadly, and that path is the one that actually yields a
     # get-task-allow signature. See docs/ios-build.md.
-    - name: Package unsigned IPA
+    - name: Package ad-hoc signed IPA
       id: package
       run: |
         set -euo pipefail
@@ -215,12 +215,31 @@ jobs:
         rm -rf payload-staging
         mkdir -p payload-staging/Payload
         cp -R "$APP" payload-staging/Payload/
+        PAYLOAD_APP="payload-staging/Payload/$(basename "$APP")"
+
+        # AD-HOC SIGN, rather than shipping a bare unsigned bundle.
+        #
+        # Entitlements exist ONLY inside a code signature - a plist sitting
+        # next to the app grants nothing. An unsigned ipa therefore carries no
+        # entitlements at all, so increased-memory-limit and friends are simply
+        # absent, and a re-signing tool has nothing to preserve. Ad-hoc signing
+        # (identity "-") needs no certificate and no keychain, embeds the
+        # entitlements in the bundle, and leaves an ipa that Sideloadly/Xcode
+        # re-sign with a real identity while keeping them.
+        codesign --force --deep --sign -           --entitlements "$GITHUB_WORKSPACE/ios/xenra.entitlements"           "$PAYLOAD_APP"
+
+        # Report what the signature actually GRANTED, not what we asked for.
+        # These can differ, and the difference is invisible until the app
+        # misbehaves on device.
+        echo "--- entitlements embedded in the bundle ---"
+        codesign -d --entitlements :- "$PAYLOAD_APP" 2>/dev/null ||           echo "::warning::could not read back entitlements"
 
         IPA="xenra-ios_${{ steps.git.outputs.hash }}.ipa"
-        # -y preserves symlinks (embedded frameworks use them); zip from
-        # inside the staging dir so "Payload" is the top-level entry rather
-        # than "payload-staging/Payload".
-        (cd payload-staging && zip -qry "../$IPA" Payload)
+        # ditto, not zip: it preserves symlinks, resource forks and the bundle
+        # bit-for-bit, which matters once a signature is present - a zip that
+        # rewrites any of that invalidates the signature it just packaged.
+        # --keepParent is what makes "Payload" the top-level entry.
+        (cd payload-staging && ditto -c -k --sequesterRsrc --keepParent           "Payload" "../$IPA")
         echo "ipa=$IPA" >> $GITHUB_OUTPUT
         ls -la "$IPA"
 
@@ -229,10 +248,10 @@ jobs:
     ##################################################################
     # Before any signing is attempted, so a signing misconfiguration still
     # leaves a downloadable build behind. Signing is the optional part.
-    - name: Upload unsigned IPA
+    - name: Upload ad-hoc signed IPA
       uses: actions/upload-artifact@v4
       with:
-        name: xenra-ios-unsigned-${{ steps.git.outputs.hash }}
+        name: xenra-ios-adhoc-${{ steps.git.outputs.hash }}
         path: ${{ steps.package.outputs.ipa }}
         if-no-files-found: error
 
