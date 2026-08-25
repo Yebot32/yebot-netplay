@@ -12,14 +12,29 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+# Cheap pre-check on the one thing that IS knowable this early. A toolchain
+# file is only read during project(), so CMAKE_SYSTEM_NAME is still empty here
+# - testing it before project() is a guard that can never pass, which is
+# exactly the mistake this replaced.
+if(NOT CMAKE_TOOLCHAIN_FILE)
   message(FATAL_ERROR
-    "This CMakeLists is the iOS entry point. Configure it with "
-    "-DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake. For Android, build the "
-    "APK with Gradle, which uses emulator-core/src/main/cpp/CMakeLists.txt.")
+    "This CMakeLists is the iOS entry point and needs the iOS toolchain:
+"
+    "  -DCMAKE_TOOLCHAIN_FILE=cmake/ios.toolchain.cmake
+"
+    "For Android, build the APK with Gradle, which uses "
+    "emulator-core/src/main/cpp/CMakeLists.txt and never reads this file.")
 endif()
 
 project(xenra-ios-shell LANGUAGES C CXX OBJC OBJCXX)
+
+# The authoritative check, now that the toolchain has actually been processed.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  message(FATAL_ERROR
+    "Expected CMAKE_SYSTEM_NAME=iOS after project(), got "
+    "'${CMAKE_SYSTEM_NAME}'. The toolchain file at ${CMAKE_TOOLCHAIN_FILE} is "
+    "not the iOS one.")
+endif()
 
 # EXCLUDE_FROM_ALL so `--build . --target xenra-ios` pulls in only what the app
 # actually needs. The xenia tree defines a great many targets that have no
