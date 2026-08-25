@@ -96,6 +96,26 @@ else()
   set(XE_NO_DESKTOP_UI FALSE)
 endif()
 
+# iOS is the one platform with no Vulkan at all - Metal is the backend there,
+# and nothing is going to load MoltenVK into this app. Android and macOS both
+# keep Vulkan, so this is narrower than XE_NO_DESKTOP_UI on purpose.
+#
+# It matters at CONFIGURE time, not just build time: gpu/vulkan's CMakeLists
+# calls xe_shader_rules_slang(), which hard-errors when slangc is absent, and
+# slangc only exists after `./xenia-build.py slang` has downloaded it. So even
+# though nothing on iOS would ever build those targets, merely adding the
+# subdirectory is enough to fail the configure.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(XE_ENABLE_VULKAN FALSE)
+  # The wx-based desktop application, its debug UI and the Discord integration.
+  # All three are desktop-shell targets that link things iOS does not have, and
+  # the iOS app in ios/ replaces them.
+  set(XE_BUILD_DESKTOP_APP FALSE)
+else()
+  set(XE_ENABLE_VULKAN TRUE)
+  set(XE_BUILD_DESKTOP_APP TRUE)
+endif()
+
 option(XENIA_BUILD_TESTS "Build test suites" OFF)
 option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler, vfs-dump, demos)" OFF)
 option(XENIA_ENABLE_LTO "Enable link-time optimization in Release (slow link)" ON)
