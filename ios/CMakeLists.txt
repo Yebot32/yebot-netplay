@@ -38,6 +38,10 @@ target_link_libraries(xenra-ios PRIVATE
   "-framework Metal"
   "-framework QuartzCore"
   "-framework Foundation"
+  # CGRectZero and the CGRect/CGSize helpers live here. UIKit re-exports the
+  # types but not the symbols, so leaving this out links fine right up until
+  # the one line that names a CG constant.
+  "-framework CoreGraphics"
 )
 
 # ARC is off across the xenia tree (metal-cpp does its own retain/release and

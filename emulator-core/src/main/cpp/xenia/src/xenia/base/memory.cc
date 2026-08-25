@@ -20,6 +20,7 @@
 #include <csetjmp>
 #include <csignal>
 #include <cstring>
+#include <libkern/OSCacheControl.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #endif
@@ -103,9 +104,11 @@ bool CallProbeGuarded(void* code) {
 // page that is genuinely executable but runs stale bytes.
 void WriteProbeInstruction(void* code) {
   std::memcpy(code, &kProbeInstruction, sizeof(kProbeInstruction));
-  __builtin___clear_cache(
-      reinterpret_cast<char*>(code),
-      reinterpret_cast<char*>(code) + sizeof(kProbeInstruction));
+  // sys_icache_invalidate, not __builtin___clear_cache. On Darwin arm64 that
+  // builtin does not lower to an instruction sequence - it emits a call to
+  // ___clear_cache, which Apple's libraries do not export, so it fails at LINK
+  // time rather than anywhere near the code that asked for it.
+  sys_icache_invalidate(code, sizeof(kProbeInstruction));
 }
 
 #if XE_PLATFORM_IOS
