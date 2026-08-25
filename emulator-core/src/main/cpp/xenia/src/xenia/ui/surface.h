@@ -36,6 +36,10 @@ class Surface {
     kTypeIndex_MacNSView,
     // Windows.
     kTypeIndex_Win32Hwnd,
+    // iOS. Appended rather than grouped next to kTypeIndex_MacNSView on
+    // purpose: TypeFlags below is a 1 << index bitfield, so inserting anywhere
+    // but the end silently renumbers every flag after it.
+    kTypeIndex_IosUIView,
   };
   using TypeFlags = uint32_t;
   enum : TypeFlags {
@@ -45,6 +49,7 @@ class Surface {
     kTypeFlag_XcbWindow = TypeFlags(1) << kTypeIndex_XcbWindow,
     kTypeFlag_MacNSView = TypeFlags(1) << kTypeIndex_MacNSView,
     kTypeFlag_Win32Hwnd = TypeFlags(1) << kTypeIndex_Win32Hwnd,
+    kTypeFlag_IosUIView = TypeFlags(1) << kTypeIndex_IosUIView,
   };
 
   Surface(const Surface& surface) = delete;

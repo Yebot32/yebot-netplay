@@ -24,9 +24,18 @@
 #include "xenia/ui/shaders/bytecode/metal/guest_output_bilinear_dither_ps.h"
 #include "xenia/ui/shaders/bytecode/metal/guest_output_bilinear_ps.h"
 #include "xenia/ui/shaders/bytecode/metal/guest_output_triangle_strip_rect_vs.h"
+#include "xenia/base/platform.h"
+#if XE_PLATFORM_IOS
+#include "xenia/ui/surface_ios.h"
+#else
 #include "xenia/ui/surface_mac.h"
+#endif
 
+#if XE_PLATFORM_IOS
+#import <UIKit/UIKit.h>
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -194,7 +203,11 @@ void MetalPresenter::Shutdown() {
 }
 
 Surface::TypeFlags MetalPresenter::GetSupportedSurfaceTypes() const {
+#if XE_PLATFORM_IOS
+  return Surface::kTypeFlag_IosUIView;
+#else
   return Surface::kTypeFlag_MacNSView;
+#endif
 }
 
 bool MetalPresenter::CaptureGuestOutput(RawImage& image_out) {
@@ -670,6 +683,20 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   CAMetalLayer* metal_layer = nullptr;
   CGFloat surface_scale = 1.0;
 
+#if XE_PLATFORM_IOS
+  if (surface_type != Surface::kTypeIndex_IosUIView) {
+    XELOGE("Metal presenter requires IosUIView surface, got: {}",
+           static_cast<int>(surface_type));
+    return SurfacePaintConnectResult::kFailure;
+  }
+  IosUIViewSurface& ios_view_surface =
+      static_cast<IosUIViewSurface&>(new_surface);
+  metal_layer = ios_view_surface.GetOrCreateMetalLayer();
+  // No convertRectToBacking: on UIKit - the screen scale IS the backing scale,
+  // and IosUIViewSurface already resolves it from the window's scene with a
+  // contentScaleFactor fallback for a view that is not on screen yet.
+  surface_scale = ios_view_surface.GetBackingScale();
+#else
   if (surface_type != Surface::kTypeIndex_MacNSView) {
     XELOGE("Metal presenter requires MacNSView surface, got: {}", static_cast<int>(surface_type));
     return SurfacePaintConnectResult::kFailure;
@@ -688,6 +715,7 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
       surface_scale = view.window.backingScaleFactor;
     }
   }
+#endif  // XE_PLATFORM_IOS
 
   if (!metal_layer) {
     XELOGE("Metal presenter failed to get CAMetalLayer from surface");

@@ -25,6 +25,7 @@
 
 #include "third_party/stb/stb_image_write.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/autorelease_pool_mac.h"
 #include "xenia/base/bit_stream.h"
 #include "xenia/base/byte_order.h"

@@ -12,6 +12,7 @@
 #include "third_party/metal-cpp/Metal/Metal.hpp"
 
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/ui/metal/metal_presenter.h"
 #include "xenia/ui/metal/metal_provider.h"
 
@@ -206,7 +207,16 @@ std::unique_ptr<ImmediateTexture> MetalImmediateDrawer::CreateTexture(uint32_t w
   texture_desc->setArrayLength(1);
   texture_desc->setSampleCount(1);
   texture_desc->setUsage(MTL::TextureUsageShaderRead);
+  // StorageModeManaged does not exist on iOS - there is no discrete VRAM to
+  // keep a second copy in sync with, so Shared is both the only option and the
+  // right one. This is the ONLY managed-mode use in the whole Metal backend;
+  // nothing calls didModifyRange or synchronizeResource, which is why the
+  // renderer needed no other iOS memory work.
+#if XE_PLATFORM_IOS
+  texture_desc->setStorageMode(MTL::StorageModeShared);
+#else
   texture_desc->setStorageMode(MTL::StorageModeManaged);
+#endif
   MTL::Texture* metal_texture = device_->newTexture(texture_desc);
   texture_desc->release();
   if (!metal_texture) {
