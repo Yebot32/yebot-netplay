@@ -3,7 +3,14 @@ set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 
 # Must be set before project() so the toolchain bakes -mmacosx-version-min
 # into every compile/link; setting it later only updates the variable.
-if(APPLE)
+#
+# APPLE alone is too broad here: CMAKE_OSX_DEPLOYMENT_TARGET means the *iOS*
+# deployment target on an iOS build, so leaving this unguarded would silently
+# pin iOS 15 while claiming to say something about macOS. The iOS toolchain
+# file owns that value instead. Testing CMAKE_SYSTEM_NAME rather than the IOS
+# variable because IOS is not set until project() runs, and this block must
+# come before it.
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
 endif()
 
@@ -74,6 +81,20 @@ else()
   set(_xe_arch_source "CMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 message(STATUS "Target architecture: XE_TARGET_AARCH64=${XE_TARGET_AARCH64} XE_TARGET_X86_64=${XE_TARGET_X86_64} (${_xe_arch_source})")
+
+# Platforms that ship their own UI shell instead of the vendored wxWidgets
+# desktop one. Android has the Kotlin app; iOS has the UIKit app in ios/.
+# Both link the engine libraries and provide their own window and surface, so
+# building wx for them is pure cost - and on iOS it does not build at all.
+#
+# This replaces four separate `NOT CMAKE_SYSTEM_NAME STREQUAL "Android"` tests
+# that all meant this. Android's behaviour is unchanged at every one of them:
+# it was excluded before and is excluded now.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(XE_NO_DESKTOP_UI TRUE)
+else()
+  set(XE_NO_DESKTOP_UI FALSE)
+endif()
 
 option(XENIA_BUILD_TESTS "Build test suites" OFF)
 option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler, vfs-dump, demos)" OFF)
