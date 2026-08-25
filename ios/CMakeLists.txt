@@ -48,6 +48,21 @@ target_compile_options(xenra-ios PRIVATE
   "$<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fno-objc-arc>"
 )
 
+# The xenia tree sets CMAKE_OBJCXX_STANDARD 20 inside its own project() scope,
+# and a set() in a subdirectory does not reach a sibling one - so this target
+# was compiling the very same xenia headers under the compiler's default
+# dialect. That surfaces as a wall of nonsense from base/memory.h and
+# byte_order.h ("unknown type name 'constexpr'", "no member named 'filesystem'
+# in namespace 'std'") which reads like the headers are broken rather than like
+# a missing -std flag. Set it on the target so it cannot drift from whatever
+# the xenia subdirectory decides.
+set_target_properties(xenra-ios PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+  OBJCXX_STANDARD 20
+  OBJCXX_STANDARD_REQUIRED ON
+)
+
 set_target_properties(xenra-ios PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${_xe_ios_dir}/Info.plist"
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "Ali.Xanite.green.ios"
