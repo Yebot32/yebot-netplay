@@ -184,6 +184,43 @@ Look for `com.apple.security.get-task-allow` = `true`. The CI signing step
 prints exactly this, and also dumps the provisioning profile's entitlements
 before signing. If the key is absent there, it will be absent on device.
 
+### MEASURED on hardware: iPad Air M1, iPadOS 26.4.2 (2026-08-28)
+
+The first on-device run, installed with eSign under a distribution-style
+certificate:
+
+- Install, home screen, launch: all fine. `MTLCreateSystemDefaultDevice()`
+  succeeded before anything died.
+- The process was killed ~70 ms after launch, before the first frame. The
+  crash report: `EXC_BAD_ACCESS (SIGKILL)`, termination
+  `CODESIGNING / "Invalid Page"`, faulting an `rw-/rwx` anonymous mapping -
+  the probe's own step-1 RWX mapping, at the moment of its first execute.
+- `codeSigningFlags` in the report have no `CS_GET_TASK_ALLOW` bit. The
+  kernel was not guessing; it knew.
+
+Why the signal guard did not save it: `CallProbeGuarded` catches SIGBUS,
+SIGSEGV and SIGILL. The code signing monitor raises none of those for an
+unentitled execute - it sends SIGKILL, which nothing in the process can
+catch. The probe was engineered for the wrong killer.
+
+`QueryJitStatus` therefore now asks the kernel first (`csops(CS_OPS_STATUS)`)
+before mapping anything executable:
+
+- **No `get-task-allow`** (eSign, enterprise and other distribution-style
+  signing): reports `OFF` - "signature has no get-task-allow ... Re-sign with
+  a development provisioning profile to test JIT." No executable mapping is
+  attempted, so the status screen now renders on any signature.
+- **`get-task-allow` present, no `CS_DEBUGGED`** (development-signed, JIT not
+  yet activated this launch): the RWX attempt is skipped and the W^X path's
+  `mprotect` refusal is the clean "no" it was always designed to be.
+- **`CS_DEBUGGED` set** (a JIT enabler has attached this launch): both paths
+  run, and ON is finally measurable.
+
+Expected answers per install method: distribution signing → OFF (no
+entitlement). Development-signed, no enabler → OFF (mprotect refusal).
+Development-signed + SideStore/StikDebug activation → the real answer. The
+third row is the one milestone 1 exists for.
+
 ### What is *not* the answer
 
 `<XEN>/xenia.entitlements` contains `com.apple.security.cs.allow-jit`. **That is

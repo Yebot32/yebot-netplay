@@ -23,6 +23,9 @@
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#if XE_PLATFORM_IOS
+#include <unistd.h>  // getpid, for the csops() entitlement check below.
+#endif
 #endif
 
 DEFINE_bool(
@@ -113,6 +116,27 @@ void WriteProbeInstruction(void* code) {
 
 #if XE_PLATFORM_IOS
 
+// csops() reports what this process's code signature actually grants. The iOS
+// SDK does not expose <sys/codesign.h>, but the syscall itself is stable
+// libsystem_kernel API, so it is declared here rather than fought with.
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr,
+                     size_t usersize);
+
+// CS_OPS_STATUS and the two flag bits that decide JIT, from the xnu headers.
+constexpr unsigned kCsOpsStatus = 0;
+constexpr uint32_t kCsGetTaskAllow = 0x00000004;
+constexpr uint32_t kCsDebugged = 0x10000000;
+
+uint32_t QueryCodeSigningFlags() {
+  uint32_t flags = 0;
+  if (csops(getpid(), kCsOpsStatus, &flags, sizeof(flags)) != 0) {
+    // Cannot ask. Return 0: the gates below then take their conservative
+    // branches, which cost information but never cost the process.
+    return 0;
+  }
+  return flags;
+}
+
 JitStatus ProbeJitApple() {
   JitStatus status;
   const size_t size = page_size();
@@ -128,27 +152,55 @@ JitStatus ProbeJitApple() {
   // between writable and executable. That is W^X, not RWX, and it is the only
   // shape worth probing here.
 
+  // 0. Ask the kernel what the signature grants BEFORE mapping anything
+  //    executable. MEASURED on an iPad Air M1, iPadOS 26.4.2, 2026-08-28:
+  //    under a distribution-style signature (eSign, no get-task-allow) the
+  //    code signing monitor kills the process with an uncatchable SIGKILL -
+  //    termination "CODESIGNING / Invalid Page", ~70 ms after launch - at the
+  //    FIRST execute of generated code below. That is not SIGBUS/SIGSEGV, so
+  //    CallProbeGuarded never sees it; the only defence is to not attempt the
+  //    execute at all, and say why instead.
+  const uint32_t cs_flags = QueryCodeSigningFlags();
+  const bool get_task_allow = (cs_flags & kCsGetTaskAllow) != 0;
+  const bool cs_debugged = (cs_flags & kCsDebugged) != 0;
+  if (!get_task_allow) {
+    status.capability = JitCapability::kUnavailable;
+    status.detail =
+        "signature has no get-task-allow (distribution-style signing) - iOS "
+        "kills the process at the first execute of generated code. Re-sign "
+        "with a development provisioning profile to test JIT.";
+    return status;
+  }
+
   // 1. Straight RWX. Succeeds only where code signing has been relaxed for
   //    this process; on a plain launch this is expected to fail, and that is
-  //    information rather than an error.
-  void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (code != MAP_FAILED) {
-    WriteProbeInstruction(code);
-    const bool executed = CallProbeGuarded(code);
-    munmap(code, size);
-    if (executed) {
-      status.capability = JitCapability::kWritableExecutable;
-      status.detail = "RWX mapping accepted - code signing is relaxed";
-      return status;
+  //    information rather than an error. Only attempted once the kernel marks
+  //    the process CS_DEBUGGED: executing a written page before a debugger
+  //    has attached is precisely the uncatchable kill this probe now guards
+  //    against, entitled or not.
+  if (cs_debugged) {
+    void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (code != MAP_FAILED) {
+      WriteProbeInstruction(code);
+      const bool executed = CallProbeGuarded(code);
+      munmap(code, size);
+      if (executed) {
+        status.capability = JitCapability::kWritableExecutable;
+        status.detail = "RWX mapping accepted - code signing is relaxed";
+        return status;
+      }
     }
   }
 
   // 2. W^X: map writable, write, then flip to executable. This is the path a
   //    debugger-enabled sideload actually gets, and the one the code cache
-  //    would have to be built on.
-  code = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
-              -1, 0);
+  //    would have to be built on. Safe on every signature: a build without
+  //    the entitlement is refused by the gate above, and a build with it but
+  //    no activated JIT gets an mprotect refusal here, which is a clean "no"
+  //    the probe can report rather than a kill nobody can catch.
+  void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1, 0);
   if (code == MAP_FAILED) {
     status.capability = JitCapability::kUnavailable;
     status.detail = fmt::format("even a plain RW mapping was refused: {} ({})",
