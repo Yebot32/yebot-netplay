@@ -221,6 +221,34 @@ entitlement). Development-signed, no enabler → OFF (mprotect refusal).
 Development-signed + SideStore/StikDebug activation → the real answer. The
 third row is the one milestone 1 exists for.
 
+### MEASURED, second run: eSign with JIT enabled, same device (2026-08-28)
+
+The same `d4e0cec` build, reinstalled through eSign with its JIT option on,
+changed the picture in three ways:
+
+- The signature now carries `get-task-allow` - the csops gate passes. Whatever
+  eSign's JIT mode signs with, it is not the distribution-style certificate of
+  the first run.
+- The W^X path ran, and `mprotect` to `PROT_EXEC` **succeeded** - where the
+  note above predicts a refusal. The fault came one step later, at the first
+  execute, and it was a catchable SIGSEGV that `CallProbeGuarded` handled: the
+  screen read "mprotect reported success but the page faulted on execute". On
+  26.4.2 the refusal has moved from the mprotect call to the instruction
+  fetch. The correction stands: the probe must not execute unless the kernel
+  says the signature is debuggable, because the failure mode is still a kill
+  when the signature is not.
+- What was missing at +70 ms was the attach itself (`CS_DEBUGGED`). The JIT
+  enabler lands seconds after launch. XeniOS runs on this same device and
+  signature because its first JIT need is at game start, minutes in - Xenra's
+  probe lost a race, it did not find a missing capability.
+
+`QueryJitStatusRefresh()` exists for exactly this, and the pipeline-check
+screen now re-probes (2 s timer, tap to force). Expected readings: before the
+enabler attaches - "mprotect reported success but the page faulted on
+execute"; after it attaches - "W^X: page flipped from writable to executable
+via mprotect". The emulator's own backend init must use the refresh variant
+too, never the cached snapshot.
+
 ### What is *not* the answer
 
 `<XEN>/xenia.entitlements` contains `com.apple.security.cs.allow-jit`. **That is

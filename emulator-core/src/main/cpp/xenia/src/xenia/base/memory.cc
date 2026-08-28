@@ -301,9 +301,11 @@ JitStatus ProbeJit() {
 
 }  // namespace
 
+JitStatus QueryJitStatusRefresh() { return ProbeJit(); }
+
 const JitStatus& QueryJitStatus() {
   static const JitStatus status = []() {
-    JitStatus probed = ProbeJit();
+    JitStatus probed = QueryJitStatusRefresh();
     if (probed.capability == JitCapability::kUnavailable) {
       XELOGE("JIT unavailable: {}. Xenia has no PowerPC interpreter, so the "
              "guest cannot run.",

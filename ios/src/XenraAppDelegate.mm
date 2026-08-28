@@ -36,10 +36,11 @@
 
 namespace {
 
-// Reads the same probe the emulator would, so what is displayed here is not a
-// separate reimplementation that could drift from the real answer.
+// Runs the same probe the emulator would, fresh each call, so what is
+// displayed here is not a separate reimplementation that could drift from the
+// real answer - and so the screen can watch the JIT enabler's attach land.
 NSString* DescribeJitStatus() {
-  const xe::memory::JitStatus& status = xe::memory::QueryJitStatus();
+  const xe::memory::JitStatus status = xe::memory::QueryJitStatusRefresh();
   const char* label =
       xe::memory::JitCapabilityToShortString(status.capability);
   NSString* detail = [NSString stringWithUTF8String:status.detail.c_str()];
@@ -77,11 +78,17 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 }  // namespace
 
 @interface XenraAppDelegate ()
-@property(nonatomic, strong) XenraMetalView* metalView;
-@property(nonatomic, strong) UILabel* statusLabel;
+@property(nonatomic, retain) XenraMetalView* metalView;
+@property(nonatomic, retain) UILabel* statusLabel;
+@property(nonatomic, retain) id<MTLDevice> device;
+@property(nonatomic, assign) NSInteger probeCount;
 @end
 
-@implementation XenraAppDelegate
+// Manual reference counting (see ios/CMakeLists.txt), so the surface is a
+// raw pointer with explicit new/delete rather than a property.
+@implementation XenraAppDelegate {
+  xe::ui::IosUIViewSurface* surface_;
+}
 
 - (BOOL)application:(UIApplication*)application
     didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
@@ -116,39 +123,72 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   self.window.rootViewController = root;
   [self.window makeKeyAndVisible];
 
-  [self refreshStatus];
-  return YES;
-}
-
-- (void)refreshStatus {
-  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  self.device = MTLCreateSystemDefaultDevice();
 
   // Drive the real surface class rather than touching the layer directly, so
   // this exercises the code the presenter will use rather than something that
-  // merely resembles it.
-  xe::ui::IosUIViewSurface surface(self.metalView);
-  CAMetalLayer* layer = surface.GetOrCreateMetalLayer();
-  if (layer && device) {
-    layer.device = device;
+  // merely resembles it. Created once here; refreshStatus only reads it.
+  surface_ = new xe::ui::IosUIViewSurface(self.metalView);
+  CAMetalLayer* layer = surface_->GetOrCreateMetalLayer();
+  if (layer && self.device) {
+    layer.device = self.device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = YES;
   }
 
+  UITapGestureRecognizer* tap =
+      [[UITapGestureRecognizer alloc] initWithTarget:self
+                                              action:@selector(refreshStatus)];
+  [root.view addGestureRecognizer:tap];
+  [tap release];
+
+  [self refreshStatus];
+
+  // The JIT answer is a moving target on iOS: the enabler attaches seconds
+  // after launch, and only that attach lets generated code run (see the
+  // MEASURED notes in docs/ios-build.md). Re-probe until it lands instead of
+  // reporting one stale snapshot forever. Each pass is one page
+  // map/write/protect/execute - microseconds.
+  [NSTimer scheduledTimerWithTimeInterval:2.0
+                                   target:self
+                                 selector:@selector(refreshStatus)
+                                 userInfo:nil
+                                  repeats:YES];
+
+  return YES;
+}
+
+- (void)refreshStatus {
+  ++self.probeCount;
+
   uint32_t width = 0, height = 0;
-  const bool have_size = surface.GetSize(width, height);
-  const double scale = surface.GetBackingScale();
+  const bool have_size = surface_ && surface_->GetSize(width, height);
+  const double scale = surface_ ? surface_->GetBackingScale() : 1.0;
+  CAMetalLayer* layer = surface_ ? surface_->GetOrCreateMetalLayer() : nil;
 
   NSMutableString* text = [NSMutableString string];
-  [text appendString:@"Xenra iOS - pipeline check\n\n"];
+  [text appendString:@"Xenra iOS - pipeline check\n"];
+  [text appendFormat:
+            @"re-test #%ld  (the JIT enabler attaches after launch; tap to "
+            @"re-test now)\n\n",
+            (long)self.probeCount];
   [text appendFormat:@"%@\n\n", DescribeJitStatus()];
-  [text appendFormat:@"%@\n\n", DescribeMetal(device)];
+  [text appendFormat:@"%@\n\n", DescribeMetal(self.device)];
   [text appendFormat:@"Surface: %@  layer=%@\n",
                      have_size ? [NSString stringWithFormat:@"%ux%u @%.1fx",
-                                                           width, height, scale]
+                                                          width, height, scale]
                                : @"not ready",
                      layer ? @"ok" : @"NULL"];
 
   self.statusLabel.text = text;
+}
+
+- (void)dealloc {
+  delete surface_;
+  [_metalView release];
+  [_statusLabel release];
+  [_device release];
+  [super dealloc];
 }
 
 @end

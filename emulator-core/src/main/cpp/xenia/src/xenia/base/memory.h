@@ -123,6 +123,17 @@ struct JitStatus {
 // generated code. Safe to call before the emulator is initialised.
 const JitStatus& QueryJitStatus();
 
+// Re-runs the real probe uncached and returns the fresh answer. The cached
+// QueryJitStatus() is a snapshot of one instant, and on iOS that instant can
+// be too early: JIT enablers (StikDebug, eSign's JIT mode) attach a debugger
+// seconds after launch, and only that attach marks the process CS_DEBUGGED.
+// MEASURED on iPadOS 26.4.2 (2026-08-28): probed at +70 ms under a
+// get-task-allow signature, the W^X execute still faults; probed after the
+// attach it passes. Anything that runs later than startup - a diagnostics
+// screen, and the emulator's own backend init once it exists - must ask again
+// rather than trust the first answer.
+JitStatus QueryJitStatusRefresh();
+
 // Stable short label for a capability - "ON", "OFF", "TOGGLE", "?".
 const char* JitCapabilityToShortString(JitCapability capability);
 
