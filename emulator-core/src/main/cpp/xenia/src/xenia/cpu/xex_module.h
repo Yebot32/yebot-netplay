@@ -49,8 +49,14 @@ static_assert(sizeof(InfoCacheFlags) == 4,
 inline void AtomicSetInfoCacheFlags(InfoCacheFlags* slot, InfoCacheFlags bits) {
   uint32_t mask;
   std::memcpy(&mask, &bits, sizeof(mask));
+#if XE_PLATFORM_IOS
+  // Apple's libc++ gates std::atomic_ref behind -fexperimental-library; the
+  // __atomic builtins give the same lock-free fetch_or on arm64 without it.
+  __atomic_fetch_or(reinterpret_cast<uint32_t*>(slot), mask, __ATOMIC_RELAXED);
+#else
   std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(slot))
       .fetch_or(mask, std::memory_order_relaxed);
+#endif
 }
 
 struct XexInfoCache {
