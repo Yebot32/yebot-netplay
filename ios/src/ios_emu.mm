@@ -256,9 +256,9 @@ class IosInputDriver final : public xe::hid::InputDriver {
   IosInputDriver(Window* window, size_t window_z_order)
       : InputDriver(window, window_z_order) {}
 
-  X_STATUS Setup() override { return X_STATUS_SUCCESS; }
+  xe::X_STATUS Setup() override { return X_STATUS_SUCCESS; }
 
-  X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
+  xe::X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
                            xe::X_INPUT_CAPABILITIES* out_caps) override {
     if (user_index != 0) {
       return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -271,7 +271,7 @@ class IosInputDriver final : public xe::hid::InputDriver {
     return X_ERROR_SUCCESS;
   }
 
-  X_RESULT GetState(uint32_t user_index, xe::X_INPUT_STATE* out_state) override {
+  xe::X_RESULT GetState(uint32_t user_index, xe::X_INPUT_STATE* out_state) override {
     if (user_index != 0) {
       return X_ERROR_DEVICE_NOT_CONNECTED;
     }
@@ -286,13 +286,13 @@ class IosInputDriver final : public xe::hid::InputDriver {
     return X_ERROR_SUCCESS;
   }
 
-  X_RESULT SetState(uint32_t user_index,
+  xe::X_RESULT SetState(uint32_t user_index,
                     xe::X_INPUT_VIBRATION* vibration) override {
     // No rumble on iOS yet; report success so games do not warn.
     return X_ERROR_SUCCESS;
   }
 
-  X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
+  xe::X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         xe::X_INPUT_KEYSTROKE* out_keystroke) override {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -518,7 +518,7 @@ int xe_ios_initialize(const char* documents_dir, const char* caches_dir) {
   // The iOS pump never blocks the present thread (see IosWindow).
   cvars::host_present_from_non_ui_thread = true;
 
-  xe::config::SetupConfig(g_documents_dir);
+  config::SetupConfig(g_documents_dir);
 
   g_context = std::make_unique<IosWindowedAppContext>();
   // The context was constructed on this (main) thread, so ui_thread_id_ is
