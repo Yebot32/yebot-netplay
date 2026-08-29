@@ -388,6 +388,15 @@ class IosEmuApp {
     g_status.store(1, std::memory_order_relaxed);
     g_status_detail = "booting";
     launch_path_ = path;
+    // The emulator's executable regions (guest trampolines, code cache
+    // execute view) were created when the app launched - possibly before
+    // the JIT enabler's script attached, in which case the launch-time
+    // prepare found nothing to talk to. Run the prepare now, while the
+    // script is attached; the detach follows SetupSubsystems on the emu
+    // thread (protocol order: all prepares, then detach).
+    if (emu_->processor() && emu_->processor()->backend()) {
+      emu_->processor()->backend()->Jit26PrepareRegionsIos();
+    }
     emu_thread_ = std::thread(&IosEmuApp::EmuThreadMain, this);
   }
 

@@ -333,20 +333,27 @@ class CodeCacheBase : public CodeCache {
   // introduced after Jit26Detach() cannot be prepared, which is exactly why
   // the detach belongs to the boot path AFTER backend init, not to the probe.
   //
-  // Returning false is not fatal here: the JIT status gate is what decides
-  // whether booting happens at all, and a genuine no-JIT device fails with a
-  // clear report instead of a half-initialised backend.
-  void PrepareExecuteRegionIos() {
+  // Safe to call repeatedly (idempotent): the launch-time call runs while no
+  // enabler may be attached yet, and Backend::Jit26PrepareRegionsIos calls
+  // this again once one has attached. Returns false when the region is still
+  // unprepared, which is not fatal here - the JIT status gate is what decides
+  // whether booting happens at all.
+  bool PrepareExecuteRegionIos() {
+    if (jit26_prepared_) {
+      return true;
+    }
     if (xe::memory::Jit26PrepareRegion(generated_code_execute_base_,
                                        kGeneratedCodeSize)) {
+      jit26_prepared_ = true;
       XELOGI("iOS JIT: code cache execute region prepared via the JIT "
              "enabler script ({} KB)",
              kGeneratedCodeSize / 1024);
-    } else {
-      XELOGW("iOS JIT: code cache execute region was NOT prepared - no JIT "
-             "enabler script is attached; generated code will fault on "
-             "execute");
+      return true;
     }
+    XELOGW("iOS JIT: code cache execute region was NOT prepared - no JIT "
+           "enabler script is attached; generated code will fault on "
+           "execute");
+    return false;
   }
 #endif
 
@@ -680,6 +687,11 @@ class CodeCacheBase : public CodeCache {
   uint8_t* generated_code_execute_base_ = nullptr;
   uint8_t* generated_code_write_base_ = nullptr;
   size_t generated_code_offset_ = 0;
+#if XE_PLATFORM_IOS
+  // Set once the execute view has been prepared through the JIT enabler
+  // script; guards the idempotent prepare.
+  bool jit26_prepared_ = false;
+#endif
   // Last 64 MiB step logged by CheckCapacity.
   size_t capacity_log_mark_ = 0;
   std::atomic<size_t> generated_code_commit_mark_ = {0};

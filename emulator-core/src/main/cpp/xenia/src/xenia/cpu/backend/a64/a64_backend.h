@@ -176,6 +176,11 @@ class A64Backend : public Backend {
 
   void RecordMMIOExceptionForGuestInstruction(void* host_address);
 
+  // iOS 26+ (TXM/SPTM): runs the universal protocol's prepare over both
+  // executable regions this backend owns - the guest trampoline region and
+  // the code cache execute view. Idempotent; see Backend::Jit26PrepareRegionsIos.
+  bool Jit26PrepareRegionsIos() override;
+
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);

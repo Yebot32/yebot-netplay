@@ -867,6 +867,34 @@ A64Backend::~A64Backend() {
   }
 }
 
+bool A64Backend::Jit26PrepareRegionsIos() {
+#if XE_PLATFORM_IOS
+  bool ok = true;
+  const size_t trampoline_total_size =
+      kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES;
+  if (guest_trampoline_mapping_ != memory::kFileMappingHandleInvalid &&
+      guest_trampoline_memory_) {
+    if (!memory::Jit26PrepareRegion(guest_trampoline_memory_,
+                                    trampoline_total_size)) {
+      // Already prepared is indistinguishable from refused here; both keep
+      // the process alive, and the boot gate reports what the probe saw.
+      ok = false;
+    } else {
+      XELOGI("A64Backend: guest trampoline region prepared for boot");
+    }
+  }
+  if (code_cache_) {
+    // The code cache is owned through the base CodeCache interface; the
+    // iOS prepare lives on the CRTP base and is idempotent.
+    auto* base = static_cast<CodeCacheBase<A64CodeCache>*>(code_cache());
+    ok = base->PrepareExecuteRegionIos() && ok;
+  }
+  return ok;
+#else
+  return false;
+#endif
+}
+
 bool A64Backend::Initialize(Processor* processor) {
   if (!Backend::Initialize(processor)) {
     return false;

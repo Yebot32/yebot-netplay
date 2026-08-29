@@ -67,7 +67,12 @@ NSString* DiagnosticsLogPath() {
   dispatch_once(&once, ^{
     NSString* docs = NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    path = [docs stringByAppendingPathComponent:@"xenra-jit-log.txt"];
+    // MRC: stringByAppendingPathComponent returns an AUTORELEASED string.
+    // Stored in a static it would be freed at the next pool drain and leave
+    // this pointer dangling - the second caller would message whatever
+    // object reused the memory (crash 2026-08-29 16:42:07, reported as
+    // "-[UILayoutGuide fileSystemRepresentation]"). Retain for the static.
+    path = [[docs stringByAppendingPathComponent:@"xenra-jit-log.txt"] retain];
   });
   return path;
 }
