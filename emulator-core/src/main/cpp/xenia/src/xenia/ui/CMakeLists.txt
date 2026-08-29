@@ -47,6 +47,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   # window and surface (ios/src), and surface_ios.mm is compiled by whoever
   # links xenia-ui (the shell adds it explicitly, matching how Android
   # compiles surface_android.cc into its own JNI layer).
+  #
+  # audio_helper.cc pulls in miniaudio, whose Apple path includes Foundation
+  # headers that only parse under ObjC. macOS gets away with C++ because the
+  # macOS SDK's CoreAudio does not transitively reach Foundation; the iOS SDK
+  # does. Force ObjC++ for this one TU.
+  set_source_files_properties(audio_helper.cc PROPERTIES LANGUAGE OBJCXX)
 elseif(APPLE)
   # xe_platform_sources globs *.cc only; .mm sources need explicit listing.
   target_sources(xenia-ui PRIVATE
