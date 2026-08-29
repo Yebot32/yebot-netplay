@@ -74,4 +74,26 @@ list(REMOVE_ITEM _xe_base_srcs "${_xe_base_mac_system}")
 list(APPEND _xe_base_srcs "${CMAKE_CURRENT_SOURCE_DIR}/ios/system_ios.mm")
 set_target_properties(xenia-base PROPERTIES SOURCES "${_xe_base_srcs}")
 
+# -----------------------------------------------------------------------------
+# miniupnpc + the netplay kernel sources, wired from HERE exactly as the
+# Android outer build does (emulator-core/src/main/cpp/CMakeLists.txt), so the
+# vendored xenia tree stays byte-identical to upstream and keeps merging
+# cleanly. Static only; the samples pull in a main().
+# -----------------------------------------------------------------------------
+set(UPNPC_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_STATIC ON  CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+add_subdirectory(emulator-core/src/main/cpp/xenia/third_party/miniupnpc EXCLUDE_FROM_ALL)
+
+target_include_directories(xenia-kernel PRIVATE
+    emulator-core/src/main/cpp/xenia/third_party/miniupnpc/include
+)
+target_link_libraries(xenia-kernel PRIVATE libminiupnpc-static)
+target_sources(xenia-kernel PRIVATE
+    emulator-core/src/main/cpp/xenia/src/xenia/kernel/upnp.cc
+    emulator-core/src/main/cpp/xenia/src/xenia/kernel/util/net_utils.cc
+    emulator-core/src/main/cpp/xenia/src/xenia/kernel/util/network_adapter_manager.cc
+)
+
 add_subdirectory(ios)

@@ -3,23 +3,17 @@
  * Xenra : iOS shell                                                          *
  ******************************************************************************
  *
- * Milestone 1: prove the pipeline, not the emulator.
+ * Milestone 2: the launcher.
  *
- * This app deliberately does NOT boot a game. It links the real xenia-base,
- * runs the real JIT probe, and brings up a real MTLDevice through the real
- * IosUIViewSurface, then puts the answers on screen. The point is to settle -
- * on hardware, in one launch - the questions that decide whether the rest of
- * the port is worth building:
- *
- *   1. Does the iOS toolchain compile this tree at all?
- *   2. Does codesigning and sideloading survive it?
- *   3. Can this process execute generated code? (see the note below)
- *   4. Does Metal come up, and on which GPU family?
- *
- * Question 3 is the one that matters most. Xenia has no PowerPC interpreter -
- * cpu/backend/ holds x64, a64 and a null stub that cannot execute anything -
- * so a device that refuses executable memory cannot run the 360 core at all,
- * at any speed. That is worth knowing before a UI is built on top of it.
+ * Two screens, one view controller:
+ *   - Library: the pipeline-check readout (JIT signature state, Metal, the
+ *     JIT-probe detail), a StikDebug handoff button, and the game list from
+ *     Documents/Games. Launching a title is gated on the live JIT probe - the
+ *     360 core has no PowerPC interpreter, so booting without JIT is a
+ *     guaranteed hang, not a risk.
+ *   - Game: the Metal view fullscreen plus a minimal on-screen controller,
+ *     driven through ios_emu.mm's C API. One title per process; "Exit" ends
+ *     the process (config, saves and shader caches are all on disk).
  */
 
 #import "XenraAppDelegate.h"
@@ -28,30 +22,88 @@
 #import <UIKit/UIKit.h>
 
 #include <string>
+#include <unistd.h>  // getpid, for the StikDebug handoff URL
 
 #include "XenraMetalView.h"
+#include "ios_emu.h"
 
 #include "xenia/base/memory.h"
+#include "xenia/hid/input.h"  // X_INPUT_GAMEPAD_* for the virtual pad
 #include "xenia/ui/surface_ios.h"
 
 namespace {
 
+// iOS 26 and later carry TXM/SPTM on supported hardware, where JIT needs the
+// universal breakpoint protocol and therefore the enabler's script - not just
+// a debugger attach. On those versions the StikDebug handoff always names the
+// script; on older iOS a plain attach is enough and the parameter is omitted,
+// exactly as the StikJIT integration guide specifies.
+bool IsIos26OrLater() {
+  return [NSProcessInfo processInfo].operatingSystemVersion.majorVersion >= 26;
+}
+
+NSString* DocumentsGamesDir() {
+  NSArray* dirs = NSSearchPathForDirectoriesInDomains(
+      NSDocumentDirectory, NSUserDomainMask, YES);
+  return [dirs.firstObject stringByAppendingPathComponent:@"Games"];
+}
+
+NSArray<NSString*>* ScanGames() {
+  NSString* dir = DocumentsGamesDir();
+  NSArray<NSURL*>* contents = [[NSFileManager defaultManager]
+      contentsOfDirectoryAtURL:[NSURL fileURLWithPath:dir]
+    includingPropertiesForKeys:@[ NSURLIsRegularFileKey ]
+                       options:0
+                         error:nil];
+  NSMutableArray<NSString*>* games = [NSMutableArray array];
+  NSArray<NSString*>* extensions = @[ @"iso", @"xex", @"zar", @"god",
+                                      @"con", @"live", @"pirs" ];
+  for (NSURL* url in contents) {
+    NSString* ext = url.pathExtension.lowercaseString;
+    if ([extensions containsObject:ext]) {
+      [games addObject:url.path];
+    }
+  }
+  // Newest container-first reads best on a TV-sized list; names differ more
+  // than dates do.
+  [games sortUsingComparator:^NSComparisonResult(NSString* a, NSString* b) {
+    return [a.lastPathComponent compare:b.lastPathComponent options:NSCaseInsensitiveSearch];
+  }];
+  return games;
+}
+
 // Runs the same probe the emulator would, fresh each call, so what is
 // displayed here is not a separate reimplementation that could drift from the
-// real answer - and so the screen can watch the JIT enabler's attach land.
-NSString* DescribeJitStatus() {
-  const xe::memory::JitStatus status = xe::memory::QueryJitStatusRefresh();
+// real answer. One probe per refresh: on iOS 26+ every probe prepares a page
+// through the enabler's script, so the caller probes exactly once.
+NSString* DescribeJitStatus(const xe::memory::JitStatus& status) {
   const char* label =
       xe::memory::JitCapabilityToShortString(status.capability);
   NSString* detail = [NSString stringWithUTF8String:status.detail.c_str()];
 
+  // The raw signature state, straight from csops - the two bits that decide
+  // everything, so a "no" on this screen says WHICH precondition failed.
+  const xe::memory::JitSignatureState sig =
+      xe::memory::QueryJitSignatureState();
+  NSString* signature;
+  if (!sig.queried) {
+    signature = @"Signature: unknown (csops unavailable)";
+  } else {
+    signature = [NSString
+        stringWithFormat:@"Signature: get-task-allow=%@  cs_debugged=%@",
+                         sig.get_task_allow ? @"YES" : @"NO",
+                         sig.cs_debugged ? @"YES" : @"NO"];
+  }
+
   if (status.capability == xe::memory::JitCapability::kUnavailable) {
     return [NSString
-        stringWithFormat:@"JIT: %s\n%@\n\nThe 360 core cannot run without it - "
-                         @"there is no PowerPC interpreter to fall back on.",
-                         label, detail];
+        stringWithFormat:@"JIT: %s\n%@\n%@\n\nThe 360 core cannot run without "
+                         @"it - there is no PowerPC interpreter to fall back "
+                         @"on.",
+                         label, signature, detail];
   }
-  return [NSString stringWithFormat:@"JIT: %s\n%@", label, detail];
+  return [NSString stringWithFormat:@"JIT: %s\n%@\n%@", label, signature,
+                                    detail];
 }
 
 NSString* DescribeMetal(id<MTLDevice> device) {
@@ -69,25 +121,35 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   } else if ([device supportsFamily:MTLGPUFamilyApple7]) {
     family = @"Apple7";
   }
-  NSString* argbuf =
-      device.argumentBuffersSupport >= MTLArgumentBuffersTier2 ? @"Tier2" : @"Tier1";
-  return [NSString stringWithFormat:@"Metal: %@\nFamily: %@   ArgBuffers: %@",
-                                    device.name, family, argbuf];
+  return [NSString stringWithFormat:@"Metal: %@ (%@)", device.name, family];
 }
 
 }  // namespace
 
 @interface XenraAppDelegate ()
-@property(nonatomic, retain) XenraMetalView* metalView;
+@property(nonatomic, retain) UIViewController* rootController;
 @property(nonatomic, retain) UILabel* statusLabel;
+@property(nonatomic, retain) UIButton* stikDebugButton;
+@property(nonatomic, retain) UITableView* gamesTable;
 @property(nonatomic, retain) id<MTLDevice> device;
 @property(nonatomic, assign) NSInteger probeCount;
+@property(nonatomic, retain) NSTimer* probeTimer;
+@property(nonatomic, retain) NSArray<NSString*>* games;
+@property(nonatomic, retain) UIView* gameView;
+@property(nonatomic, retain) XenraMetalView* metalView;
+@property(nonatomic, retain) CADisplayLink* displayLink;
+@property(nonatomic, retain) UILabel* hudLabel;
 @end
 
-// Manual reference counting (see ios/CMakeLists.txt), so the surface is a
-// raw pointer with explicit new/delete rather than a property.
+// Manual reference counting (see ios/CMakeLists.txt), matching the rest of
+// the tree.
 @implementation XenraAppDelegate {
-  xe::ui::IosUIViewSurface* surface_;
+  // Virtual-pad touch bookkeeping (main thread only).
+  CGPoint leftStickOrigin_;
+  bool leftStickActive_;
+  int buttons_;
+  short stickLX_, stickLY_, stickRX_, stickRY_;
+  unsigned char triggerLT_, triggerRT_;
 }
 
 - (BOOL)application:(UIApplication*)application
@@ -96,98 +158,513 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 
   UIViewController* root = [[UIViewController alloc] init];
   root.view.backgroundColor = UIColor.blackColor;
+  self.rootController = root;
 
-  self.metalView = [[XenraMetalView alloc] initWithFrame:root.view.bounds];
-  self.metalView.autoresizingMask =
-      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  [root.view addSubview:self.metalView];
-
-  self.statusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-  self.statusLabel.numberOfLines = 0;
-  self.statusLabel.textColor = UIColor.whiteColor;
-  self.statusLabel.font = [UIFont monospacedSystemFontOfSize:14.0
-                                                      weight:UIFontWeightRegular];
-  self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-  [root.view addSubview:self.statusLabel];
-
-  UILayoutGuide* safe = root.view.safeAreaLayoutGuide;
-  [NSLayoutConstraint activateConstraints:@[
-    [self.statusLabel.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
-                                                   constant:16.0],
-    [self.statusLabel.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor
-                                                    constant:-16.0],
-    [self.statusLabel.topAnchor constraintEqualToAnchor:safe.topAnchor
-                                               constant:16.0],
-  ]];
+  [self buildLibraryScreen];
 
   self.window.rootViewController = root;
   [self.window makeKeyAndVisible];
 
   self.device = MTLCreateSystemDefaultDevice();
+  self.games = ScanGames();
 
-  // Drive the real surface class rather than touching the layer directly, so
-  // this exercises the code the presenter will use rather than something that
-  // merely resembles it. Created once here; refreshStatus only reads it.
-  surface_ = new xe::ui::IosUIViewSurface(self.metalView);
-  CAMetalLayer* layer = surface_->GetOrCreateMetalLayer();
-  if (layer && self.device) {
-    layer.device = self.device;
-    layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    layer.framebufferOnly = YES;
+  int rc = xe_ios_initialize(
+      DocumentsGamesDir().stringByDeletingLastPathComponent.UTF8String,
+      NSTemporaryDirectory().UTF8String);
+  if (rc != 0) {
+    self.statusLabel.text = [self.statusLabel.text
+        stringByAppendingFormat:@"\n\nCore init FAILED (%d) - see the log in "
+                                 "Documents.", rc];
   }
-
-  UITapGestureRecognizer* tap =
-      [[UITapGestureRecognizer alloc] initWithTarget:self
-                                              action:@selector(refreshStatus)];
-  [root.view addGestureRecognizer:tap];
-  [tap release];
 
   [self refreshStatus];
 
   // The JIT answer is a moving target on iOS: the enabler attaches seconds
-  // after launch, and only that attach lets generated code run (see the
-  // MEASURED notes in docs/ios-build.md). Re-probe until it lands instead of
-  // reporting one stale snapshot forever. Each pass is one page
-  // map/write/protect/execute - microseconds.
-  [NSTimer scheduledTimerWithTimeInterval:2.0
-                                   target:self
-                                 selector:@selector(refreshStatus)
-                                 userInfo:nil
-                                  repeats:YES];
+  // after launch, and only that attach (plus, on iOS 26+, its script
+  // preparing the executable regions) lets generated code run. Re-probe on a
+  // timer until the answer is known; each pass is cheap.
+  self.probeTimer =
+      [NSTimer scheduledTimerWithTimeInterval:2.0
+                                       target:self
+                                     selector:@selector(refreshStatus)
+                                     userInfo:nil
+                                      repeats:YES];
 
   return YES;
+}
+
+- (void)buildLibraryScreen {
+  UIView* view = self.rootController.view;
+
+  self.statusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+  self.statusLabel.numberOfLines = 0;
+  self.statusLabel.textColor = UIColor.whiteColor;
+  self.statusLabel.font = [UIFont monospacedSystemFontOfSize:12.0
+                                                      weight:UIFontWeightRegular];
+  self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.statusLabel];
+  [self.statusLabel release];
+
+  UITapGestureRecognizer* tap =
+      [[UITapGestureRecognizer alloc] initWithTarget:self
+                                              action:@selector(refreshStatus)];
+  [self.statusLabel addGestureRecognizer:tap];
+  self.statusLabel.userInteractionEnabled = YES;
+  [tap release];
+
+  self.stikDebugButton = [UIButton buttonWithType:UIButtonTypeSystem];
+  [self.stikDebugButton setTitle:@"Enable JIT via StikDebug"
+                        forState:UIControlStateNormal];
+  self.stikDebugButton.titleLabel.font = [UIFont boldSystemFontOfSize:15.0];
+  self.stikDebugButton.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
+  [self.stikDebugButton setTitleColor:UIColor.systemBlueColor
+                             forState:UIControlStateNormal];
+  self.stikDebugButton.layer.cornerRadius = 10.0;
+  [self.stikDebugButton addTarget:self
+                           action:@selector(openStikDebug)
+                 forControlEvents:UIControlEventTouchUpInside];
+  self.stikDebugButton.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.stikDebugButton];
+  [self.stikDebugButton release];
+
+  self.gamesTable = [[UITableView alloc] initWithFrame:CGRectZero
+                                                 style:UITableViewStylePlain];
+  self.gamesTable.backgroundColor = UIColor.clearColor;
+  self.gamesTable.separatorColor = [UIColor colorWithWhite:0.3 alpha:1.0];
+  self.gamesTable.dataSource = self;
+  self.gamesTable.delegate = self;
+  self.gamesTable.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.gamesTable];
+  [self.gamesTable release];
+
+  UILayoutGuide* safe = view.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:@[
+    [self.statusLabel.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
+                                                   constant:16.0],
+    [self.statusLabel.trailingAnchor
+        constraintEqualToAnchor:safe.trailingAnchor
+                       constant:-16.0],
+    [self.statusLabel.topAnchor constraintEqualToAnchor:safe.topAnchor
+                                               constant:12.0],
+    [self.stikDebugButton.centerXAnchor
+        constraintEqualToAnchor:view.centerXAnchor],
+    [self.stikDebugButton.topAnchor
+        constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:12.0],
+    [self.gamesTable.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+    [self.gamesTable.trailingAnchor
+        constraintEqualToAnchor:safe.trailingAnchor],
+    [self.gamesTable.topAnchor
+        constraintEqualToAnchor:self.stikDebugButton.bottomAnchor constant:12.0],
+    [self.gamesTable.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+  ]];
 }
 
 - (void)refreshStatus {
   ++self.probeCount;
 
-  uint32_t width = 0, height = 0;
-  const bool have_size = surface_ && surface_->GetSize(width, height);
-  const double scale = surface_ ? surface_->GetBackingScale() : 1.0;
-  CAMetalLayer* layer = surface_ ? surface_->GetOrCreateMetalLayer() : nil;
+  // Exactly one probe per refresh - see DescribeJitStatus.
+  const xe::memory::JitStatus fresh = xe::memory::QueryJitStatusRefresh();
 
   NSMutableString* text = [NSMutableString string];
-  [text appendString:@"Xenra iOS - pipeline check\n"];
-  [text appendFormat:
-            @"re-test #%ld  (the JIT enabler attaches after launch; tap to "
-            @"re-test now)\n\n",
-            (long)self.probeCount];
-  [text appendFormat:@"%@\n\n", DescribeJitStatus()];
+  [text appendString:@"Xenra iOS\n"];
+  [text appendFormat:@"re-test #%ld  (tap this text to re-test)\n\n",
+                     (long)self.probeCount];
+  [text appendFormat:@"%@\n\n", DescribeJitStatus(fresh)];
   [text appendFormat:@"%@\n\n", DescribeMetal(self.device)];
-  [text appendFormat:@"Surface: %@  layer=%@\n",
-                     have_size ? [NSString stringWithFormat:@"%ux%u @%.1fx",
-                                                          width, height, scale]
-                               : @"not ready",
-                     layer ? @"ok" : @"NULL"];
+
+  const int status = xe_ios_status();
+  if (status != 0) {
+    [text appendFormat:@"Core: %d (%s)\n", status, xe_ios_status_detail()];
+  }
 
   self.statusLabel.text = text;
+
+  if (self.games.count == 0) {
+    [text appendString:@"\nNo games yet.\nCopy .iso / .god files into the "
+                        "app's Documents/Games folder (Files app, or Finder "
+                        "over USB), then tap this text to rescan."];
+    self.statusLabel.text = text;
+  }
+
+  if (fresh.capability != xe::memory::JitCapability::kUnavailable &&
+      fresh.capability != xe::memory::JitCapability::kUnknown) {
+    [self.probeTimer invalidate];
+    self.probeTimer = nil;
+  }
+  [self.gamesTable reloadData];
+}
+
+- (void)openStikDebug {
+  NSURLComponents* components =
+      [NSURLComponents componentsWithString:@"stikdebug://enable-jit"];
+  NSMutableArray<NSURLQueryItem*>* items = [NSMutableArray array];
+  [items addObject:[NSURLQueryItem queryItemWithName:@"bundle-id"
+                                               value:NSBundle.mainBundle
+                                                         .bundleIdentifier]];
+  [items addObject:[NSURLQueryItem queryItemWithName:@"pid"
+                                               value:[NSString
+                   stringWithFormat:@"%d", getpid()]]];
+  if (IsIos26OrLater()) {
+    // One developer-defined script, fixed in code - never a user setting.
+    [items addObject:[NSURLQueryItem queryItemWithName:@"script-name"
+                                                value:@"universal.js"]];
+  }
+  components.queryItems = items;
+
+  if (![UIApplication.sharedApplication canOpenURL:components.URL]) {
+    self.statusLabel.text = [self.statusLabel.text
+        stringByAppendingString:
+            @"\n\nStikDebug is not installed (or its scheme is blocked). "
+             "Install StikDebug, import a pairing file, connect "
+             "LocalDevVPN, then tap again."];
+    return;
+  }
+  [UIApplication.sharedApplication openURL:components.URL
+                                     options:@{}
+                           completionHandler:nil];
+}
+
+// ---------------------------------------------------------------------------
+// Game screen
+// ---------------------------------------------------------------------------
+
+- (void)launchGame:(NSString*)path {
+  const xe::memory::JitStatus jit = xe::memory::QueryJitStatusRefresh();
+  if (jit.capability == xe::memory::JitCapability::kUnavailable) {
+    UIAlertController* alert = [UIAlertController
+        alertControllerWithTitle:@"JIT is OFF"
+                         message:[NSString
+             stringWithFormat:@"%@\n\nUse the StikDebug button, attach with "
+                              "universal.js, then try again.",
+                              jit.detail.c_str()]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self.rootController presentViewController:alert animated:YES completion:nil];
+    return;
+  }
+
+  [self buildGameScreen];
+  int rc = xe_ios_boot(path.UTF8String);
+  if (rc != 0) {
+    [self endGameScreen];
+    UIAlertController* alert = [UIAlertController
+        alertControllerWithTitle:@"Boot refused"
+                         message:[NSString
+             stringWithFormat:@"%s", xe_ios_status_detail()]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self.rootController presentViewController:alert animated:YES completion:nil];
+    return;
+  }
+
+  self.displayLink =
+      [CADisplayLink displayLinkWithTarget:self
+                                  selector:@selector(displayLinkFired)];
+  self.displayLink.preferredFramesPerSecond = 60;
+  [self.displayLink addToRunLoop:NSRunLoop.mainRunLoop
+                         forMode:NSRunLoopCommonModes];
+}
+
+- (void)displayLinkFired {
+  xe_ios_pump();
+  const int status = xe_ios_status();
+  if (status < 0) {
+    self.hudLabel.text = [NSString
+        stringWithFormat:@"FAILED: %s", xe_ios_status_detail()];
+  } else if (status == 1) {
+    self.hudLabel.text = @"Booting... (first launch compiles shaders; this "
+                         "can take a while)";
+  } else if (status == 2) {
+    self.hudLabel.text = @"";
+  }
+}
+
+- (void)buildGameScreen {
+  UIView* view = self.rootController.view;
+
+  self.gameView = [[UIView alloc] initWithFrame:view.bounds];
+  self.gameView.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  self.gameView.backgroundColor = UIColor.blackColor;
+
+  self.metalView =
+      [[XenraMetalView alloc] initWithFrame:view.bounds];
+  self.metalView.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  [self.gameView addSubview:self.metalView];
+  [self.metalView release];
+
+  self.hudLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+  self.hudLabel.numberOfLines = 2;
+  self.hudLabel.textColor = UIColor.whiteColor;
+  self.hudLabel.font = [UIFont systemFontOfSize:12.0];
+  self.hudLabel.textAlignment = NSTextAlignmentCenter;
+  self.hudLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.gameView addSubview:self.hudLabel];
+  [self.hudLabel release];
+
+  UIButton* exit = [UIButton buttonWithType:UIButtonTypeSystem];
+  [exit setTitle:@"Exit" forState:UIControlStateNormal];
+  [exit addTarget:self
+           action:@selector(exitGame)
+ forControlEvents:UIControlEventTouchUpInside];
+  exit.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.gameView addSubview:exit];
+
+  // Point the core's surface at the view that is actually on screen.
+  xe_ios_set_game_view(self.metalView);
+
+  [self buildVirtualPad];
+
+  [view addSubview:self.gameView];
+  [self.gameView release];
+
+  [NSLayoutConstraint activateConstraints:@[
+    [self.hudLabel.centerXAnchor constraintEqualToAnchor:view.centerXAnchor],
+    [self.hudLabel.topAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide
+                                                          .topAnchor
+                                            constant:8.0],
+    [exit.trailingAnchor
+        constraintEqualToAnchor:view.safeAreaLayoutGuide.trailingAnchor
+                       constant:-12.0],
+    [exit.topAnchor constraintEqualToAnchor:view.safeAreaLayoutGuide.topAnchor
+                                   constant:4.0],
+  ]];
+}
+
+- (void)exitGame {
+  [self.displayLink invalidate];
+  self.displayLink = nil;
+  xe_ios_shutdown();
+  [self.gameView removeFromSuperview];
+  self.gameView = nil;
+  self.metalView = nil;
+  self.hudLabel = nil;
+  exit(0);  // One title per process; state is all on disk.
+}
+
+// --- Virtual pad ------------------------------------------------------------
+
+- (void)buildVirtualPad {
+  UIView* view = self.gameView;
+  UILayoutGuide* safe = view.safeAreaLayoutGuide;
+
+  // Left stick: one draggable disc.
+  UIView* stick = [[UIView alloc] initWithFrame:CGRectZero];
+  stick.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+  stick.layer.cornerRadius = 48.0;
+  stick.layer.borderWidth = 1.5;
+  stick.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+  stick.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:stick];
+  [stick release];
+  stick.tag = 77;
+
+  // Face buttons, bumpers, start/back: compact grid on the right.
+  NSDictionary* actions = @{
+    @"A" : @(X_INPUT_GAMEPAD_A),
+    @"B" : @(X_INPUT_GAMEPAD_B),
+    @"X" : @(X_INPUT_GAMEPAD_X),
+    @"Y" : @(X_INPUT_GAMEPAD_Y),
+    @"LB" : @(X_INPUT_GAMEPAD_LEFT_SHOULDER),
+    @"RB" : @(X_INPUT_GAMEPAD_RIGHT_SHOULDER),
+    @"LT" : @(-1),
+    @"RT" : @(-2),
+    @"ST" : @(X_INPUT_GAMEPAD_START),
+    @"BK" : @(X_INPUT_GAMEPAD_BACK),
+    @"U" : @(X_INPUT_GAMEPAD_DPAD_UP),
+    @"D" : @(X_INPUT_GAMEPAD_DPAD_DOWN),
+    @"L" : @(X_INPUT_GAMEPAD_DPAD_LEFT),
+    @"R" : @(X_INPUT_GAMEPAD_DPAD_RIGHT),
+  };
+  NSArray<NSArray<NSString*>*>* rows = @[
+    @[ @"LT", @"LB", @"RB", @"RT" ],
+    @[ @"BK", @"X", @"Y", @"ST" ],
+    @[ @"U", @"A", @"B", @"R" ],
+    @[ @"L", @"", @"D", @"" ],
+  ];
+  NSMutableArray<NSLayoutConstraint*>* pad = [NSMutableArray array];
+  UIView* above = nil;
+  for (NSUInteger r = 0; r < rows.count; ++r) {
+    UIView* leftAnchorView = nil;
+    for (NSUInteger c = 0; c < rows[r].count; ++c) {
+      NSString* name = rows[r][c];
+      if (name.length == 0) {
+        continue;
+      }
+      UIButton* b = [UIButton buttonWithType:UIButtonTypeSystem];
+      b.layer.cornerRadius = 20.0;
+      b.layer.borderWidth = 1.0;
+      b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.4].CGColor;
+      b.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
+      [b setTitle:name forState:UIControlStateNormal];
+      int code = actions[name].intValue;
+      bool trigger = code == -1 || code == -2;
+      b.tag = code;
+      [b addTarget:self
+                action:@selector(padButtonDown:)
+      forControlEvents:UIControlEventTouchDown];
+      [b addTarget:self
+                action:@selector(padButtonUp:)
+      forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside
+          | UIControlEventTouchCancel];
+      if (trigger) {
+        b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+      }
+      b.translatesAutoresizingMaskIntoConstraints = NO;
+      [view addSubview:b];
+
+      [pad addObject:[b.widthAnchor constraintEqualToConstant:44.0]];
+      [pad addObject:[b.heightAnchor constraintEqualToConstant:44.0]];
+      if (leftAnchorView) {
+        [pad addObject:[b.leadingAnchor
+                           constraintEqualToAnchor:leftAnchorView.trailingAnchor
+                                          constant:6.0]];
+      } else {
+        [pad addObject:[b.trailingAnchor
+                           constraintEqualToAnchor:safe.trailingAnchor
+                                          constant:-12.0]];
+      }
+      if (above) {
+        [pad addObject:[b.topAnchor constraintEqualToAnchor:above.bottomAnchor
+                                                   constant:6.0]];
+      } else {
+        [pad addObject:[b.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor
+                                                      constant:-16.0]];
+      }
+      leftAnchorView = b;
+      [b release];
+    }
+    if (leftAnchorView) {
+      above = leftAnchorView;  // walk upward: next row sits above this one
+    }
+  }
+  [NSLayoutConstraint activateConstraints:pad];
+
+  [NSLayoutConstraint activateConstraints:@[
+    [stick.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
+                                        constant:20.0],
+    [stick.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor
+                                       constant:-24.0],
+    [stick.widthAnchor constraintEqualToConstant:96.0],
+    [stick.heightAnchor constraintEqualToConstant:96.0],
+  ]];
+
+  // Touch handling: one gesture on the whole game view routes by hit-test.
+  UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc]
+      initWithTarget:self
+              action:@selector(stickPanned:)];
+  [stick addGestureRecognizer:pan];
+  [pan release];
+}
+
+- (void)stickPanned:(UIPanGestureRecognizer*)pan {
+  UIView* stick = [pan view];
+  if (pan.state == UIGestureRecognizerStateBegan) {
+    leftStickOrigin_ = [pan locationInView:stick];
+    leftStickActive_ = true;
+  } else if (pan.state == UIGestureRecognizerStateChanged) {
+    CGPoint p = [pan locationInView:stick];
+    float dx = (p.x - leftStickOrigin_.x) / 48.0f;
+    float dy = (p.y - leftStickOrigin_.y) / 48.0f;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len > 1.0f) {
+      dx /= len;
+      dy /= len;
+    }
+    stickLX_ = (short)(dx * 32767.0f);
+    stickLY_ = (short)(dy * -32767.0f);
+  } else if (pan.state == UIGestureRecognizerStateEnded ||
+             pan.state == UIGestureRecognizerStateCancelled) {
+    leftStickActive_ = false;
+    stickLX_ = 0;
+    stickLY_ = 0;
+  }
+  [self pushInput];
+}
+
+- (void)padButtonDown:(UIButton*)b {
+  int code = (int)b.tag;
+  if (code == -1) {
+    triggerLT_ = 255;
+  } else if (code == -2) {
+    triggerRT_ = 255;
+  } else {
+    buttons_ |= code;
+  }
+  [self pushInput];
+}
+
+- (void)padButtonUp:(UIButton*)b {
+  int code = (int)b.tag;
+  if (code == -1) {
+    triggerLT_ = 0;
+  } else if (code == -2) {
+    triggerRT_ = 0;
+  } else {
+    buttons_ &= ~code;
+  }
+  [self pushInput];
+}
+
+- (void)pushInput {
+  xe_ios_input_set(buttons_, stickLX_, stickLY_, stickRX_, stickRY_,
+                   triggerLT_, triggerRT_);
+}
+
+// --- UITableViewDataSource / Delegate ---------------------------------------
+
+- (NSInteger)tableView:(UITableView*)tableView
+    numberOfRowsInSection:(NSInteger)section {
+  return self.games.count;
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView
+        cellForRowAtIndexPath:(NSIndexPath*)indexPath {
+  static NSString* reuse = @"game";
+  UITableViewCell* cell =
+      [tableView dequeueReusableCellWithIdentifier:reuse];
+  if (!cell) {
+    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                  reuseIdentifier:reuse];
+    [cell release];
+    cell.textLabel.textColor = UIColor.whiteColor;
+    cell.textLabel.font = [UIFont systemFontOfSize:14.0];
+    cell.backgroundColor = UIColor.clearColor;
+  }
+  NSString* path = self.games[indexPath.row];
+  cell.textLabel.text = path.lastPathComponent;
+  cell.detailTextLabel.text = [NSString
+      stringWithFormat:@"%lu KB", (unsigned long)([[[NSFileManager defaultManager]
+          attributesOfItemAtPath:path error:nil] fileSize] / 1024)];
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView
+    didSelectRowAtIndexPath:(NSIndexPath*)indexPath {
+  [tableView deselectRowAtIndexPath:indexPath animated:YES];
+  [self launchGame:self.games[indexPath.row]];
 }
 
 - (void)dealloc {
-  delete surface_;
-  [_metalView release];
+  [self.probeTimer invalidate];
+  [self.displayLink invalidate];
   [_statusLabel release];
+  [_stikDebugButton release];
+  [_gamesTable release];
+  [_games release];
+  [_probeTimer release];
+  [_displayLink release];
+  [_gameView release];
+  [_metalView release];
+  [_hudLabel release];
   [_device release];
+  [_rootController release];
+  [_window release];
   [super dealloc];
 }
 

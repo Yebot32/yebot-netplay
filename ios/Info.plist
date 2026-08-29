@@ -93,6 +93,21 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 
+	<!-- The StikDebug handoff (stikdebug://enable-jit?...) is opened from the
+	     JIT screen. canOpenURL: requires the scheme declared here or iOS
+	     answers NO without ever asking StikDebug. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>stikdebug</string>
+	</array>
+
+	<!-- Game library: users copy XISO/GOD dumps into the app's Documents
+	     folder (or import through the Files app in place). -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>
