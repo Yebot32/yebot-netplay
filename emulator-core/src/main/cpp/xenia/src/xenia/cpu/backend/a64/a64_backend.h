@@ -11,10 +11,12 @@
 #define XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 
 #include <atomic>
+#include <filesystem>
 #include <memory>
 
 #include "xenia/base/bit_map.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/memory.h"
 #include "xenia/cpu/backend/backend.h"
 
 namespace xe {
@@ -198,6 +200,16 @@ class A64Backend : public Backend {
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;
   bool guest_trampolines_sub4gb_ = false;
+#if XE_PLATFORM_IOS
+  // iOS 26+ (TXM/SPTM): the trampoline region is split into an execute view
+  // (prepared once through the JIT enabler script) and a writable alias, so
+  // trampolines built lazily after Jit26Detach() can still be written. The
+  // two views are offsets-identical views of one shared mapping.
+  xe::memory::FileMappingHandle guest_trampoline_mapping_ =
+      xe::memory::kFileMappingHandleInvalid;
+  std::filesystem::path guest_trampoline_mapping_name_;
+  uint8_t* guest_trampoline_write_base_ = nullptr;
+#endif
 };
 
 }  // namespace a64

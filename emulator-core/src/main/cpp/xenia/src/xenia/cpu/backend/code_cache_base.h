@@ -231,6 +231,9 @@ class CodeCacheBase : public CodeCache {
           indirection_table_base_bias_ = 0;
           encoded_indirection_ = false;
           generated_code_map_.reserve(kMaximumFunctionCount);
+#if XE_PLATFORM_IOS
+          PrepareExecuteRegionIos();
+#endif
           return true;
         }
         xe::memory::DeallocFixed(indirection_table_base_, kIndirectionTableSize,
@@ -314,9 +317,38 @@ class CodeCacheBase : public CodeCache {
       return false;
     }
 
+#if XE_PLATFORM_IOS
+    PrepareExecuteRegionIos();
+#endif
     generated_code_map_.reserve(kMaximumFunctionCount);
     return true;
   }
+
+#if XE_PLATFORM_IOS
+  // iOS 26+ (TXM/SPTM): the execute view must be prepared through the JIT
+  // enabler's debug script (StikDebug universal.js) before any of it can
+  // execute - mprotect alone is not sufficient there. One prepare call covers
+  // the whole reservation: the cache never maps generated code anywhere else,
+  // and everything it will ever commit lives inside this range. A region
+  // introduced after Jit26Detach() cannot be prepared, which is exactly why
+  // the detach belongs to the boot path AFTER backend init, not to the probe.
+  //
+  // Returning false is not fatal here: the JIT status gate is what decides
+  // whether booting happens at all, and a genuine no-JIT device fails with a
+  // clear report instead of a half-initialised backend.
+  void PrepareExecuteRegionIos() {
+    if (xe::memory::Jit26PrepareRegion(generated_code_execute_base_,
+                                       kGeneratedCodeSize)) {
+      XELOGI("iOS JIT: code cache execute region prepared via the JIT "
+             "enabler script ({} KB)",
+             kGeneratedCodeSize / 1024);
+    } else {
+      XELOGW("iOS JIT: code cache execute region was NOT prepared - no JIT "
+             "enabler script is attached; generated code will fault on "
+             "execute");
+    }
+  }
+#endif
 
   // Encode a host address as a 32-bit indirection entry:
   //  - bit 31 clear: rel32 offset from code cache base (target in cache).
