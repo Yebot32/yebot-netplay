@@ -161,7 +161,15 @@ jobs:
     # iOS cross toolchain would produce one that cannot run. Build it natively
     # first, then hand it to the cross configure. slangc comes from the pinned
     # Slang release; the shader rules glob .slang/*/bin/slangc under the xenia
-    # tree root, which is where the script puts it when run from there.
+    # tree root, which is where the script puts it when run from there - and
+    # BOTH configures (native and iOS cross) hard-require slangc at configure
+    # time (xe_shader_rules_slang fatals without it), so this runs FIRST.
+    - name: Download slangc
+      working-directory: emulator-core/src/main/cpp/xenia
+      run: |
+        python3 xenia-build.py slang
+        ls -la .slang/*/bin/
+
     - name: Build host shader tool (native macOS)
       run: |
         cmake -G Ninja \
@@ -173,12 +181,6 @@ jobs:
           -DXENIA_ENABLE_LTO=OFF
         cmake --build build-host --target xenia-shader-cc --parallel $(sysctl -n hw.ncpu)
         ls -la build-host/host_tools/
-
-    - name: Download slangc
-      working-directory: emulator-core/src/main/cpp/xenia
-      run: |
-        python3 xenia-build.py slang
-        ls -la .slang/*/bin/
 
     ##################################################################
     # Configure
