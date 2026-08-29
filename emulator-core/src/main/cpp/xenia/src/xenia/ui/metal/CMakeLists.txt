@@ -26,20 +26,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 else()
   target_link_libraries(xenia-ui-metal PUBLIC "-framework AppKit")
 endif()
-# iOS, exactly as Android does above in gpu/vulkan: the shader pipeline runs
-# the host tool xenia-shader-cc (and slangc), and neither can run in a
-# cross-compile - building xenia-shader-cc under the iOS toolchain produces an
-# arm64-iOS binary the build machine cannot execute. Consume the committed
-# bytecode headers under ../shaders/bytecode/metal/ instead.
-#
-# MILESTONE 2 MUST REVISIT THIS. Those committed metallibs were generated with
-# `-sdk macosx`, and the iOS Metal loader rejects macOS AIR at runtime. Nothing
-# links these targets yet, so it does not bite today; it will the moment the
-# renderer is wired up. The fix is a two-stage build (host tool first, then
-# cross) or committed iOS-SDK bytecode, not a flag.
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-  xe_shader_rules_metal(xenia-ui-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
-  xe_shader_rules_slang(xenia-ui-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
-                        TARGET msl)
+# Same host-tool story as gpu/metal above: on iOS the rules run with the
+# prebuilt native xenia-shader-cc (XE_FORCE_HOST_SHADER_CC) and emit
+# iphoneos-targeted AIR via XE_METAL_TARGET_SDK.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(XE_METAL_TARGET_SDK "iphoneos")
+  set(XE_METAL_MIN_VERSION "16.0")
 endif()
+xe_shader_rules_metal(xenia-ui-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
+xe_shader_rules_slang(xenia-ui-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+                      TARGET msl)
 xe_target_defaults(xenia-ui-metal)

@@ -43,6 +43,31 @@
 #include "DirStackFileIncluder.h"
 #include "SPIRV/GlslangToSpv.h"
 #include "glslang/Public/ResourceLimits.h"
+
+// Metal target selection. XE_METAL_MIN_OS is baked at build time from the
+// macOS deployment target; cross builds that run the MSL rules for an iOS
+// target override everything via the environment:
+//   XE_METAL_TARGET_SDK=iphoneos  -> -sdk iphoneos, -std=ios-metal2.3
+//   XE_METAL_MIN_VERSION=16.0     -> -mios-version-min=16.0
+// Unset environment keeps the historical macOS behaviour byte-for-byte.
+struct MetalTarget {
+  const char* sdk;
+  std::string std_flag;
+  std::string min_flag;
+};
+
+static MetalTarget QueryMetalTarget() {
+  const char* sdk_env = std::getenv("XE_METAL_TARGET_SDK");
+  const bool ios = sdk_env && std::strcmp(sdk_env, "iphoneos") == 0;
+  const char* min_env = std::getenv("XE_METAL_MIN_VERSION");
+  std::string min_os = (min_env && *min_env) ? min_env : XE_METAL_MIN_OS;
+  MetalTarget target;
+  target.sdk = ios ? "iphoneos" : "macosx";
+  target.std_flag = ios ? "-std=ios-metal2.3" : "-std=macos-metal2.3";
+  target.min_flag =
+      (ios ? "-mios-version-min=" : "-mmacosx-version-min=") + min_os;
+  return target;
+}
 #include "glslang/Public/ShaderLang.h"
 #include "spirv-tools/libspirv.hpp"
 #include "spirv-tools/optimizer.hpp"
@@ -466,6 +491,7 @@ int main(int argc, char** argv) {
 
   if (msl_mode) {
 #ifdef XE_SHADER_CC_METAL
+    const MetalTarget metal_target = QueryMetalTarget();
     auto tmp_dir = std::filesystem::temp_directory_path();
     auto tag = identifier + "_" + std::to_string(::getpid());
     auto air_path = tmp_dir / (tag + ".air");
@@ -480,12 +506,12 @@ int main(int argc, char** argv) {
     std::vector<std::string> metal_cmd = {
         "xcrun",
         "-sdk",
-        "macosx",
+        metal_target.sdk,
         "metal",
         "-x",
         "metal",
-        "-std=macos-metal2.3",
-        "-mmacosx-version-min=" XE_METAL_MIN_OS,
+        metal_target.std_flag,
+        metal_target.min_flag,
         "-D",
         "SHADING_LANGUAGE_MSL_XE=1",
         "-w",
@@ -515,8 +541,8 @@ int main(int argc, char** argv) {
       cleanup();
       return 1;
     }
-    if (RunCommand({"xcrun", "-sdk", "macosx", "metallib", air_path.string(),
-                    "-o", lib_path.string()}) != 0) {
+    if (RunCommand({"xcrun", "-sdk", metal_target.sdk, "metallib",
+                    air_path.string(), "-o", lib_path.string()}) != 0) {
       std::fprintf(stderr, "metallib failed for %s\n",
                    input_path.string().c_str());
       cleanup();
@@ -700,6 +726,7 @@ int main(int argc, char** argv) {
     // slang_msl_mode: slangc emits .metal source, then xcrun metal/metallib
     // produce the metallib bytes — same final stage as the existing --msl.
 #ifdef XE_SHADER_CC_METAL
+    const MetalTarget metal_target = QueryMetalTarget();
     // Slang renames the source `main` entry point to `main_0` in MSL output
     // (it's reserved territory in C++/MSL). The runtime metal loaders look
     // up the function by the legacy xesl name `entry_xe`, so rewrite the
@@ -780,12 +807,11 @@ int main(int argc, char** argv) {
       std::filesystem::remove(lib_path, mec);
     };
     // Pin the deployment target so the AIR (and the metallib linked from it)
-    // carries XE_METAL_MIN_OS. Without this, the macOS 26 SDK stamps the
-    // SDK-default target into the library (deployment target 0x00020008),
+    // carries the target's minimum OS. Without this, the macOS 26 SDK stamps
+    // the SDK-default target into the library (deployment target 0x00020008),
     // which the loader rejects on older OSes. Mirrors the --msl path above.
-    if (RunCommand({"xcrun", "-sdk", "macosx", "metal", "-x", "metal",
-                    "-std=macos-metal2.3",
-                    "-mmacosx-version-min=" XE_METAL_MIN_OS, "-w", "-c",
+    if (RunCommand({"xcrun", "-sdk", metal_target.sdk, "metal", "-x", "metal",
+                    metal_target.std_flag, metal_target.min_flag, "-w", "-c",
                     slang_out.string(), "-o", air_path.string()}) != 0) {
       std::fprintf(stderr, "metal failed for %s\n",
                    input_path.string().c_str());
@@ -793,8 +819,8 @@ int main(int argc, char** argv) {
       cleanup_metal();
       return 1;
     }
-    if (RunCommand({"xcrun", "-sdk", "macosx", "metallib", air_path.string(),
-                    "-o", lib_path.string()}) != 0) {
+    if (RunCommand({"xcrun", "-sdk", metal_target.sdk, "metallib",
+                    air_path.string(), "-o", lib_path.string()}) != 0) {
       std::fprintf(stderr, "metallib failed for %s\n",
                    input_path.string().c_str());
       cleanup_slang();

@@ -427,6 +427,8 @@ function(xe_shader_rules_slang target shader_dir)
     add_custom_command(
       OUTPUT "${_out}"
       COMMAND ${CMAKE_COMMAND} -E env "SLANGC_PATH=${_slangc}"
+              "XE_METAL_TARGET_SDK=${XE_METAL_TARGET_SDK}"
+              "XE_METAL_MIN_VERSION=${XE_METAL_MIN_VERSION}"
               $<TARGET_FILE:xenia-shader-cc> ${_flag} --depfile "${_dep}"
               "${src}" "${_out}"
       DEPENDS "${src}" xenia-shader-cc

@@ -192,6 +192,17 @@ if(WIN32 AND CMAKE_CROSSCOMPILING AND XE_TARGET_AARCH64
     AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
   set(_xe_use_host_shader_cc TRUE)
 endif()
+# iOS cross builds must still run the MSL shader rules (the on-device Metal
+# loader rejects macOS AIR), so they need a NATIVE xenia-shader-cc built in a
+# first pass. Opt in with -DXE_FORCE_HOST_SHADER_CC=ON and point
+# XE_HOST_SHADER_CC_PATH at the native binary.
+option(XE_FORCE_HOST_SHADER_CC
+       "Use a prebuilt native xenia-shader-cc instead of building one for the target" OFF)
+set(XE_HOST_SHADER_CC_PATH "" CACHE FILEPATH
+    "Path to a prebuilt native xenia-shader-cc host tool")
+if(XE_FORCE_HOST_SHADER_CC)
+  set(_xe_use_host_shader_cc TRUE)
+endif()
 
 if(NOT _xe_use_host_shader_cc)
 
@@ -438,20 +449,32 @@ foreach(_cfg Release Checked Debug)
     break()
   endif()
 endforeach()
-if(NOT _xe_host_shader_cc_any)
+if(XE_HOST_SHADER_CC_PATH)
+  # Explicit path wins (the iOS CI's two-stage build passes it).
+  if(NOT EXISTS "${XE_HOST_SHADER_CC_PATH}")
+    message(FATAL_ERROR
+      "XE_HOST_SHADER_CC_PATH='${XE_HOST_SHADER_CC_PATH}' does not exist. "
+      "Build the host tool first: cmake --build build-host --target "
+      "xenia-shader-cc")
+  endif()
+  add_executable(xenia-shader-cc IMPORTED GLOBAL)
+  set_target_properties(xenia-shader-cc PROPERTIES
+    IMPORTED_LOCATION "${XE_HOST_SHADER_CC_PATH}")
+elseif(NOT _xe_host_shader_cc_any)
   message(FATAL_ERROR
-    "Cross-compile to ARM64 needs a host xenia-shader-cc.exe but none was found "
+    "Cross-compile needs a host xenia-shader-cc.exe but none was found "
     "under ${_xe_host_shader_cc_dir}/<Config>/.\n"
     "  Run a native build first to produce it, e.g.:\n"
     "    xb build --target xenia-shader-cc --config=release\n"
-    "  Then re-run the cross-compile.")
+    "  Then re-run the cross-compile, or point XE_HOST_SHADER_CC_PATH at it.")
+else()
+  add_executable(xenia-shader-cc IMPORTED GLOBAL)
+  set_target_properties(xenia-shader-cc PROPERTIES
+    IMPORTED_LOCATION "${_xe_host_shader_cc_any}"
+    IMPORTED_LOCATION_RELEASE "${_xe_host_shader_cc_dir}/Release/xenia-shader-cc.exe"
+    IMPORTED_LOCATION_CHECKED "${_xe_host_shader_cc_dir}/Checked/xenia-shader-cc.exe"
+    IMPORTED_LOCATION_DEBUG "${_xe_host_shader_cc_dir}/Debug/xenia-shader-cc.exe")
 endif()
-add_executable(xenia-shader-cc IMPORTED GLOBAL)
-set_target_properties(xenia-shader-cc PROPERTIES
-  IMPORTED_LOCATION "${_xe_host_shader_cc_any}"
-  IMPORTED_LOCATION_RELEASE "${_xe_host_shader_cc_dir}/Release/xenia-shader-cc.exe"
-  IMPORTED_LOCATION_CHECKED "${_xe_host_shader_cc_dir}/Checked/xenia-shader-cc.exe"
-  IMPORTED_LOCATION_DEBUG "${_xe_host_shader_cc_dir}/Debug/xenia-shader-cc.exe")
 
 endif()
 

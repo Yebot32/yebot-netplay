@@ -41,6 +41,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # fontconfig: imgui_drawer.cc font lookup.
   # GTK3: XCB handle extraction in window_wx.cc (gtk_widget_realize, etc.).
   target_link_libraries(xenia-ui PRIVATE xcb X11 X11-xcb fontconfig ${GTK3_LIBRARIES})
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # AppKit/Cocoa do not exist on iOS - neither surface_mac.mm nor
+  # windowed_app_wx_mac.mm can compile there. The iOS shell brings its own
+  # window and surface (ios/src), and surface_ios.mm is compiled by whoever
+  # links xenia-ui (the shell adds it explicitly, matching how Android
+  # compiles surface_android.cc into its own JNI layer).
 elseif(APPLE)
   # xe_platform_sources globs *.cc only; .mm sources need explicit listing.
   target_sources(xenia-ui PRIVATE
