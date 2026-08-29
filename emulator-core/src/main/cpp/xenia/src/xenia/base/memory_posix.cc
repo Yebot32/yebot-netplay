@@ -40,7 +40,10 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 
-#if XE_PLATFORM_xendroid
+// Xendroid means Android here: ASharedMemory needs the NDK header, which does
+// not exist on Apple - iOS defines XE_PLATFORM_xendroid too (for the a64
+// unwind paths) but takes the MAC shm_open branch below.
+#if XE_PLATFORM_xendroid && !XE_PLATFORM_MAC
 #include <android/sharedmem.h>
 #endif
 // Both ANDROID and xendroid are defined on the fork; the allocation path below is
@@ -386,7 +389,10 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
                                           size_t length, PageAccess access,
                                           bool commit) {
-#if XE_PLATFORM_xendroid
+// Xendroid means Android here - see the sharedmem include note above. iOS
+// defines XE_PLATFORM_xendroid as well and deliberately falls through to the
+// MAC shm_open branch below.
+#if XE_PLATFORM_xendroid && !XE_PLATFORM_MAC
     //XELOGI("CreateFileMappingHandle: {} 0x{:X}", path.string(), length);
     int sharedmem_fd = ASharedMemory_create(path.c_str(), length);
     return sharedmem_fd >= 0 ? sharedmem_fd : kFileMappingHandleInvalid;
