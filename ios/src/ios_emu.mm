@@ -63,6 +63,12 @@ DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
 DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
             "Storage");
 
+// The X_STATUS_SUCCESS / X_ERROR_* macros expand to the bare typedef names,
+// which live in xe:: - make them visible at file scope so the macros work in
+// this TU's global-namespace classes.
+using xe::X_RESULT;
+using xe::X_STATUS;
+
 // Defined in presenter.cc. Fire-and-forget request_paint needs a UI pump that
 // the present thread cannot block on; the iOS pump (a CADisplayLink on the
 // main runloop) has the same shape as Android's, so force the flag like
@@ -259,7 +265,7 @@ class IosInputDriver final : public xe::hid::InputDriver {
   xe::X_STATUS Setup() override { return X_STATUS_SUCCESS; }
 
   xe::X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
-                           xe::X_INPUT_CAPABILITIES* out_caps) override {
+                           xe::hid::X_INPUT_CAPABILITIES* out_caps) override {
     if (user_index != 0) {
       return X_ERROR_DEVICE_NOT_CONNECTED;
     }
@@ -271,12 +277,12 @@ class IosInputDriver final : public xe::hid::InputDriver {
     return X_ERROR_SUCCESS;
   }
 
-  xe::X_RESULT GetState(uint32_t user_index, xe::X_INPUT_STATE* out_state) override {
+  xe::X_RESULT GetState(uint32_t user_index, xe::hid::X_INPUT_STATE* out_state) override {
     if (user_index != 0) {
       return X_ERROR_DEVICE_NOT_CONNECTED;
     }
     uint32_t packet = packet_number_.load(std::memory_order_relaxed);
-    xe::X_INPUT_GAMEPAD gamepad;
+    xe::hid::X_INPUT_GAMEPAD gamepad;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       gamepad = gamepad_;
@@ -287,13 +293,13 @@ class IosInputDriver final : public xe::hid::InputDriver {
   }
 
   xe::X_RESULT SetState(uint32_t user_index,
-                    xe::X_INPUT_VIBRATION* vibration) override {
+                    xe::hid::X_INPUT_VIBRATION* vibration) override {
     // No rumble on iOS yet; report success so games do not warn.
     return X_ERROR_SUCCESS;
   }
 
   xe::X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
-                        xe::X_INPUT_KEYSTROKE* out_keystroke) override {
+                        xe::hid::X_INPUT_KEYSTROKE* out_keystroke) override {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -331,7 +337,7 @@ class IosInputDriver final : public xe::hid::InputDriver {
 
  private:
   std::mutex mutex_;
-  xe::X_INPUT_GAMEPAD gamepad_{};
+  xe::hid::X_INPUT_GAMEPAD gamepad_{};
   std::atomic<uint32_t> packet_number_{0};
 };
 
