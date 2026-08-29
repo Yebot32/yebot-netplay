@@ -265,9 +265,9 @@ class IosInputDriver final : public xe::hid::InputDriver {
     }
     std::memset(out_caps, 0, sizeof(*out_caps));
     out_caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
-    out_caps->subtype = 0x01;   // XINPUT_DEVSUBTYPE_GAMEPAD
-    out_caps->flags = 0x0000;
-    out_caps->gamepad.wButtons = 0xF3FF;  // every button we can inject
+    out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
+    out_caps->flags = 0;
+    out_caps->gamepad.buttons = 0xF3FF;  // every button we can inject
     return X_ERROR_SUCCESS;
   }
 
@@ -276,14 +276,13 @@ class IosInputDriver final : public xe::hid::InputDriver {
       return X_ERROR_DEVICE_NOT_CONNECTED;
     }
     uint32_t packet = packet_number_.load(std::memory_order_relaxed);
-    XInputStateSnapshot snapshot;
+    xe::X_INPUT_GAMEPAD gamepad;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      snapshot = state_;
+      gamepad = gamepad_;
     }
-    out_state->gamepad = snapshot.gamepad;
-    out_state->vibration = snapshot.vibration;
-    out_state->dwPacketNumber = packet;
+    out_state->packet_number = packet;
+    out_state->gamepad = gamepad;
     return X_ERROR_SUCCESS;
   }
 
@@ -318,26 +317,21 @@ class IosInputDriver final : public xe::hid::InputDriver {
               uint8_t lt, uint8_t rt) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      std::memset(&state_, 0, sizeof(state_));
-      state_.gamepad.wButtons = buttons;
-      state_.gamepad.sThumbLX = lx;
-      state_.gamepad.sThumbLY = ly;
-      state_.gamepad.sThumbRX = rx;
-      state_.gamepad.sThumbRY = ry;
-      state_.gamepad.bLeftTrigger = lt;
-      state_.gamepad.bRightTrigger = rt;
+      std::memset(&gamepad_, 0, sizeof(gamepad_));
+      gamepad_.buttons = buttons;
+      gamepad_.thumb_lx = lx;
+      gamepad_.thumb_ly = ly;
+      gamepad_.thumb_rx = rx;
+      gamepad_.thumb_ry = ry;
+      gamepad_.left_trigger = lt;
+      gamepad_.right_trigger = rt;
     }
     packet_number_.fetch_add(1, std::memory_order_relaxed);
   }
 
  private:
-  struct XInputStateSnapshot {
-    xe::X_INPUT_GAMEPAD gamepad = {};
-    xe::X_INPUT_VIBRATION vibration = {};
-  };
-
   std::mutex mutex_;
-  XInputStateSnapshot state_;
+  xe::X_INPUT_GAMEPAD gamepad_{};
   std::atomic<uint32_t> packet_number_{0};
 };
 

@@ -50,6 +50,11 @@
 //   XE_METAL_TARGET_SDK=iphoneos  -> -sdk iphoneos, -std=ios-metal2.3
 //   XE_METAL_MIN_VERSION=16.0     -> -mios-version-min=16.0
 // Unset environment keeps the historical macOS behaviour byte-for-byte.
+#ifndef XE_METAL_MIN_OS
+// Non-Apple builds of the tool never run the MSL paths, but the helper below
+// still has to compile.
+#define XE_METAL_MIN_OS "15.0"
+#endif
 struct MetalTarget {
   const char* sdk;
   std::string std_flag;
