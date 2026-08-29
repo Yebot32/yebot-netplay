@@ -126,7 +126,7 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 
 }  // namespace
 
-@interface XenraAppDelegate ()
+@interface XenraAppDelegate () <UITableViewDataSource, UITableViewDelegate>
 @property(nonatomic, retain) UIViewController* rootController;
 @property(nonatomic, retain) UILabel* statusLabel;
 @property(nonatomic, retain) UIButton* stikDebugButton;
@@ -348,7 +348,7 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   [self buildGameScreen];
   int rc = xe_ios_boot(path.UTF8String);
   if (rc != 0) {
-    [self endGameScreen];
+    [self teardownGameScreen];
     UIAlertController* alert = [UIAlertController
         alertControllerWithTitle:@"Boot refused"
                          message:[NSString
@@ -436,14 +436,18 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   ]];
 }
 
-- (void)exitGame {
+- (void)teardownGameScreen {
   [self.displayLink invalidate];
   self.displayLink = nil;
-  xe_ios_shutdown();
   [self.gameView removeFromSuperview];
   self.gameView = nil;
   self.metalView = nil;
   self.hudLabel = nil;
+}
+
+- (void)exitGame {
+  xe_ios_shutdown();
+  [self teardownGameScreen];
   exit(0);  // One title per process; state is all on disk.
 }
 

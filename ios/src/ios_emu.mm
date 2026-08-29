@@ -13,6 +13,7 @@
 #import <UIKit/UIKit.h>
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -54,16 +55,19 @@
 // Defined by xendroid_emu.cpp on Android; emulator.cc reads them on every
 // platform that boots through the shared RelaunchTitle path, so the iOS build
 // has to carry its own definitions. Defaults match the Android ones.
+// NOTE: the cvar macros use RELATIVE namespaces - at global file scope these
+// land in ::cvars, which is exactly where emulator.cc's (namespace xe) bare
+// `cvars::mount_*` references resolve.
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
 DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
             "Storage");
 
-namespace xe {
-// presenter.cc: fire-and-forget request_paint() needs a UI pump that cannot
-// be blocked by the present thread - same requirement as Android.
+// Defined in presenter.cc. Fire-and-forget request_paint needs a UI pump that
+// the present thread cannot block on; the iOS pump (a CADisplayLink on the
+// main runloop) has the same shape as Android's, so force the flag like
+// xendroid_emu.cpp does, in case a stale config turned it off.
 DECLARE_bool(host_present_from_non_ui_thread);
-}  // namespace xe
 
 namespace {
 
@@ -478,7 +482,7 @@ class IosEmuApp {
 
   void MountDrives() {
     auto* fs = emu_->file_system();
-    if (xe::cvars::mount_cache) {
+    if (cvars::mount_cache) {
       auto cache_device = std::make_unique<xe::vfs::HostPathDevice>(
           "\\CACHE", emu_->cache_root(), false);
       if (cache_device->Initialize() &&
@@ -518,7 +522,7 @@ int xe_ios_initialize(const char* documents_dir, const char* caches_dir) {
   xe::InitializeLogging("xenra-ios");
 
   // The iOS pump never blocks the present thread (see IosWindow).
-  xe::cvars::host_present_from_non_ui_thread = true;
+  cvars::host_present_from_non_ui_thread = true;
 
   xe::config::SetupConfig(g_documents_dir);
 
