@@ -53,6 +53,7 @@ set(_xe_ios_engine_libs
   xenia-cpu-backend-a64
   xenia-gpu
   xenia-gpu-metal
+  xenia-gpu-null
   xenia-hid
   xenia-hid-nop
   xenia-kernel

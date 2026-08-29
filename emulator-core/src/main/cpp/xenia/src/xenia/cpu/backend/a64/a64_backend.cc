@@ -27,6 +27,9 @@
 #include <intrin.h>
 #endif
 #if XE_PLATFORM_MAC
+#include <libkern/OSCacheControl.h>
+#endif
+#if XE_PLATFORM_MAC
 #include <pthread.h>
 #endif
 #include "xenia/cpu/backend/a64/a64_assembler.h"
@@ -1073,6 +1076,14 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
   // addresses and the second is redundant but harmless.
 #if XE_PLATFORM_WIN32
   FlushInstructionCache(GetCurrentProcess(), write_pos, kGuestTrampolineSize);
+#elif XE_PLATFORM_MAC
+  // Apple arm64: __builtin___clear_cache lowers to ___clear_cache, which
+  // Apple's libraries do not export (see base/memory.cc). The supported
+  // primitive is sys_icache_invalidate; run it over both mappings so the
+  // D-cache clean lands on the write view and the I-cache invalidate on the
+  // execute view.
+  sys_icache_invalidate(write_pos, kGuestTrampolineSize);
+  sys_icache_invalidate(execute_pos, kGuestTrampolineSize);
 #else
   __builtin___clear_cache(
       reinterpret_cast<char*>(write_pos),

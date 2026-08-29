@@ -17,6 +17,9 @@
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #endif
+#if XE_PLATFORM_MAC
+#include <libkern/OSCacheControl.h>
+#endif
 #if XE_PLATFORM_xendroid
 #include "../aarch64_disasm.h"
 #endif
@@ -115,12 +118,13 @@ void A64CodeCache::FillCode(void* write_address, size_t size) {
 void A64CodeCache::FlushCodeRange(void* address, size_t size) {
 #if XE_PLATFORM_WIN32
   FlushInstructionCache(GetCurrentProcess(), address, size);
+#elif XE_PLATFORM_MAC
+  // Apple arm64: __builtin___clear_cache lowers to a call to ___clear_cache,
+  // which Apple's libraries do not export - it fails at LINK time (see the
+  // matching comment in base/memory.cc). sys_icache_invalidate is the
+  // supported path.
+  sys_icache_invalidate(address, size);
 #else
-
-
-#if XE_PLATFORM_xendroid
-    //XELOGI("ASM:\n{}", aarch64_disasm(reinterpret_cast<uint64_t>(address),reinterpret_cast<uint32_t*>(address),size/4));
-#endif
     __builtin___clear_cache(
       reinterpret_cast<char*>(address),
       reinterpret_cast<char*>(static_cast<uint8_t*>(address) + size));

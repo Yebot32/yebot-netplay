@@ -44,6 +44,7 @@
 #include "xenia/memory.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/immediate_drawer.h"
+#include "xenia/ui/file_picker.h"
 #include "xenia/ui/menu_item.h"
 #include "xenia/ui/presenter.h"
 #include "xenia/ui/surface_ios.h"
@@ -51,6 +52,18 @@
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/virtual_file_system.h"
+
+// Defined by xendroid_emu.cpp on Android (and by the desktop xenia_main.cc on
+// platforms that build it - iOS does not build either), and read by the
+// engine: emulator.cc records gpu/apu for backend-change detection, the APU
+// worker and the render-target cache read the two flags. Defaults pick the
+// backends the iOS shell actually provides.
+DEFINE_string(apu, "nop", "Audio system. Use: [nop]", "APU");
+DEFINE_string(gpu, "metal", "Graphics system. Use: [metal, null]", "GPU");
+DEFINE_bool(apu_aaudio_log_stats, false, "Log AAudio stats (Android only)",
+            "APU");
+DEFINE_bool(log_host_depth_fallback, false,
+            "Log host depth render-target fallbacks", "GPU");
 
 // Defined by xendroid_emu.cpp on Android; emulator.cc reads them on every
 // platform that boots through the shared RelaunchTitle path, so the iOS build
@@ -246,6 +259,18 @@ std::unique_ptr<MenuItem> MenuItem::Create(Type type, const std::string& text,
         : MenuItem(type, text, hotkey, std::move(callback)) {}
   };
   return std::make_unique<IosMenuItem>(type, text, hotkey, std::move(callback));
+}
+
+// FilePicker::Create likewise. Games' own "open file" flows (disc swap, icon
+// changes) have no UIKit sheet wired up yet - report "cancelled", exactly as
+// the Android stub does, while the shell's own import path is the Files app.
+class IosFilePicker final : public FilePicker {
+ public:
+  bool Show(Window* parent_window) override { return false; }
+};
+
+std::unique_ptr<FilePicker> FilePicker::Create() {
+  return std::make_unique<IosFilePicker>();
 }
 
 }  // namespace ui
