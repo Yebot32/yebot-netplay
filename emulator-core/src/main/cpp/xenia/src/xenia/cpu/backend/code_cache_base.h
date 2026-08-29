@@ -33,7 +33,7 @@
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
 
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
 #include <pthread.h>
 #endif
 
@@ -524,7 +524,7 @@ class CodeCacheBase : public CodeCache {
       // Commit memory if needed.
       EnsureCommitted(high_mark);
 
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
       // Toggle the per-thread MAP_JIT write gate around writes. Only needed
       // when execute and write bases alias (single MAP_JIT region); a
       // separate RW view needs no gating.
@@ -548,7 +548,7 @@ class CodeCacheBase : public CodeCache {
       self().PlaceCode(guest_address, machine_code, func_info,
                        code_execute_address, unwind_reservation);
 
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
       if (jit_write_toggle) {
         pthread_jit_write_protect_np(1);
       }
@@ -584,7 +584,7 @@ class CodeCacheBase : public CodeCache {
       CheckCapacity(high_mark);
     }
     EnsureCommitted(high_mark);
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
     const bool jit_write_toggle =
         generated_code_execute_base_ == generated_code_write_base_;
     if (jit_write_toggle) {
@@ -592,7 +592,7 @@ class CodeCacheBase : public CodeCache {
     }
 #endif
     std::memcpy(data_address, data, length);
-#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
     if (jit_write_toggle) {
       pthread_jit_write_protect_np(1);
     }
