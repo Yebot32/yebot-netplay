@@ -22,6 +22,7 @@
 #import <UIKit/UIKit.h>
 
 #include <string>
+#include <sys/sysctl.h>
 #include <unistd.h>  // getpid, for the StikDebug handoff URL
 
 #include "XenraMetalView.h"
@@ -40,6 +41,68 @@ namespace {
 // exactly as the StikJIT integration guide specifies.
 bool IsIos26OrLater() {
   return [NSProcessInfo processInfo].operatingSystemVersion.majorVersion >= 26;
+}
+
+// Monotonic per-launch session number, persisted across launches. Every entry
+// into the app increments it once; it prefixes everything the app shows and
+// logs, so reports sent for debugging are ordered unambiguously.
+NSInteger SessionNumber() {
+  static NSInteger n = 0;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    n = [[NSUserDefaults standardUserDefaults]
+            integerForKey:@"xenra_session_counter"] + 1;
+    [[NSUserDefaults standardUserDefaults] setInteger:n
+                                               forKey:@"xenra_session_counter"];
+  });
+  return n;
+}
+
+// The rolling diagnostics file: one numbered block per session, one line per
+// probe whose result changed. Lives in Documents so it is visible in the
+// Files app (UIFileSharingEnabled) and can be sent whole.
+NSString* DiagnosticsLogPath() {
+  static NSString* path = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSString* docs = NSSearchPathForDirectoriesInDomains(
+        NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    path = [docs stringByAppendingPathComponent:@"xenra-jit-log.txt"];
+  });
+  return path;
+}
+
+void AppendDiagnostics(NSString* line) {
+  NSString* path = DiagnosticsLogPath();
+  // Rotate before the file gets silly; .old keeps the previous half.
+  NSDictionary* attrs =
+      [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+  if (attrs && [attrs fileSize] > 256 * 1024) {
+    NSString* old = [path stringByAppendingString:@".old"];
+    [[NSFileManager defaultManager] removeItemAtPath:old error:nil];
+    [[NSFileManager defaultManager] moveItemAtPath:path toPath:old error:nil];
+  }
+  NSData* data = [[line stringByAppendingString:@"\n"]
+      dataUsingEncoding:NSUTF8StringEncoding];
+  NSFileHandle* fh = [NSFileHandle fileHandleForWritingAtPath:path];
+  if (!fh) {
+    [data writeToFile:path atomically:YES];
+    return;
+  }
+  [fh seekToEndOfFile];
+  [fh writeData:data];
+  [fh closeFile];
+}
+
+NSString* DeviceAndOsLine() {
+  char model[64] = {0};
+  size_t len = sizeof(model) - 1;
+  sysctlbyname("hw.model", model, &len, nullptr, 0);
+  NSOperatingSystemVersion v =
+      [NSProcessInfo processInfo].operatingSystemVersion;
+  return [NSString stringWithFormat:@"%s | iOS %ld.%ld", model,
+                                    (long)v.majorVersion,
+                                    (long)v.minorVersion];
 }
 
 NSString* DocumentsGamesDir() {
@@ -139,6 +202,8 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 @property(nonatomic, retain) XenraMetalView* metalView;
 @property(nonatomic, retain) CADisplayLink* displayLink;
 @property(nonatomic, retain) UILabel* hudLabel;
+@property(nonatomic, assign) int coreInitRc;
+@property(nonatomic, retain) NSString* lastLoggedProbe;
 @end
 
 // Manual reference counting (see ios/CMakeLists.txt), matching the rest of
@@ -171,10 +236,18 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   int rc = xe_ios_initialize(
       DocumentsGamesDir().stringByDeletingLastPathComponent.UTF8String,
       NSTemporaryDirectory().UTF8String);
-  if (rc != 0) {
-    self.statusLabel.text = [self.statusLabel.text
-        stringByAppendingFormat:@"\n\nCore init FAILED (%d) - see the log in "
-                                 "Documents.", rc];
+  self.coreInitRc = rc;
+
+  {
+    const xe::memory::JitSignatureState sig =
+        xe::memory::QueryJitSignatureState();
+    AppendDiagnostics([NSString
+        stringWithFormat:
+            @"=== session #%ld | %@ | %@ | get-task-allow=%@ cs_debugged=%@ "
+             "| core init %d ===",
+            (long)SessionNumber(), [NSDate date], DeviceAndOsLine(),
+            sig.get_task_allow ? @"YES" : @"NO",
+            sig.cs_debugged ? @"YES" : @"NO", rc]);
   }
 
   [self refreshStatus];
@@ -266,15 +339,34 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   const xe::memory::JitStatus fresh = xe::memory::QueryJitStatusRefresh();
 
   NSMutableString* text = [NSMutableString string];
-  [text appendString:@"Xenra iOS\n"];
-  [text appendFormat:@"re-test #%ld  (tap this text to re-test)\n\n",
-                     (long)self.probeCount];
+  [text appendFormat:@"Xenra iOS - session #%ld\n", (long)SessionNumber()];
+  [text appendFormat:
+            @"re-test #%ld  (tap this text to re-test; log: "
+             "Documents/xenra-jit-log.txt)\n\n",
+            (long)self.probeCount];
   [text appendFormat:@"%@\n\n", DescribeJitStatus(fresh)];
   [text appendFormat:@"%@\n\n", DescribeMetal(self.device)];
 
   const int status = xe_ios_status();
   if (status != 0) {
     [text appendFormat:@"Core: %d (%s)\n", status, xe_ios_status_detail()];
+  }
+  if (self.coreInitRc != 0) {
+    [text appendFormat:@"Core init FAILED (%d) - see xenra-jit-log.txt\n",
+                       self.coreInitRc];
+  }
+
+  // Log the probe: the first of the session, and any change afterwards.
+  NSString* probeLine = [NSString
+      stringWithFormat:@"session #%ld probe #%ld: %s | %@",
+                       (long)SessionNumber(), (long)self.probeCount,
+                       xe::memory::JitCapabilityToShortString(
+                           fresh.capability),
+                       [NSString stringWithUTF8String:fresh.detail.c_str()]];
+  if (!self.lastLoggedProbe ||
+      ![probeLine isEqualToString:self.lastLoggedProbe]) {
+    AppendDiagnostics(probeLine);
+    self.lastLoggedProbe = probeLine;
   }
 
   self.statusLabel.text = text;
@@ -312,6 +404,9 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   components.queryItems = items;
 
   if (![UIApplication.sharedApplication canOpenURL:components.URL]) {
+    AppendDiagnostics([NSString
+        stringWithFormat:@"session #%ld: StikDebug NOT INSTALLED/blocked",
+                         (long)SessionNumber()]);
     self.statusLabel.text = [self.statusLabel.text
         stringByAppendingString:
             @"\n\nStikDebug is not installed (or its scheme is blocked). "
@@ -319,6 +414,9 @@ NSString* DescribeMetal(id<MTLDevice> device) {
              "LocalDevVPN, then tap again."];
     return;
   }
+  AppendDiagnostics([NSString
+      stringWithFormat:@"session #%ld: StikDebug handoff: %@",
+                       (long)SessionNumber(), components.URL.absoluteString]);
   [UIApplication.sharedApplication openURL:components.URL
                                      options:@{}
                            completionHandler:nil];
@@ -666,6 +764,7 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   [_gameView release];
   [_metalView release];
   [_hudLabel release];
+  [_lastLoggedProbe release];
   [_device release];
   [_rootController release];
   [_window release];

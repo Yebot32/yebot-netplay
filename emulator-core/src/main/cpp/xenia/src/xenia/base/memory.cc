@@ -311,10 +311,15 @@ JitStatus ProbeJitApple() {
       } else {
         munmap(code, size);
         status.capability = JitCapability::kUnavailable;
-        status.detail =
-            "a debugger is attached but its script did not answer the "
-            "universal-protocol breakpoint - iOS 26+ (TXM) needs StikDebug "
-            "with universal.js assigned to this app";
+        status.detail = Jit26BreakWentUnanswered()
+            ? "a debugger is attached but its script did not answer the "
+              "universal-protocol breakpoint (the brk came back to the "
+              "process as a plain signal) - the script is not attached, not "
+              "assigned to this app in StikDebug, or did not run; iOS 26+ "
+              "(TXM) needs StikDebug with universal.js assigned to "
+              "Ali.Xanite.green.ios"
+            : "the JIT enabler script answered the breakpoint but refused "
+              "the region - re-run the JIT flow in StikDebug";
         return status;
       }
     }
@@ -426,6 +431,17 @@ bool Jit26Detach() {
     Jit26DetachNaked();
     return true;
   });
+#else
+  return false;
+#endif
+}
+
+bool Jit26BreakWentUnanswered() {
+#if XE_PLATFORM_IOS && XE_ARCH_ARM64
+  // g_jit26_breaked survives the longjmp out of the brk: 1 means the
+  // exception was never consumed by the enabler's script and came back to
+  // the process as an ordinary signal.
+  return g_jit26_breaked != 0;
 #else
   return false;
 #endif

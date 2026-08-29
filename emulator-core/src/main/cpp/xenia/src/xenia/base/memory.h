@@ -166,6 +166,13 @@ void* Jit26PrepareRegion(void* address, size_t length);
 // when no script answered.
 bool Jit26Detach();
 
+// Diagnostics for the most recent Jit26 call: true when the breakpoint was
+// delivered to the process as a signal instead of being consumed by the
+// enabler's script - i.e. the script was not attached, not active for this
+// app, or did not recognise the handshake. False when the script answered
+// (including answering with a refusal). Meaningless before the first call.
+bool Jit26BreakWentUnanswered();
+
 // Raw code-signing state for diagnostics UIs - what the kernel thinks this
 // process is, straight from csops(CS_OPS_STATUS).
 struct JitSignatureState {
