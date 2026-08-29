@@ -168,7 +168,10 @@ std::vector<std::string> g_shm_file_names;
 std::mutex g_shm_file_names_mutex;
 static bool g_cleanup_handlers_installed = false;
 
-#if !XE_PLATFORM_ANDROID&& !XE_PLATFORM_xendroid
+// The shm_open cleanup path is needed wherever shm_open is, which on this
+// fork includes iOS (XE_PLATFORM_xendroid defined, but the MAC shm_open
+// branch is taken - see CreateFileMappingHandle).
+#if (!XE_PLATFORM_ANDROID && !XE_PLATFORM_xendroid) || XE_PLATFORM_MAC
 static void CleanupAtExit() {
   for (const auto& name : g_shm_file_names) {
     shm_unlink(name.c_str());
