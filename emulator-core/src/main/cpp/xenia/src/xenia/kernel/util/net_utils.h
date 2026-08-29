@@ -20,6 +20,12 @@
 #include <WS2tcpip.h>
 #elif XE_PLATFORM_LINUX
 #include <arpa/inet.h>
+#elif XE_PLATFORM_MAC
+// iOS in particular has none of these transitively; macOS relies on them
+// arriving via other headers.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #endif
 
 namespace xe {
