@@ -49,7 +49,7 @@
 #include "xenia/ui/surface_ios.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
-#include "xenia/vfs/host_path_device.h"
+#include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/virtual_file_system.h"
 
 // Defined by xendroid_emu.cpp on Android; emulator.cc reads them on every
