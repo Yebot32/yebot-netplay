@@ -137,6 +137,44 @@ JitStatus QueryJitStatusRefresh();
 // Stable short label for a capability - "ON", "OFF", "TOGGLE", "?".
 const char* JitCapabilityToShortString(JitCapability capability);
 
+// --- iOS 26+ JIT: the universal (TXM/SPTM) breakpoint protocol --------------
+// On devices where TXM/SPTM is present, a debugger attach alone no longer
+// makes generated code executable: every region that will hold generated code
+// must be PREPARED through the debug connection by the JIT enabler's script
+// (StikDebug universal.js), via a breakpoint handshake the engine implements.
+// Source: StikDebug/StikJIT INTEGRATION.md ("Part 1: Add iOS 26 JIT support").
+//
+// The handshake, in order:
+//   1. The enabler attaches and waits for the engine's breakpoint calls.
+//   2. The engine waits until the process is CS_DEBUGGED (a brk with no
+//      script attached would otherwise kill the process; the guarded calls
+//      below also survive that case, reporting failure instead).
+//   3. For every region that will ever hold generated code, call
+//      Jit26PrepareRegion(). A region introduced after step 4 cannot be
+//      prepared without reconnecting the enabler.
+//   4. Call Jit26Detach() once all regions are prepared.
+//   5. Only then execute generated code.
+
+// Asks the attached JIT enabler to prepare [address, address + length) for
+// execution. Returns the prepared region address (possibly adjusted - a null
+// address asks the enabler to allocate the region), or nullptr when no script
+// answered the breakpoint. Internally gated on the process being CS_DEBUGGED,
+// per the protocol's ordering requirement.
+void* Jit26PrepareRegion(void* address, size_t length);
+
+// Tells the attached JIT enabler that all regions are prepared. Returns false
+// when no script answered.
+bool Jit26Detach();
+
+// Raw code-signing state for diagnostics UIs - what the kernel thinks this
+// process is, straight from csops(CS_OPS_STATUS).
+struct JitSignatureState {
+  bool queried = false;         // csops answered at all
+  bool get_task_allow = false;  // development-style signature (JIT-able)
+  bool cs_debugged = false;     // a debugger has attached this launch
+};
+JitSignatureState QueryJitSignatureState();
+
 // Allocates a block of memory at the given page-aligned base address.
 // Fails if the memory is not available.
 // Specify nullptr for base_address to leave it up to the system.

@@ -137,6 +137,58 @@ uint32_t QueryCodeSigningFlags() {
   return flags;
 }
 
+// --- The iOS 26+ (TXM/SPTM) universal protocol -----------------------------
+// The exact handshake StikDebug's universal.js expects (StikJIT
+// INTEGRATION.md, "Implement the universal protocol"). x16 selects the call:
+// 0 = detach, 1 = prepare the region at x0 with length x1. The brk is the
+// breakpoint the enabler's script intercepts; when it is handled, execution
+// resumes past it (with x0 holding the prepared address) and the ret returns.
+#if XE_ARCH_ARM64
+__attribute__((naked, noinline, optnone)) void Jit26DetachNaked() {
+  __asm__ volatile("mov x16, #0\n"
+                   "brk #0xf00d\n"
+                   "ret\n");
+}
+
+__attribute__((naked, noinline, optnone)) void*
+Jit26PrepareRegionNaked(void* address, size_t length) {
+  __asm__ volatile("mov x16, #1\n"
+                   "brk #0xf00d\n"
+                   "ret\n");
+}
+
+// A brk with no enabler attached raises SIGTRAP, whose default disposition is
+// death - the same "the probe was engineered for the wrong killer" trap as
+// the code signing monitor's SIGKILL, so the calls below run through this
+// guard. (When a script IS attached, the script consumes the brk and this
+// handler never fires.)
+sigjmp_buf g_jit26_jmp;
+volatile sig_atomic_t g_jit26_breaked = 0;
+
+void Jit26SignalHandler(int) {
+  g_jit26_breaked = 1;
+  siglongjmp(g_jit26_jmp, 1);
+}
+
+template <typename F>
+auto CallJit26Guarded(F&& fn) -> decltype(fn()) {
+  struct sigaction old_trap, probe {};
+  probe.sa_handler = Jit26SignalHandler;
+  sigemptyset(&probe.sa_mask);
+  probe.sa_flags = 0;
+  sigaction(SIGTRAP, &probe, &old_trap);
+
+  g_jit26_breaked = 0;
+  if (sigsetjmp(g_jit26_jmp, 1) == 0) {
+    auto result = fn();
+    sigaction(SIGTRAP, &old_trap, nullptr);
+    return result;
+  }
+  sigaction(SIGTRAP, &old_trap, nullptr);
+  return decltype(fn()){};
+}
+#endif  // XE_ARCH_ARM64
+
 JitStatus ProbeJitApple() {
   JitStatus status;
   const size_t size = page_size();
@@ -220,14 +272,60 @@ JitStatus ProbeJitApple() {
   }
   const bool executed = CallProbeGuarded(code);
   munmap(code, size);
-  if (!executed) {
-    status.capability = JitCapability::kUnavailable;
-    status.detail =
-        "mprotect reported success but the page faulted on execute";
+  if (executed) {
+    status.capability = JitCapability::kWriteProtectToggle;
+    status.detail = "W^X: page flipped from writable to executable via mprotect";
     return status;
   }
-  status.capability = JitCapability::kWriteProtectToggle;
-  status.detail = "W^X: page flipped from writable to executable via mprotect";
+
+  // 3. iOS 26+ (TXM/SPTM): a debugger attach alone is not sufficient any
+  //    more - every executable region must be PREPARED through the JIT
+  //    enabler's script (StikDebug universal.js) before its first execute.
+  //    MEASURED (iPadOS 26.4.2, eSign with JIT): mprotect to PROT_EXEC
+  //    succeeds and the execute faults. That is the signature of an
+  //    unprepared region, not of a missing attach, so the handshake is
+  //    attempted here before the probe reports "no".
+  //
+  //    The probe deliberately does NOT detach: the enabler's script stays
+  //    attached and waiting, because the emulator's own regions (the code
+  //    cache and the guest trampolines) still have to be prepared at boot -
+  //    a region introduced after the detach cannot be prepared without
+  //    reconnecting. The detach belongs to the boot path.
+  if (cs_debugged) {
+    void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (code != MAP_FAILED) {
+      WriteProbeInstruction(code);
+      void* prepared = Jit26PrepareRegion(code, size);
+      if (prepared) {
+        const bool protocol_executed = CallProbeGuarded(prepared);
+        munmap(code, size);
+        if (protocol_executed) {
+          status.capability = JitCapability::kWriteProtectToggle;
+          status.detail =
+              "universal protocol: region prepared by the JIT enabler script "
+              "(detach pending, happens once the emulator's regions are "
+              "prepared at boot)";
+          return status;
+        }
+      } else {
+        munmap(code, size);
+        status.capability = JitCapability::kUnavailable;
+        status.detail =
+            "a debugger is attached but its script did not answer the "
+            "universal-protocol breakpoint - iOS 26+ (TXM) needs StikDebug "
+            "with universal.js assigned to this app";
+        return status;
+      }
+    }
+  }
+
+  status.capability = JitCapability::kUnavailable;
+  status.detail = cs_debugged
+                      ? "mprotect reported success but the page faulted on "
+                        "execute, and the universal protocol did not answer"
+                      : "mprotect reported success but the page faulted on "
+                        "execute - no debugger has attached this launch";
   return status;
 }
 
@@ -300,6 +398,52 @@ JitStatus ProbeJit() {
 }
 
 }  // namespace
+
+void* Jit26PrepareRegion(void* address, size_t length) {
+#if XE_PLATFORM_IOS && XE_ARCH_ARM64
+  // The protocol's ordering requirement, enforced at the call site rather
+  // than trusted to every caller: no brk before the enabler has attached.
+  const uint32_t cs_flags = QueryCodeSigningFlags();
+  if ((cs_flags & kCsDebugged) == 0) {
+    return nullptr;
+  }
+  return CallJit26Guarded(
+      [&] { return Jit26PrepareRegionNaked(address, length); });
+#else
+  (void)address;
+  (void)length;
+  return nullptr;
+#endif
+}
+
+bool Jit26Detach() {
+#if XE_PLATFORM_IOS && XE_ARCH_ARM64
+  const uint32_t cs_flags = QueryCodeSigningFlags();
+  if ((cs_flags & kCsDebugged) == 0) {
+    return false;
+  }
+  return CallJit26Guarded([] {
+    Jit26DetachNaked();
+    return true;
+  });
+#else
+  return false;
+#endif
+}
+
+JitSignatureState QueryJitSignatureState() {
+  JitSignatureState state;
+#if XE_PLATFORM_IOS
+  uint32_t flags = 0;
+  if (csops(getpid(), kCsOpsStatus, &flags, sizeof(flags)) != 0) {
+    return state;
+  }
+  state.queried = true;
+  state.get_task_allow = (flags & kCsGetTaskAllow) != 0;
+  state.cs_debugged = (flags & kCsDebugged) != 0;
+#endif
+  return state;
+}
 
 JitStatus QueryJitStatusRefresh() { return ProbeJit(); }
 
