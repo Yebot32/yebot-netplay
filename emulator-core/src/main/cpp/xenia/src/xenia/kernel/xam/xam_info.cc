@@ -56,7 +56,7 @@ DEFINE_bool(in_process_title_relaunch, true,
             "Shutdown/Setup cycle instead of spawning a new emulator process.",
             "Kernel");
 
-#if XE_PLATFORM_xendroid
+#if XE_PLATFORM_xendroid && defined(__ANDROID__)
 #include <jni.h>
 // Process-wide JavaVM set in JNI_OnLoad (xendroid.cpp); declared at global scope
 // so the relaunch detach-current-thread guard resolves to ::g_jvm rather than a
@@ -383,7 +383,7 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
                                 caller_thread_id
 #endif
         );
-#if XE_PLATFORM_xendroid
+#if XE_PLATFORM_xendroid && defined(__ANDROID__)
         // The relaunch runs on this detached thread; if any JNI attach happened
         // (e.g. a callback into Java), the JNIEnv must be detached before the
         // thread exits to avoid the "native thread exited without detaching"
