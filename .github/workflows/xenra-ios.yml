@@ -217,7 +217,19 @@ jobs:
     # now pulls the whole engine: a64 CPU backend, Metal GPU/UI backends,
     # kernel, VFS, and the ios_emu.mm shell.
     - name: Build
-      run: cmake --build build-ios --target xenra-ios --parallel $(sysctl -n hw.ncpu)
+      # Tee the output: GitHub prunes job log blobs aggressively, and a
+      # compile error nobody can read is the least useful kind.
+      run: |
+        set -o pipefail
+        cmake --build build-ios --target xenra-ios --parallel $(sysctl -n hw.ncpu) 2>&1 | tee build-log.txt
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log-${{ steps.git.outputs.hash }}
+        path: build-log.txt
+        if-no-files-found: ignore
 
     ##################################################################
     # Package the .ipa
