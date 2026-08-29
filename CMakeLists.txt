@@ -40,6 +40,13 @@ endif()
 # actually needs. The xenia tree defines a great many targets that have no
 # meaning on iOS, and configuring them is cheap only as long as nothing tries
 # to build them.
+#
+# The fork's own overrides gate on XE_PLATFORM_xendroid (defined for Android in
+# base/platform.h). iOS is the same fork: the a64 unwind bump buffer in
+# a64_code_cache_posix.cc, the fixed guest-memory window in memory.cc and the
+# kernel/xam forks all take that path - the non-xendroid branches have never
+# compiled anywhere. Define it before the xenia tree is added.
+add_compile_definitions(XE_PLATFORM_xendroid=1)
 add_subdirectory(emulator-core/src/main/cpp/xenia EXCLUDE_FROM_ALL)
 
 # -----------------------------------------------------------------------------
