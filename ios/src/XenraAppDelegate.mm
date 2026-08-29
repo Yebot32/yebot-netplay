@@ -470,20 +470,20 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 
   // Face buttons, bumpers, start/back: compact grid on the right.
   NSDictionary* actions = @{
-    @"A" : @(X_INPUT_GAMEPAD_A),
-    @"B" : @(X_INPUT_GAMEPAD_B),
-    @"X" : @(X_INPUT_GAMEPAD_X),
-    @"Y" : @(X_INPUT_GAMEPAD_Y),
-    @"LB" : @(X_INPUT_GAMEPAD_LEFT_SHOULDER),
-    @"RB" : @(X_INPUT_GAMEPAD_RIGHT_SHOULDER),
+    @"A" : @(xe::hid::X_INPUT_GAMEPAD_A),
+    @"B" : @(xe::hid::X_INPUT_GAMEPAD_B),
+    @"X" : @(xe::hid::X_INPUT_GAMEPAD_X),
+    @"Y" : @(xe::hid::X_INPUT_GAMEPAD_Y),
+    @"LB" : @(xe::hid::X_INPUT_GAMEPAD_LEFT_SHOULDER),
+    @"RB" : @(xe::hid::X_INPUT_GAMEPAD_RIGHT_SHOULDER),
     @"LT" : @(-1),
     @"RT" : @(-2),
-    @"ST" : @(X_INPUT_GAMEPAD_START),
-    @"BK" : @(X_INPUT_GAMEPAD_BACK),
-    @"U" : @(X_INPUT_GAMEPAD_DPAD_UP),
-    @"D" : @(X_INPUT_GAMEPAD_DPAD_DOWN),
-    @"L" : @(X_INPUT_GAMEPAD_DPAD_LEFT),
-    @"R" : @(X_INPUT_GAMEPAD_DPAD_RIGHT),
+    @"ST" : @(xe::hid::X_INPUT_GAMEPAD_START),
+    @"BK" : @(xe::hid::X_INPUT_GAMEPAD_BACK),
+    @"U" : @(xe::hid::X_INPUT_GAMEPAD_DPAD_UP),
+    @"D" : @(xe::hid::X_INPUT_GAMEPAD_DPAD_DOWN),
+    @"L" : @(xe::hid::X_INPUT_GAMEPAD_DPAD_LEFT),
+    @"R" : @(xe::hid::X_INPUT_GAMEPAD_DPAD_RIGHT),
   };
   NSArray<NSArray<NSString*>*>* rows = @[
     @[ @"LT", @"LB", @"RB", @"RT" ],
@@ -506,7 +506,7 @@ NSString* DescribeMetal(id<MTLDevice> device) {
       b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.4].CGColor;
       b.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
       [b setTitle:name forState:UIControlStateNormal];
-      int code = actions[name].intValue;
+      int code = [actions[name] intValue];
       bool trigger = code == -1 || code == -2;
       b.tag = code;
       [b addTarget:self

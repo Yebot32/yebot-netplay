@@ -29,7 +29,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
-#include "xenia/base/profiler.h"
+#include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/cpu/processor.h"
