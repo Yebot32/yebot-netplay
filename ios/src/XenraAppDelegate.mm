@@ -73,25 +73,31 @@ NSString* DiagnosticsLogPath() {
 }
 
 void AppendDiagnostics(NSString* line) {
+  // Pure C file I/O: the Foundation stat/bridge path aborted under MRC once
+  // already (crash 2026-08-29 16:01:16 - _NSFileManagerBridge forwarding),
+  // and a diagnostics writer must be the most robust code in the app.
   NSString* path = DiagnosticsLogPath();
+  const char* cpath = path.fileSystemRepresentation;
+
   // Rotate before the file gets silly; .old keeps the previous half.
-  NSDictionary* attrs =
-      [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
-  if (attrs && [attrs fileSize] > 256 * 1024) {
-    NSString* old = [path stringByAppendingString:@".old"];
-    [[NSFileManager defaultManager] removeItemAtPath:old error:nil];
-    [[NSFileManager defaultManager] moveItemAtPath:path toPath:old error:nil];
+  FILE* probe = fopen(cpath, "rb");
+  if (probe) {
+    fseek(probe, 0, SEEK_END);
+    long size = ftell(probe);
+    fclose(probe);
+    if (size > 256 * 1024) {
+      NSString* old = [path stringByAppendingString:@".old"];
+      [[NSFileManager defaultManager] removeItemAtPath:old error:nil];
+      rename(cpath, old.fileSystemRepresentation);
+    }
   }
-  NSData* data = [[line stringByAppendingString:@"\n"]
-      dataUsingEncoding:NSUTF8StringEncoding];
-  NSFileHandle* fh = [NSFileHandle fileHandleForWritingAtPath:path];
-  if (!fh) {
-    [data writeToFile:path atomically:YES];
+
+  FILE* f = fopen(cpath, "a");
+  if (!f) {
     return;
   }
-  [fh seekToEndOfFile];
-  [fh writeData:data];
-  [fh closeFile];
+  fprintf(f, "%s\n", line.UTF8String);
+  fclose(f);
 }
 
 NSString* DeviceAndOsLine() {
@@ -243,9 +249,10 @@ NSString* DescribeMetal(id<MTLDevice> device) {
         xe::memory::QueryJitSignatureState();
     AppendDiagnostics([NSString
         stringWithFormat:
-            @"=== session #%ld | %@ | %@ | get-task-allow=%@ cs_debugged=%@ "
-             "| core init %d ===",
+            @"=== session #%ld | %@ | %@ | bundle %@ | get-task-allow=%@ "
+             "cs_debugged=%@ | core init %d ===",
             (long)SessionNumber(), [NSDate date], DeviceAndOsLine(),
+            NSBundle.mainBundle.bundleIdentifier,
             sig.get_task_allow ? @"YES" : @"NO",
             sig.cs_debugged ? @"YES" : @"NO", rc]);
   }
@@ -345,6 +352,11 @@ NSString* DescribeMetal(id<MTLDevice> device) {
              "Documents/xenra-jit-log.txt)\n\n",
             (long)self.probeCount];
   [text appendFormat:@"%@\n\n", DescribeJitStatus(fresh)];
+  // eSign appends its team-id suffix to the bundle id, and StikDebug matches
+  // scripts to apps BY bundle id - the assignment has to target exactly this
+  // string, so show it rather than make anyone guess.
+  [text appendFormat:@"Bundle ID for StikDebug script assignment: %@\n\n",
+                     NSBundle.mainBundle.bundleIdentifier];
   [text appendFormat:@"%@\n\n", DescribeMetal(self.device)];
 
   const int status = xe_ios_status();

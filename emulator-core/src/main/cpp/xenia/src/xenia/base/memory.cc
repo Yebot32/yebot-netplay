@@ -247,10 +247,27 @@ JitStatus ProbeJitApple() {
 
   // 2. W^X: map writable, write, then flip to executable. This is the path a
   //    debugger-enabled sideload actually gets, and the one the code cache
-  //    would have to be built on. Safe on every signature: a build without
-  //    the entitlement is refused by the gate above, and a build with it but
-  //    no activated JIT gets an mprotect refusal here, which is a clean "no"
-  //    the probe can report rather than a kill nobody can catch.
+  //    would have to be built on.
+  //
+  //    MEASURED on iOS 27.0 beta (24A5424a, code signing monitor generation
+  //    2 - the .ips reports codeSigningMonitor: 2, vs 1 on iPadOS 26.4):
+  //    executing a page this process wrote is an UNCATCHABLE SIGKILL
+  //    ("CODESIGNING / Invalid Page", ktriage "Failed to fault in a page with
+  //    execute permissions") even WITH get-task-allow, until the JIT
+  //    enabler's script has prepared the region. On 26.4 the same execute was
+  //    a catchable SIGSEGV, which is what this path was engineered around -
+  //    on 27.0 it kills the process before the guard can run. So: no
+  //    execution attempt at all without CS_DEBUGGED. The answer without an
+  //    enabler is a clean OFF, not a dead process.
+  if (!cs_debugged) {
+    status.capability = JitCapability::kUnavailable;
+    status.detail =
+        "get-task-allow is present, but no JIT enabler has attached this "
+        "launch - on iOS 26+/27 (TXM) the process may not execute code it "
+        "wrote until StikDebug with universal.js attaches and prepares the "
+        "regions. Enable JIT via StikDebug, then re-test.";
+    return status;
+  }
   void* code = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
                     -1, 0);
   if (code == MAP_FAILED) {
