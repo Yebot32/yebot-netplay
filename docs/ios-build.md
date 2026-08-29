@@ -1,10 +1,9 @@
 # Building Xenra for iOS
 
-Milestone 1 only. This builds a **pipeline-proof app**, not an emulator: a
-minimal UIKit app that links the real `xenia-base`, runs the real JIT probe
-from `base/memory.cc`, brings up an `MTLDevice`, and puts both results on
-screen. Its whole purpose is to prove toolchain -> codegen -> bundle -> ipa ->
-signing -> device works before the renderer work depends on any of it.
+Milestone 2. This builds **the full emulator**: the a64 CPU backend, the Metal
+GPU backend, the kernel, and an iOS shell (`ios/src/ios_emu.mm`) that boots a
+title from the library screen and presents through a CAMetalLayer. The
+milestone-1 pipeline check lives on as the library screen's status readout.
 
 Nothing here affects the Android build. `XenDroid/ios/`, `XenDroid/cmake/` and
 this workflow are unreachable from Gradle: the Android native build
@@ -13,20 +12,104 @@ explicitly and globs nothing.
 
 ---
 
+## JIT on iOS 26+: the universal (TXM/SPTM) protocol - READ THIS FIRST
+
+The story the probe told in milestone 1 ("mprotect reported success but the
+page faulted on execute", forever, even after re-test #7) is now explained
+and fixed. Source: StikDebug/StikJIT INTEGRATION.md ("Part 1: Add iOS 26 JIT
+support").
+
+On devices where TXM/SPTM is present (iOS 26+ on supported hardware), **a
+debugger attach alone no longer makes generated code executable**. Every
+region that will hold generated code must be PREPARED through the debug
+connection by the JIT enabler's script (StikDebug universal.js), via a
+breakpoint handshake:
+
+```c
+// x16=1: prepare. x0 = address, x1 = length, returns prepared address in x0.
+void* JIT26PrepareRegion(void* address, size_t length);
+// x16=0: detach. Called once, after ALL regions are prepared.
+void JIT26Detach(void);
+// Both: mov x16, #N; brk #0xf00d; ret
+```
+
+That is why mprotect "succeeded" and execute faulted: the W^X permission
+change goes through, but the code signing monitor still refuses to execute a
+region the enabler never prepared. XeniOS works on the same device because
+its JIT allocator implements the protocol; Xenra now does too.
+
+What Xenra implements (`base/memory.cc`, iOS section):
+
+- `Jit26PrepareRegion` / `Jit26Detach` - the naked brk handshakes, each
+  wrapped in a SIGTRAP guard so an un-attached brk is reported, not fatal.
+- `QueryJitSignatureState` - raw csops flags for the status screen
+  (get-task-allow / cs_debugged), so a "no" says WHICH precondition failed.
+- The probe runs the protocol after the plain W^X path faults (attach gate:
+  never brks before CS_DEBUGGED). It deliberately does NOT detach - the
+  emulator's own regions still need preparing at boot.
+- The code cache (`code_cache_base.h`) prepares its whole execute
+  reservation (one call covers every page it will ever commit), and the a64
+  backend's guest trampoline region is prepared likewise - on iOS it is
+  split into an execute view + a writable alias so lazily-built trampolines
+  can still be written after the detach.
+- The boot path detaches once, after `Emulator::SetupSubsystems()`.
+
+**What the user must do (per launch of the emulator):**
+
+1. Sign/install with a signature that has `get-task-allow` (eSign with its
+   JIT option, or SideStore/StikStore). Without it the screen says so and
+   stops - iOS would kill the process at the first execute.
+2. LocalDevVPN connected, pairing file imported, DDI mounted (the standard
+   StikDebug ritual; mount survives until reboot).
+3. Launch Xenra, tap **Enable JIT via StikDebug** - the handoff URL opens
+   StikDebug with `bundle-id=Ali.Xanite.green.ios`, the current `pid`, and
+   `script-name=universal.js` (always on iOS 26+; the script is fixed in
+   code, never a user setting).
+4. In StikDebug, run Enable JIT for the app with the universal script. Then
+   return to Xenra: the library screen flips to JIT ON (the 2 s re-probe
+   catches the attach; the probe runs the protocol and stops the timer),
+   and games boot.
+
+The old "expected answers per install method" table still holds, with one
+new row: development-signed + attached + universal script prepared the
+region -> **ON** ("universal protocol: region prepared..."). Attached but no
+script answering the brk -> OFF with a message saying exactly that.
+
+---
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
 | `XenDroid/cmake/ios.toolchain.cmake` | CMake toolchain, iOS arm64 device only |
-| `XenDroid/ios/CMakeLists.txt` | The `xenra-ios` app target |
-| `XenDroid/ios/Info.plist` | Bundle metadata |
+| `XenDroid/CMakeLists.txt` | iOS entry point: xenia tree + miniupnpc + the app |
+| `XenDroid/ios/CMakeLists.txt` | The `xenra-ios` app target (full engine link) |
+| `XenDroid/ios/Info.plist` | Bundle metadata (file sharing, stikdebug scheme) |
 | `XenDroid/ios/xenra.entitlements` | Input to `codesign --entitlements` |
+| `XenDroid/ios/src/ios_emu.mm` | The native driver: context, window, boot thread, virtual pad |
+| `XenDroid/ios/src/XenraAppDelegate.mm` | Library screen, JIT gate, game screen |
 | `XenDroid/ios/system_ios.mm` | iOS replacement for `base/system_mac.cc` |
-| `XenDroid/.github/workflows/xenra-ios.yml` | CI |
+| `XenDroid/.github/workflows/xenra-ios.yml` | CI (two-stage: native shader tool, then iOS cross) |
 
 `XenDroid/ios` is a **subdirectory** of the xenia CMake project, not a project
-of its own — it defines `xenra-ios` and links the already-existing
-`xenia-base`. The CMake source root is the xenia tree.
+of its own — it defines `xenra-ios` and links the engine libraries. The CMake
+source root is this repo's root.
+
+### The Metal shader pipeline (two-stage CI)
+
+Every built-in Metal shader is `.slang`, generated by `xenia-shader-cc
+--slang-msl`: slangc emits `.metal` source, then `xcrun metal`/`metallib`
+package it. Two consequences:
+
+1. The tool must run on the BUILD machine even though the target is iOS - the
+   CI builds xenia-shader-cc natively (macOS) in a first pass and the iOS
+   configure picks it up via `XE_FORCE_HOST_SHADER_CC` +
+   `XE_HOST_SHADER_CC_PATH`.
+2. The metallib must target iOS. macOS AIR is rejected by the on-device
+   loader, so the MSL invocations read `XE_METAL_TARGET_SDK` (and
+   `XE_METAL_MIN_VERSION`) from the environment and emit `-sdk iphoneos`,
+   `-std=ios-metal2.3`, `-mios-version-min=16.0` when it says `iphoneos`.
+   Unset environment keeps the historical macOS behaviour byte-for-byte.
 
 ---
 

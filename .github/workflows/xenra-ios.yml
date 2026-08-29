@@ -1,19 +1,26 @@
 name: xenra-ios
 
-# MILESTONE 1: prove toolchain -> codegen -> bundle -> ipa -> device.
-# This does NOT build the emulator. It builds a minimal app that links the real
-# xenia-base and reports the real JIT probe + MTLDevice status on screen. See
+# MILESTONE 2: the full emulator. Links the a64 CPU backend, the Metal GPU
+# backend, the kernel and the iOS shell (ios_emu.mm + the UIKit screens). See
 # docs/ios-build.md.
+#
+# The build is TWO-STAGE, and the reason is the Metal shader pipeline:
+#   1. A NATIVE macOS configure+build of just the xenia-shader-cc host tool,
+#      plus the pinned slangc download. The Metal bytecode must be compiled
+#      with -sdk iphoneos (iOS rejects macOS AIR), and the tool that runs
+#      xcrun cannot itself be built for iOS.
+#   2. The iOS cross build, which points at that host tool via
+#      XE_FORCE_HOST_SHADER_CC + XE_HOST_SHADER_CC_PATH and runs the MSL
+#      shader rules with XE_METAL_TARGET_SDK=iphoneos.
 #
 # ------------------------------------------------------------------------
 # COST. macOS runners bill at 10x the Linux rate against private-repo
-# minutes. One minute of this job costs what ten minutes of XenDroid.yml
-# costs, and Yebot32/xenra... is private. Three consequences, all deliberate:
+# minutes. Three consequences, all deliberate:
 #   * paths filter - a change to Android/Kotlin/Gradle must not spend macOS
 #     minutes. Only the iOS plumbing and the parts of the xenia tree this
 #     build actually compiles trigger it.
-#   * ccache, aggressively. A cold configure of the xenia tree plus a build of
-#     xenia-base is the whole job; a warm one is a link.
+#   * ccache, aggressively, on the (large) iOS cross pass. The native host
+#     tool pass is small enough to rebuild uncached.
 #   * no matrix, no LTO, one arch, one config.
 # If this starts costing real money, drop the push trigger and leave it on
 # workflow_dispatch. The push trigger is a convenience, not a requirement.
@@ -30,8 +37,20 @@ on:
       - '.github/workflows/xenra-ios.yml'
       - 'emulator-core/src/main/cpp/xenia/CMakeLists.txt'
       - 'emulator-core/src/main/cpp/xenia/cmake/**'
+      - 'emulator-core/src/main/cpp/xenia/xenia-build.py'
+      - 'emulator-core/src/main/cpp/xenia/tools/**'
+      - 'emulator-core/src/main/cpp/xenia/third_party/**'
       - 'emulator-core/src/main/cpp/xenia/src/xenia/base/**'
-      - 'emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ios.*'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/cpu/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/gpu/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/ui/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/kernel/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/apu/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/hid/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/vfs/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/patcher/**'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/emulator.*'
+      - 'emulator-core/src/main/cpp/xenia/src/xenia/config.*'
   pull_request:
     branches: main
     paths:
@@ -136,6 +155,32 @@ jobs:
       run: echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
     ##################################################################
+    # Stage 1: NATIVE host tool + slangc (for the MSL shader rules)
+    ##################################################################
+    # xenia-shader-cc runs xcrun metal, so it must be a macOS binary, and the
+    # iOS cross toolchain would produce one that cannot run. Build it natively
+    # first, then hand it to the cross configure. slangc comes from the pinned
+    # Slang release; the shader rules glob .slang/*/bin/slangc under the xenia
+    # tree root, which is where the script puts it when run from there.
+    - name: Build host shader tool (native macOS)
+      run: |
+        cmake -G Ninja \
+          -S emulator-core/src/main/cpp/xenia \
+          -B build-host \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DXENIA_BUILD_TESTS=OFF \
+          -DXENIA_BUILD_MISC=OFF \
+          -DXENIA_ENABLE_LTO=OFF
+        cmake --build build-host --target xenia-shader-cc --parallel $(sysctl -n hw.ncpu)
+        ls -la build-host/host_tools/
+
+    - name: Download slangc
+      working-directory: emulator-core/src/main/cpp/xenia
+      run: |
+        python3 xenia-build.py slang
+        ls -la .slang/*/bin/
+
+    ##################################################################
     # Configure
     ##################################################################
     # XENIA_BUILD_TESTS / XENIA_BUILD_MISC stay OFF (their defaults) - the
@@ -143,7 +188,7 @@ jobs:
     # against UIKit. XENIA_ENABLE_LTO is turned OFF explicitly even though its
     # default is ON: ThinLTO turns a two-minute link into a ten-minute one on
     # a runner that bills at 10x, and it cannot change the answer to "does the
-    # pipeline work".
+    # emulator boot". The host tool from stage 1 feeds the MSL shader rules.
     - name: Configure
       run: |
         cmake -G Ninja \
@@ -154,6 +199,8 @@ jobs:
           -DXENIA_BUILD_TESTS=OFF \
           -DXENIA_BUILD_MISC=OFF \
           -DXENIA_ENABLE_LTO=OFF \
+          -DXE_FORCE_HOST_SHADER_CC=ON \
+          -DXE_HOST_SHADER_CC_PATH="$GITHUB_WORKSPACE/build-host/host_tools/xenia-shader-cc" \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
           -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache \
@@ -163,9 +210,10 @@ jobs:
     # Build
     ##################################################################
     # ONLY the xenra-ios target. Naming it is what keeps this from building
-    # xenia-app, the Vulkan backend, wxWidgets and every other target the
-    # xenia root declares - none of which will link on iOS yet, and none of
-    # which milestone 1 needs.
+    # the wxWidgets desktop shell, the Vulkan backend and every other target
+    # the xenia root declares - none of which link on iOS. The target itself
+    # now pulls the whole engine: a64 CPU backend, Metal GPU/UI backends,
+    # kernel, VFS, and the ios_emu.mm shell.
     - name: Build
       run: cmake --build build-ios --target xenra-ios --parallel $(sysctl -n hw.ncpu)
 
