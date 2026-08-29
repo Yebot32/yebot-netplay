@@ -737,14 +737,21 @@ MetalPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   metal_layer.drawableSize =
       CGSizeMake(new_surface_width * surface_scale, new_surface_height * surface_scale);
 
+#if XE_PLATFORM_IOS
+  // CAMetalLayer.displaySyncEnabled is macOS 12+ only. iOS presents are
+  // always compositor-synced, so treat vsync as implicit and let the
+  // framerate limiter do its own thing on top.
+  is_vsync_implicit_out = true;
+#else
   const bool tearing_allowed = cvars::metal_allow_tearing;
   metal_layer.displaySyncEnabled = tearing_allowed ? NO : YES;
-
-  metal_layer_ = metal_layer;
 
   // When displaySyncEnabled is YES, CAMetalLayer blocks nextDrawable on the
   // compositor vsync; when NO, the framerate_limit throttle is authoritative.
   is_vsync_implicit_out = !tearing_allowed;
+#endif
+
+  metal_layer_ = metal_layer;
 
   XELOGI("Metal surface connected successfully: {}x{} (scale={}, drawable={}x{})",
          new_surface_width, new_surface_height, surface_scale,
