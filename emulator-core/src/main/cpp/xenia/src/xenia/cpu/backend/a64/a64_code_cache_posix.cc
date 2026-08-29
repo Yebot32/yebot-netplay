@@ -23,8 +23,13 @@
 // libgcc takes a pointer to a [CIE | FDEs | terminator] section and walks it.
 // Apple/LLVM libunwind takes a single FDE pointer and must be called once
 // per FDE, so on XE_PLATFORM_MAC we walk the buffer ourselves.
+// On Apple the SDK's <unwind.h> (included below under xendroid) already
+// declares these with const-qualified parameters - redeclaring them here
+// conflicts with it, so only provide our own on non-Apple hosts.
+#if !XE_PLATFORM_MAC
 extern "C" void __register_frame(void*);
 extern "C" void __deregister_frame(void*);
+#endif
 
 #if XE_PLATFORM_xendroid
 #include "../aarch64_disasm.h"
@@ -37,7 +42,7 @@ extern "C" _Unwind_Reason_Code __gxx_personality_v0(
         _Unwind_Context* context);
 
 static _Unwind_Reason_Code trace(struct _Unwind_Context* ctx,void*){
-    uint64_t ip=reinterpret_cast<uint64_t>(_Unwind_GetIP(ctx));
+    uint64_t ip=static_cast<uint64_t>(_Unwind_GetIP(ctx));
     XELOGI("FRAME: {:16X}",ip);
     std::string insts= aarch64_disasm(ip,reinterpret_cast<uint32_t*>(ip),16);
     XELOGI(insts);
@@ -51,7 +56,7 @@ static _Unwind_Reason_Code __jit_personality(
         _Unwind_Exception* exceptionObject,
         _Unwind_Context* context){
     if(actions&_UA_CLEANUP_PHASE){
-        XELOGI("_UA_CLEANUP_PHASE IPs={:16X}",reinterpret_cast<uint64_t>(_Unwind_GetIP(context)));
+        XELOGI("_UA_CLEANUP_PHASE IPs={:16X}",static_cast<uint64_t>(_Unwind_GetIP(context)));
         _Unwind_Backtrace(trace,nullptr);
     }
     return __gxx_personality_v0(version,actions,exceptionClass,exceptionObject,context);
@@ -553,7 +558,7 @@ void PosixA64CodeCache::InitializeUnwindEntry(
   *p++ = kDW_EH_PE_pcrel | kDW_EH_PE_sdata4;
 
   // Initial instructions:
-  // DW_CFA_def_cfa SP, 0 — at function entry, CFA = SP.
+  // DW_CFA_def_cfa SP, 0 - at function entry, CFA = SP.
   *p++ = kDW_CFA_def_cfa;
   p += WriteULEB128(p, kDwarfRegSP);
   p += WriteULEB128(p, 0);
