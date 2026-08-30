@@ -204,6 +204,10 @@ class A64Backend : public Backend {
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;
+  // The view trampoline writes go through. On iOS 26+ this is the writable
+  // alias of the prepared execute region; everywhere else it is set to
+  // guest_trampoline_memory_ and the two are the same memory.
+  uint8_t* guest_trampoline_write_base_ = nullptr;
   bool guest_trampolines_sub4gb_ = false;
 #if XE_PLATFORM_IOS
   // iOS 26+ (TXM/SPTM): the trampoline region is split into an execute view
@@ -213,7 +217,6 @@ class A64Backend : public Backend {
   xe::memory::FileMappingHandle guest_trampoline_mapping_ =
       xe::memory::kFileMappingHandleInvalid;
   std::filesystem::path guest_trampoline_mapping_name_;
-  uint8_t* guest_trampoline_write_base_ = nullptr;
 #endif
 };
 
