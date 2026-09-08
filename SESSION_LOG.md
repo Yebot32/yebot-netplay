@@ -114,3 +114,36 @@ documentation, (3) UI = exact replica of Android, (4) OG-on-iOS milestone 3.
   statics — the 164207 crash class).
 - Verified: full re-read of all four new files + the app delegate regions;
   CI build is the compile check.
+
+### FIX 4 — duplicate interface compile error (CI red on first UI push)
+- XenraBladeCell.mm re-declared @interface XenraBladeCell already in its
+  header. One-line fix (0be2b59bd). CI GREEN on 0be2b59bd
+  (run 34242471544) — all session-3 iOS changes compile on iOS.
+- Also checked the pre-session 98a9adee6 red (Aug 30): the job died 2s in,
+  before any step ran, logs expired — a runner transient, not a code
+  failure. The tree I inherited was NOT broken.
+
+### FIX 5 — virtual pad: right stick + center-anchored sticks
+- The pad had NO right stick (camera unreachable from touch) and the left
+  stick anchored its axis origin at the first-touch point. Both sticks now
+  share XenraStickApply (center-normalized), the right stick takes the
+  bottom-right corner, the button grid moved above it. Commit 8997f2705.
+
+### OG MILESTONE 3, step 1 — the no-JIT path is REAL and BUILDS
+- App-repo commit e3129854: XEMU_TCG_INTERPRETER CMake option + vendored
+  libffi 3.3 hand-build (generated ffi.h/fficonfig.h matching meson's
+  substitutions; trampoline-table closures on Darwin, FFI_MMAP_EXEC_WRIT
+  elsewhere; the two files MUST agree — ffi_closure layout vs
+  ffi_prep_closure_loc body).
+- Verified on THIS machine with the NDK toolchain (no CI needed for the
+  app repo): TCI=ON builds the complete libxemu_core.a (1,423 objects:
+  tcg.c/tci.c compile under CONFIG_TCG_INTERPRETER, aarch64 sysv.S
+  assembles, libffi links); TCI=OFF builds unchanged (tci.c still
+  excluded — Android default untouched). Both configure and link green.
+- Latent bug fixed en route: XEMU_ENABLE_VULKAN=OFF was unbuildable (root
+  glob still swept vma_impl.cpp); excluded alongside the vk renderer.
+- What remains for OG-on-iOS: an iOS CMake entry point for this core,
+  a MoltenVK or Metal NV2A decision, the ios_emu.mm counterpart of
+  xemu_android.cpp, and CI wiring. This session delivers the load-bearing
+  piece (interpreter fallback + its libffi dependency) and the local build
+  proof.

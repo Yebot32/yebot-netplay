@@ -7,6 +7,13 @@ strike through / mark FIXED with the commit.
 
 ## Open
 
+- I-9 | app repo main/cpp (OG iOS target) | OG-on-iOS needs: an iOS CMake
+  entry point for the QEMU core (XEMU_TCG_INTERPRETER=ON is the verified
+  no-JIT config, commit e3129854), MoltenVK (DukeX's proven approach) or a
+  Metal NV2A renderer decision, an ios counterpart of xemu_android.cpp,
+  and CI wiring in the app repo. | The milestone-3 goal. | H (plan exists,
+  build-level proof done on aarch64 via the NDK)
+
 - I-2 | ios/src/ios_emu.mm | 360 no-JIT: no interpreter exists anywhere in
   xenia (cpu/backend holds x64 + a64 + null stub). Without JIT the guest
   cannot execute; the app must refuse cleanly and tell the user why.
@@ -40,6 +47,15 @@ strike through / mark FIXED with the commit.
   art (Android shows covers). | UI parity + OG readiness. | M
 
 ## Fixed
+
+- I-10 | XenraBladeCell.mm | Duplicate @interface XenraBladeCell (header +
+  impl) broke the iOS build. | CI red. | H -> FIXED 0be2b59bd (CI green).
+
+- I-11 | XenraAppDelegate.mm virtual pad | No right stick (camera
+  unreachable from touch on every 3D title); left stick anchored its axis
+  origin at first touch, making the usable range depend on where the finger
+  landed. | H -> FIXED 8997f2705 (shared center-normalized handler + right
+  stick).
 
 - I-8 | ios/src/XenraAppDelegate.mm cellForRowAtIndexPath | Per-cell
   NSFileManager attributesOfItemAtPath on every visible row, every reload
