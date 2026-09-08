@@ -215,8 +215,6 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 // the tree.
 @implementation XenraAppDelegate {
   // Virtual-pad touch bookkeeping (main thread only).
-  CGPoint leftStickOrigin_;
-  bool leftStickActive_;
   int buttons_;
   short stickLX_, stickLY_, stickRX_, stickRY_;
   unsigned char triggerLT_, triggerRT_;
@@ -681,20 +679,54 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 
 // --- Virtual pad ------------------------------------------------------------
 
-- (void)buildVirtualPad {
-  UIView* view = self.gameView;
-  UILayoutGuide* safe = view.safeAreaLayoutGuide;
-
-  // Left stick: one draggable disc.
+// Builds one draggable stick disc (base + centered thumb). Returns the
+// disc; the caller positions it and the pan selector feeds the axes.
+- (UIView*)makeStickWithPanSelector:(SEL)selector {
   UIView* stick = [[UIView alloc] initWithFrame:CGRectZero];
   stick.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
   stick.layer.cornerRadius = 48.0;
   stick.layer.borderWidth = 1.5;
   stick.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
   stick.translatesAutoresizingMaskIntoConstraints = NO;
-  [view addSubview:stick];
-  [stick release];
-  stick.tag = 77;
+
+  // The thumb: a smaller disc that follows the finger within the base.
+  UIView* thumb = [[UIView alloc] initWithFrame:CGRectZero];
+  thumb.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.22];
+  thumb.layer.cornerRadius = 20.0;
+  thumb.translatesAutoresizingMaskIntoConstraints = NO;
+  thumb.userInteractionEnabled = NO;
+  [stick addSubview:thumb];
+  [thumb release];
+  [NSLayoutConstraint activateConstraints:@[
+    [thumb.centerXAnchor constraintEqualToAnchor:stick.centerXAnchor],
+    [thumb.centerYAnchor constraintEqualToAnchor:stick.centerYAnchor],
+    [thumb.widthAnchor constraintEqualToConstant:40.0],
+    [thumb.heightAnchor constraintEqualToConstant:40.0],
+  ]];
+
+  UIPanGestureRecognizer* pan =
+      [[UIPanGestureRecognizer alloc] initWithTarget:self action:selector];
+  [stick addGestureRecognizer:pan];
+  [pan release];
+  return stick;
+}
+
+- (void)buildVirtualPad {
+  UIView* view = self.gameView;
+  UILayoutGuide* safe = view.safeAreaLayoutGuide;
+
+  // Left stick: movement. Right stick: camera - it was missing entirely,
+  // which made every 3D title unplayable from the screen alone.
+  UIView* leftStick =
+      [self makeStickWithPanSelector:@selector(leftStickPanned:)];
+  leftStick.tag = 77;
+  [view addSubview:leftStick];
+  [leftStick release];
+
+  UIView* rightStick =
+      [self makeStickWithPanSelector:@selector(rightStickPanned:)];
+  [view addSubview:rightStick];
+  [rightStick release];
 
   // Face buttons, bumpers, start/back: compact grid on the right.
   NSDictionary* actions = @{
@@ -738,12 +770,12 @@ NSString* DescribeMetal(id<MTLDevice> device) {
       bool trigger = code == -1 || code == -2;
       b.tag = code;
       [b addTarget:self
-                action:@selector(padButtonDown:)
-      forControlEvents:UIControlEventTouchDown];
+                 action:@selector(padButtonDown:)
+       forControlEvents:UIControlEventTouchDown];
       [b addTarget:self
-                action:@selector(padButtonUp:)
-      forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside
-          | UIControlEventTouchCancel];
+                 action:@selector(padButtonUp:)
+       forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside
+           | UIControlEventTouchCancel];
       if (trigger) {
         b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
       }
@@ -754,19 +786,22 @@ NSString* DescribeMetal(id<MTLDevice> device) {
       [pad addObject:[b.heightAnchor constraintEqualToConstant:44.0]];
       if (leftAnchorView) {
         [pad addObject:[b.leadingAnchor
-                           constraintEqualToAnchor:leftAnchorView.trailingAnchor
-                                          constant:6.0]];
+                            constraintEqualToAnchor:leftAnchorView.trailingAnchor
+                                           constant:6.0]];
       } else {
         [pad addObject:[b.trailingAnchor
-                           constraintEqualToAnchor:safe.trailingAnchor
-                                          constant:-12.0]];
+                            constraintEqualToAnchor:safe.trailingAnchor
+                                           constant:-12.0]];
       }
       if (above) {
         [pad addObject:[b.topAnchor constraintEqualToAnchor:above.bottomAnchor
                                                    constant:6.0]];
       } else {
-        [pad addObject:[b.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor
-                                                      constant:-16.0]];
+        // Bottom row sits above the right stick, not at the screen edge -
+        // the stick owns the bottom-right corner (Android pad layout).
+        [pad addObject:[b.bottomAnchor
+                            constraintEqualToAnchor:rightStick.topAnchor
+                                           constant:-8.0]];
       }
       leftAnchorView = b;
       [b release];
@@ -778,44 +813,58 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   [NSLayoutConstraint activateConstraints:pad];
 
   [NSLayoutConstraint activateConstraints:@[
-    [stick.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
-                                        constant:20.0],
-    [stick.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor
-                                       constant:-24.0],
-    [stick.widthAnchor constraintEqualToConstant:96.0],
-    [stick.heightAnchor constraintEqualToConstant:96.0],
-  ]];
+    [leftStick.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
+                                            constant:20.0],
+    [leftStick.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor
+                                           constant:-24.0],
+    [leftStick.widthAnchor constraintEqualToConstant:96.0],
+    [leftStick.heightAnchor constraintEqualToConstant:96.0],
 
-  // Touch handling: one gesture on the whole game view routes by hit-test.
-  UIPanGestureRecognizer* pan = [[UIPanGestureRecognizer alloc]
-      initWithTarget:self
-              action:@selector(stickPanned:)];
-  [stick addGestureRecognizer:pan];
-  [pan release];
+    [rightStick.trailingAnchor
+        constraintEqualToAnchor:safe.trailingAnchor constant:-20.0],
+    [rightStick.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor
+                                           constant:-24.0],
+    [rightStick.widthAnchor constraintEqualToConstant:96.0],
+    [rightStick.heightAnchor constraintEqualToConstant:96.0],
+  ]];
 }
 
-- (void)stickPanned:(UIPanGestureRecognizer*)pan {
+// Shared stick-pan logic: normalizes the drag from the disc CENTER (the old
+// left-only handler anchored the origin at the first-touch point, which made
+// the usable axis range depend on where the finger landed) and writes the
+// axis pair through the given out-pointers.
+static void XenraStickApply(UIPanGestureRecognizer* pan, short* outX,
+                            short* outY) {
   UIView* stick = [pan view];
-  if (pan.state == UIGestureRecognizerStateBegan) {
-    leftStickOrigin_ = [pan locationInView:stick];
-    leftStickActive_ = true;
-  } else if (pan.state == UIGestureRecognizerStateChanged) {
+  if (pan.state == UIGestureRecognizerStateBegan ||
+      pan.state == UIGestureRecognizerStateChanged) {
+    CGPoint origin = CGPointMake(stick.bounds.size.width / 2.0,
+                                 stick.bounds.size.height / 2.0);
     CGPoint p = [pan locationInView:stick];
-    float dx = (p.x - leftStickOrigin_.x) / 48.0f;
-    float dy = (p.y - leftStickOrigin_.y) / 48.0f;
+    float dx = (p.x - origin.x) / 48.0f;
+    float dy = (p.y - origin.y) / 48.0f;
     float len = sqrtf(dx * dx + dy * dy);
     if (len > 1.0f) {
       dx /= len;
       dy /= len;
     }
-    stickLX_ = (short)(dx * 32767.0f);
-    stickLY_ = (short)(dy * -32767.0f);
+    // Up on the stick is negative Y in X_INPUT.
+    *outX = (short)(dx * 32767.0f);
+    *outY = (short)(dy * -32767.0f);
   } else if (pan.state == UIGestureRecognizerStateEnded ||
              pan.state == UIGestureRecognizerStateCancelled) {
-    leftStickActive_ = false;
-    stickLX_ = 0;
-    stickLY_ = 0;
+    *outX = 0;
+    *outY = 0;
   }
+}
+
+- (void)leftStickPanned:(UIPanGestureRecognizer*)pan {
+  XenraStickApply(pan, &stickLX_, &stickLY_);
+  [self pushInput];
+}
+
+- (void)rightStickPanned:(UIPanGestureRecognizer*)pan {
+  XenraStickApply(pan, &stickRX_, &stickRY_);
   [self pushInput];
 }
 
