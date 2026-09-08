@@ -15,12 +15,6 @@
 #import "XenraBladeView.h"
 #import "XenraTheme.h"
 
-@interface XenraBladeCell : UITableViewCell
-- (void)bindTitle:(NSString*)title
-         subtitle:(NSString*)subtitle
-            cover:(UIImage*)cover;
-@end
-
 @implementation XenraBladeCell {
   XenraBladeView* blade_;
   UIImageView* coverView_;
