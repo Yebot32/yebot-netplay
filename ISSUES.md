@@ -41,6 +41,19 @@ strike through / mark FIXED with the commit.
 
 ## Fixed
 
+- I-7 | ios/src/XenraAppDelegate.mm exitGame | Exit tapped during boot
+  (status==1, "Booting... can take a while" screen, Exit button visible)
+  deadlocked: xe_ios_shutdown joins the boot thread from the main thread,
+  while the boot thread can be parked in a synchronous CallInUIThread
+  (Setup/GraphicsSystem::Setup and Emulator::CompleteLaunch both marshal to
+  the UI thread) whose pump lives on the runloop the join is blocking. Every
+  Exit during boot = frozen app until the watchdog kill. | H
+  -> FIXED (session 3): status==1 now quick_exit(0)s — the engine's own
+  teardown semantic (KernelState::TerminateTitle is std::quick_exit), safe
+  because one boot per process and all state is on disk. Completed boots
+  keep the orderly shutdown path (the emu thread has exited by then, join is
+  instant).
+
 - I-1 | ios/src/ios_emu.mm xe_ios_boot | Boot gate read the CACHED
   QueryJitStatus() — first answer cached for the process lifetime. Tapping a
   game before the StikDebug attach landed would cache kUnavailable and block

@@ -53,3 +53,39 @@ documentation, (3) UI = exact replica of Android, (4) OG-on-iOS milestone 3.
   the sole caller besides the header/impl).
 - Verified: re-read of the edited region; no-JIT path behavior unchanged
   (still a clean refusal); JIT-after-attach path now actually works.
+
+### GETMORERAM INVESTIGATION (done, committed 08e6917a8)
+- Fetched and read GetMoreRam's source. Verified: it PATCHes Apple's
+  developer-services API (developerservices2.apple.com/services/v1/bundleIds)
+  enabling capability id **INCREASED_MEMORY_LIMIT** on the user's App ID.
+  The entitlement reaching the app is com.apple.developer.kernel.
+  increased-memory-limit, only via a regenerated provisioning profile at
+  re-sign/reinstall time. Not expressible in app source.
+- Xenra's ios/xenra.entitlements ALREADY declares it (+ extended-virtual-
+  addressing). Decision: no code change; GETMORERAM_INTEGRATION.md documents
+  the mechanism, the honest limits, and the per-Apple-ID user step.
+
+### FIX 2 — Exit-during-boot deadlock (I-7)
+- File: ios/src/XenraAppDelegate.mm (exitGame).
+- What was wrong: Exit tapped while status==1 joined the boot thread from the
+  main thread; the boot thread can be parked in CallInUIThreadSynchronous
+  (Setup's graphics marshaling, CompleteLaunch's UI-thread marshaling) whose
+  pump runs on the runloop the join blocks. Verified against emulator.cc
+  (CompleteLaunch marshals when not on the UI thread) and kernel_state.cc
+  (TerminateTitle is std::quick_exit). One tap = frozen app.
+- Fix: quick_exit(0) while booting (the engine's own semantic; one boot per
+  process, state on disk); completed boots keep the orderly path — their emu
+  thread has already returned from LaunchPath, so the join is instant.
+- Verified: re-read; MRC safe (no new objects); boot and running paths both
+  reasoned through.
+
+### OG core orientation (for milestone 3)
+- The OG core is a CMake-built QEMU fork in the APP repo (main/cpp/
+  CMakeLists.txt): globs the QEMU source dirs, excludes host-specific files,
+  builds SDL2 locally, glib via meson ExternalProject, Vulkan via
+  volk/glslang/VMA, prebuilt Rust dsp56300 with a C-interpreter stub option.
+- tcg/tci.c (the TCG interpreter) is EXPLICITLY EXCLUDED from the Android
+  build (CMakeLists.txt:698) — flipping that exclusion is the seed of the
+  OG no-JIT path: TCI is a pure interpreter and needs NO executable memory
+  at all, so it needs no JIT entitlement, no protocol, no StikDebug. Slow by
+  design; the requirement is "runs at all", which TCI satisfies.

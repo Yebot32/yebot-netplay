@@ -21,6 +21,7 @@
 #import <Metal/Metal.h>
 #import <UIKit/UIKit.h>
 
+#include <cstdlib>    // quick_exit, for the boot-phase exit path
 #include <string>
 #include <sys/sysctl.h>
 #include <unistd.h>  // getpid, for the StikDebug handoff URL
@@ -561,6 +562,16 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 }
 
 - (void)exitGame {
+  if (xe_ios_status() == 1) {
+    // Boot in flight: the boot thread may be parked in a synchronous
+    // CallInUIThread that was marshaled to this very (main, blocked) thread -
+    // Setup and CompleteLaunch both marshal, and joining the boot thread from
+    // a button tap stops the runloop pump that un-parks it. quick_exit is the
+    // engine's own teardown semantic here (KernelState::TerminateTitle is
+    // std::quick_exit), and one title per process makes that final anyway;
+    // config, saves and shader caches are all on disk.
+    std::quick_exit(0);
+  }
   xe_ios_shutdown();
   [self teardownGameScreen];
   exit(0);  // One title per process; state is all on disk.
