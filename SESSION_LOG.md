@@ -89,3 +89,28 @@ documentation, (3) UI = exact replica of Android, (4) OG-on-iOS milestone 3.
   OG no-JIT path: TCI is a pure interpreter and needs NO executable memory
   at all, so it needs no JIT entitlement, no protocol, no StikDebug. Slow by
   design; the requirement is "runs at all", which TCI satisfies.
+
+### FIX 3 / UI PASS 1 — Android dashboard parity in the library screen
+- New files: ios/src/XenraTheme.h (the Android palette byte-for-byte from
+  main/res/values/colors.xml: xaniteog_black/charcoal/surface*, blade fills,
+  gold accent ramp, text colours, bg gradient stops, glow stops, plus the
+  GameBladeView octagon path helper), XenraBladeView.{h,mm} (the chamfered
+  blade painter + the dashboard gradient/radial-glow background),
+  XenraBladeCell.{h,mm} (the game-library blade row: title, muted subtitle,
+  optional cover thumb), XenraGameScanner.{h,mm} (background library scan —
+  the Android background-gather pattern, session-2 E1/E4/E5 — with cached
+  entry metadata and an LRU cover cache from Documents/Covers).
+- XenraAppDelegate.mm library screen rebuilt to Android's structure: dark
+  gradient dashboard, gold XENRA header + overflow menu (···), the
+  pipeline-check readout in a blade panel, blade-styled JIT button, game
+  list as blade rows with covers, empty-state hint, no per-row disk I/O.
+- Overflow menu mirrors the Android library menu shape: Rescan games +
+  StikDebug handoff enabled; Install Content / Open User Data listed
+  DISABLED (no iOS backend yet — menu shape matches, features logged).
+- Added .xbe to the scanned extensions (OG-path readiness; Android parity
+  for extensions to be re-verified against its scanner when OG lands).
+- MRC verified: every new alloc accounted (scanner alloc/release fixed,
+  dispatch_once copy fixed, cells release in dealloc, no autoreleased
+  statics — the 164207 crash class).
+- Verified: full re-read of all four new files + the app delegate regions;
+  CI build is the compile check.

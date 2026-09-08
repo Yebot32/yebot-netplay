@@ -26,7 +26,11 @@
 #include <sys/sysctl.h>
 #include <unistd.h>  // getpid, for the StikDebug handoff URL
 
+#include "XenraBladeCell.h"
+#include "XenraBladeView.h"
+#include "XenraGameScanner.h"
 #include "XenraMetalView.h"
+#include "XenraTheme.h"
 #include "ios_emu.h"
 
 #include "xenia/base/memory.h"
@@ -123,30 +127,6 @@ NSString* DocumentsGamesDir() {
   return [dirs.firstObject stringByAppendingPathComponent:@"Games"];
 }
 
-NSArray<NSString*>* ScanGames() {
-  NSString* dir = DocumentsGamesDir();
-  NSArray<NSURL*>* contents = [[NSFileManager defaultManager]
-      contentsOfDirectoryAtURL:[NSURL fileURLWithPath:dir]
-    includingPropertiesForKeys:@[ NSURLIsRegularFileKey ]
-                       options:0
-                         error:nil];
-  NSMutableArray<NSString*>* games = [NSMutableArray array];
-  NSArray<NSString*>* extensions = @[ @"iso", @"xex", @"zar", @"god",
-                                      @"con", @"live", @"pirs" ];
-  for (NSURL* url in contents) {
-    NSString* ext = url.pathExtension.lowercaseString;
-    if ([extensions containsObject:ext]) {
-      [games addObject:url.path];
-    }
-  }
-  // Newest container-first reads best on a TV-sized list; names differ more
-  // than dates do.
-  [games sortUsingComparator:^NSComparisonResult(NSString* a, NSString* b) {
-    return [a.lastPathComponent compare:b.lastPathComponent options:NSCaseInsensitiveSearch];
-  }];
-  return games;
-}
-
 // Runs the same probe the emulator would, fresh each call, so what is
 // displayed here is not a separate reimplementation that could drift from the
 // real answer. One probe per refresh: on iOS 26+ every probe prepares a page
@@ -203,12 +183,18 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 
 @interface XenraAppDelegate () <UITableViewDataSource, UITableViewDelegate>
 @property(nonatomic, retain) UIViewController* rootController;
-@property(nonatomic, retain) UILabel* statusLabel;
+@property(nonatomic, retain) XenraDashboardBackground* dashboard;
+@property(nonatomic, retain) UILabel* titleLabel;
+@property(nonatomic, retain) UIButton* menuButton;
 @property(nonatomic, retain) UIButton* stikDebugButton;
+@property(nonatomic, retain) UIView* statusPanel;
+@property(nonatomic, retain) UILabel* statusLabel;
 @property(nonatomic, retain) UITableView* gamesTable;
+@property(nonatomic, retain) UILabel* emptyLabel;
 @property(nonatomic, retain) id<MTLDevice> device;
 @property(nonatomic, assign) NSInteger probeCount;
 @property(nonatomic, retain) NSTimer* probeTimer;
+@property(nonatomic, retain) XenraGameScanner* scanner;
 @property(nonatomic, retain) NSArray<NSString*>* games;
 @property(nonatomic, retain) UIView* gameView;
 @property(nonatomic, retain) XenraMetalView* metalView;
@@ -216,6 +202,13 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 @property(nonatomic, retain) UILabel* hudLabel;
 @property(nonatomic, assign) int coreInitRc;
 @property(nonatomic, retain) NSString* lastLoggedProbe;
+@end
+
+// Private methods used before their definitions (called from blocks /
+// selectors), so the strict-prototype build has them declared.
+@interface XenraAppDelegate ()
+- (void)gamesScanned:(NSArray<XenraGameEntry*>*)games;
+- (void)showOverflowMenu;
 @end
 
 // Manual reference counting (see ios/CMakeLists.txt), matching the rest of
@@ -243,12 +236,20 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   [self.window makeKeyAndVisible];
 
   self.device = MTLCreateSystemDefaultDevice();
-  self.games = ScanGames();
 
   int rc = xe_ios_initialize(
       DocumentsGamesDir().stringByDeletingLastPathComponent.UTF8String,
       NSTemporaryDirectory().UTF8String);
   self.coreInitRc = rc;
+
+  // Background library scan (Android's background gather), delivered as a
+  // batch to the main thread.
+  XenraGameScanner* scanner = [[XenraGameScanner alloc] init];
+  self.scanner = scanner;
+  [scanner release];
+  [self.scanner scanWithCompletion:^(NSArray<XenraGameEntry*>* games) {
+    [self gamesScanned:games];
+  }];
 
   {
     const xe::memory::JitSignatureState sig =
@@ -282,30 +283,69 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 - (void)buildLibraryScreen {
   UIView* view = self.rootController.view;
 
+  // The Android dashboard base: gradient + radial gold glow.
+  self.dashboard = [[XenraDashboardBackground alloc] initWithFrame:CGRectZero];
+  self.dashboard.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.dashboard];
+  [self.dashboard release];
+
+  // Header: the app title in the accent colour, and the overflow menu on the
+  // right (Android's library header).
+  self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+  self.titleLabel.text = @"XENRA";
+  self.titleLabel.textColor = XenraAccent();
+  self.titleLabel.font =
+      [UIFont systemFontOfSize:24.0 weight:UIFontWeightBold];
+  self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.titleLabel];
+  [self.titleLabel release];
+
+  self.menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
+  [self.menuButton setTitle:@"···" forState:UIControlStateNormal];
+  self.menuButton.titleLabel.font =
+      [UIFont boldSystemFontOfSize:20.0];
+  [self.menuButton setTitleColor:XenraAccent() forState:UIControlStateNormal];
+  [self.menuButton addTarget:self
+                      action:@selector(showOverflowMenu)
+            forControlEvents:UIControlEventTouchUpInside];
+  self.menuButton.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.menuButton];
+  [self.menuButton release];
+
+  // Status panel: the pipeline-check readout, in a blade.
+  self.statusPanel = [[XenraBladeView alloc] initWithFrame:CGRectZero];
+  self.statusPanel.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.statusPanel];
+  [self.statusPanel release];
+
   self.statusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
   self.statusLabel.numberOfLines = 0;
-  self.statusLabel.textColor = UIColor.whiteColor;
-  self.statusLabel.font = [UIFont monospacedSystemFontOfSize:12.0
+  self.statusLabel.textColor = XenraText();
+  self.statusLabel.font = [UIFont monospacedSystemFontOfSize:11.0
                                                       weight:UIFontWeightRegular];
   self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-  [view addSubview:self.statusLabel];
+  [self.statusPanel addSubview:self.statusLabel];
   [self.statusLabel release];
 
   UITapGestureRecognizer* tap =
       [[UITapGestureRecognizer alloc] initWithTarget:self
                                               action:@selector(refreshStatus)];
-  [self.statusLabel addGestureRecognizer:tap];
-  self.statusLabel.userInteractionEnabled = YES;
+  [self.statusPanel addGestureRecognizer:tap];
+  self.statusPanel.userInteractionEnabled = YES;
   [tap release];
 
+  // JIT handoff as a compact blade-style button under the status panel.
   self.stikDebugButton = [UIButton buttonWithType:UIButtonTypeSystem];
-  [self.stikDebugButton setTitle:@"Enable JIT via StikDebug"
+  [self.stikDebugButton setTitle:@"⚡ Enable JIT via StikDebug"
                         forState:UIControlStateNormal];
-  self.stikDebugButton.titleLabel.font = [UIFont boldSystemFontOfSize:15.0];
-  self.stikDebugButton.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
-  [self.stikDebugButton setTitleColor:UIColor.systemBlueColor
+  self.stikDebugButton.titleLabel.font =
+      [UIFont boldSystemFontOfSize:14.0];
+  [self.stikDebugButton setTitleColor:XenraBladeSelectedText()
                              forState:UIControlStateNormal];
-  self.stikDebugButton.layer.cornerRadius = 10.0;
+  self.stikDebugButton.backgroundColor = XenraAccent();
+  self.stikDebugButton.layer.cornerRadius = 8.0;
+  self.stikDebugButton.contentEdgeInsets =
+      UIEdgeInsetsMake(8.0, 14.0, 8.0, 14.0);
   [self.stikDebugButton addTarget:self
                            action:@selector(openStikDebug)
                  forControlEvents:UIControlEventTouchUpInside];
@@ -316,32 +356,80 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   self.gamesTable = [[UITableView alloc] initWithFrame:CGRectZero
                                                  style:UITableViewStylePlain];
   self.gamesTable.backgroundColor = UIColor.clearColor;
-  self.gamesTable.separatorColor = [UIColor colorWithWhite:0.3 alpha:1.0];
+  self.gamesTable.separatorStyle = UITableViewCellSeparatorStyleNone;
   self.gamesTable.dataSource = self;
   self.gamesTable.delegate = self;
   self.gamesTable.translatesAutoresizingMaskIntoConstraints = NO;
   [view addSubview:self.gamesTable];
   [self.gamesTable release];
 
+  self.emptyLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+  self.emptyLabel.numberOfLines = 0;
+  self.emptyLabel.textAlignment = NSTextAlignmentCenter;
+  self.emptyLabel.textColor = XenraTextMuted();
+  self.emptyLabel.font = [UIFont systemFontOfSize:14.0];
+  self.emptyLabel.text =
+      @"No games yet.\n\nCopy .iso / .god / .xex files into the app's "
+      @"Documents/Games folder (Files app, or Finder over USB), then tap "
+      @"the status panel to rescan.";
+  self.emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+  [view addSubview:self.emptyLabel];
+  [self.emptyLabel release];
+
   UILayoutGuide* safe = view.safeAreaLayoutGuide;
   [NSLayoutConstraint activateConstraints:@[
-    [self.statusLabel.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
-                                                   constant:16.0],
+    [self.dashboard.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+    [self.dashboard.trailingAnchor
+        constraintEqualToAnchor:view.trailingAnchor],
+    [self.dashboard.topAnchor constraintEqualToAnchor:view.topAnchor],
+    [self.dashboard.bottomAnchor
+        constraintEqualToAnchor:view.bottomAnchor],
+
+    [self.titleLabel.leadingAnchor
+        constraintEqualToAnchor:safe.leadingAnchor constant:16.0],
+    [self.titleLabel.topAnchor constraintEqualToAnchor:safe.topAnchor
+                                              constant:8.0],
+    [self.menuButton.trailingAnchor
+        constraintEqualToAnchor:safe.trailingAnchor constant:-12.0],
+    [self.menuButton.centerYAnchor
+        constraintEqualToAnchor:self.titleLabel.centerYAnchor],
+
+    [self.statusPanel.leadingAnchor
+        constraintEqualToAnchor:safe.leadingAnchor constant:16.0],
+    [self.statusPanel.trailingAnchor
+        constraintEqualToAnchor:safe.trailingAnchor constant:-16.0],
+    [self.statusPanel.topAnchor
+        constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:10.0],
+
+    [self.statusLabel.leadingAnchor
+        constraintEqualToAnchor:self.statusPanel.leadingAnchor constant:14.0],
     [self.statusLabel.trailingAnchor
-        constraintEqualToAnchor:safe.trailingAnchor
-                       constant:-16.0],
-    [self.statusLabel.topAnchor constraintEqualToAnchor:safe.topAnchor
-                                               constant:12.0],
+        constraintEqualToAnchor:self.statusPanel.trailingAnchor constant:-14.0],
+    [self.statusLabel.topAnchor
+        constraintEqualToAnchor:self.statusPanel.topAnchor constant:12.0],
+    [self.statusLabel.bottomAnchor
+        constraintEqualToAnchor:self.statusPanel.bottomAnchor constant:-12.0],
+
     [self.stikDebugButton.centerXAnchor
         constraintEqualToAnchor:view.centerXAnchor],
     [self.stikDebugButton.topAnchor
-        constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:12.0],
-    [self.gamesTable.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        constraintEqualToAnchor:self.statusPanel.bottomAnchor constant:10.0],
+
+    [self.gamesTable.leadingAnchor
+        constraintEqualToAnchor:safe.leadingAnchor],
     [self.gamesTable.trailingAnchor
         constraintEqualToAnchor:safe.trailingAnchor],
     [self.gamesTable.topAnchor
-        constraintEqualToAnchor:self.stikDebugButton.bottomAnchor constant:12.0],
+        constraintEqualToAnchor:self.stikDebugButton.bottomAnchor constant:10.0],
     [self.gamesTable.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+
+    [self.emptyLabel.centerXAnchor constraintEqualToAnchor:view.centerXAnchor],
+    [self.emptyLabel.centerYAnchor
+        constraintEqualToAnchor:self.gamesTable.centerYAnchor],
+    [self.emptyLabel.leadingAnchor
+        constraintEqualToAnchor:safe.leadingAnchor constant:32.0],
+    [self.emptyLabel.trailingAnchor
+        constraintEqualToAnchor:safe.trailingAnchor constant:-32.0],
   ]];
 }
 
@@ -352,11 +440,8 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   const xe::memory::JitStatus fresh = xe::memory::QueryJitStatusRefresh();
 
   NSMutableString* text = [NSMutableString string];
-  [text appendFormat:@"Xenra iOS - session #%ld\n", (long)SessionNumber()];
-  [text appendFormat:
-            @"re-test #%ld  (tap this text to re-test; log: "
-             "Documents/xenra-jit-log.txt)\n\n",
-            (long)self.probeCount];
+  [text appendFormat:@"re-test #%ld  (tap to re-test)\n\n",
+                     (long)self.probeCount];
   [text appendFormat:@"%@\n\n", DescribeJitStatus(fresh)];
   // eSign appends its team-id suffix to the bundle id, and StikDebug matches
   // scripts to apps BY bundle id - the assignment has to target exactly this
@@ -388,12 +473,12 @@ NSString* DescribeMetal(id<MTLDevice> device) {
   }
 
   self.statusLabel.text = text;
+  [self.statusPanel.superview bringSubviewToFront:self.statusPanel];
 
   if (self.games.count == 0) {
-    [text appendString:@"\nNo games yet.\nCopy .iso / .god files into the "
-                        "app's Documents/Games folder (Files app, or Finder "
-                        "over USB), then tap this text to rescan."];
-    self.statusLabel.text = text;
+    self.emptyLabel.hidden = NO;
+  } else {
+    self.emptyLabel.hidden = YES;
   }
 
   if (fresh.capability != xe::memory::JitCapability::kUnavailable &&
@@ -402,6 +487,23 @@ NSString* DescribeMetal(id<MTLDevice> device) {
     self.probeTimer = nil;
   }
   [self.gamesTable reloadData];
+}
+
+// Main-thread scan completion (XenraGameScanner). Rebuilds the launch-path
+// list from the scanned entries and rebinds the table.
+- (void)gamesScanned:(NSArray<XenraGameEntry*>*)games {
+  NSMutableArray<NSString*>* paths = [NSMutableArray array];
+  for (XenraGameEntry* entry in games) {
+    [paths addObject:entry.path];
+  }
+  NSArray<NSString*>* fresh = [paths copy];  // +1, ours
+  self.games = fresh;                        // setter retains its own
+  [fresh release];
+  self.emptyLabel.hidden = (fresh.count != 0);
+  [self.gamesTable reloadData];
+  AppendDiagnostics([NSString
+      stringWithFormat:@"session #%ld: library scan -> %lu games",
+                       (long)SessionNumber(), (unsigned long)fresh.count]);
 }
 
 - (void)openStikDebug {
@@ -746,6 +848,64 @@ NSString* DescribeMetal(id<MTLDevice> device) {
                    triggerLT_, triggerRT_);
 }
 
+// --- Overflow menu ------------------------------------------------------------
+
+// Android's library overflow menu, reduced to what the iOS shell currently
+// implements. The actions that exist in the Android app but have no iOS
+// backend yet (Install Content, Open User Data, Profiles) are listed but
+// disabled, so the menu SHAPE matches even where the feature does not.
+- (void)showOverflowMenu {
+  UIAlertController* menu = [UIAlertController
+      alertControllerWithTitle:@"Xenra"
+                       message:nil
+                preferredStyle:UIAlertControllerStyleActionSheet];
+
+  UIAlertAction* jit = [UIAlertAction
+      actionWithTitle:@"Enable JIT via StikDebug"
+                style:UIAlertActionStyleDefault
+              handler:^(__unused UIAlertAction* a) {
+                [self openStikDebug];
+              }];
+  [menu addAction:jit];
+
+  UIAlertAction* rescan = [UIAlertAction
+      actionWithTitle:@"Rescan games"
+                style:UIAlertActionStyleDefault
+              handler:^(__unused UIAlertAction* a) {
+                [self.scanner scanWithCompletion:^(
+                                   NSArray<XenraGameEntry*>* games) {
+                  [self gamesScanned:games];
+                }];
+              }];
+  [menu addAction:rescan];
+
+  // The remaining entries mirror the Android menu but have no iOS backend
+  // yet; they are listed disabled so the menu shape matches the Android
+  // library's overflow menu even where the feature does not exist here.
+  UIAlertAction* install = [UIAlertAction
+      actionWithTitle:@"Install Content"
+                style:UIAlertActionStyleDefault
+              handler:nil];
+  install.enabled = NO;
+  [menu addAction:install];
+
+  UIAlertAction* userData = [UIAlertAction
+      actionWithTitle:@"Open User Data"
+                style:UIAlertActionStyleDefault
+              handler:nil];
+  userData.enabled = NO;
+  [menu addAction:userData];
+
+  [menu addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                           style:UIAlertActionStyleCancel
+                                         handler:nil]];
+  menu.popoverPresentationController.sourceView = self.menuButton;
+  menu.popoverPresentationController.sourceRect = self.menuButton.bounds;
+  [self.rootController presentViewController:menu
+                                    animated:YES
+                                  completion:nil];
+}
+
 // --- UITableViewDataSource / Delegate ---------------------------------------
 
 - (NSInteger)tableView:(UITableView*)tableView
@@ -755,23 +915,47 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 
 - (UITableViewCell*)tableView:(UITableView*)tableView
         cellForRowAtIndexPath:(NSIndexPath*)indexPath {
-  static NSString* reuse = @"game";
-  UITableViewCell* cell =
+  static NSString* reuse = @"blade";
+  XenraBladeCell* cell =
       [tableView dequeueReusableCellWithIdentifier:reuse];
   if (!cell) {
-    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
-                                  reuseIdentifier:reuse];
-    [cell release];
-    cell.textLabel.textColor = UIColor.whiteColor;
-    cell.textLabel.font = [UIFont systemFontOfSize:14.0];
-    cell.backgroundColor = UIColor.clearColor;
+    cell = [[[XenraBladeCell alloc]
+        initWithStyle:UITableViewCellStyleDefault
+      reuseIdentifier:reuse] autorelease];
   }
   NSString* path = self.games[indexPath.row];
-  cell.textLabel.text = path.lastPathComponent;
-  cell.detailTextLabel.text = [NSString
-      stringWithFormat:@"%lu KB", (unsigned long)([[[NSFileManager defaultManager]
-          attributesOfItemAtPath:path error:nil] fileSize] / 1024)];
+  NSString* name = path.lastPathComponent.stringByDeletingPathExtension;
+  NSString* ext = path.pathExtension.uppercaseString;
+  // Metadata came from the background scan (XenraGameScanner); the row bind
+  // does no disk I/O - the Android library's per-key/per-cell I/O lesson
+  // (session-2 E1/E4) applied here from the start.
+  unsigned long long size = 0;
+  for (XenraGameEntry* entry in self.scanner.games) {
+    if ([entry.path isEqualToString:path]) {
+      size = entry.fileSize;
+      break;
+    }
+  }
+  NSString* subtitle;
+  if (size >= 1024ull * 1024ull * 1024ull) {
+    subtitle = [NSString stringWithFormat:@"%.1f GB · %@",
+                                          size / (1024.0 * 1024.0 * 1024.0),
+                                          ext];
+  } else if (size > 0) {
+    subtitle = [NSString stringWithFormat:@"%llu MB · %@",
+                                          size / (1024ull * 1024ull), ext];
+  } else {
+    subtitle = ext;
+  }
+  [cell bindTitle:name
+         subtitle:subtitle
+            cover:[self.scanner coverForEntryNamed:name]];
   return cell;
+}
+
+- (CGFloat)tableView:(UITableView*)tableView
+    heightForRowAtIndexPath:(NSIndexPath*)indexPath {
+  return 78.0;
 }
 
 - (void)tableView:(UITableView*)tableView
@@ -783,9 +967,15 @@ NSString* DescribeMetal(id<MTLDevice> device) {
 - (void)dealloc {
   [self.probeTimer invalidate];
   [self.displayLink invalidate];
+  [_dashboard release];
+  [_titleLabel release];
+  [_menuButton release];
+  [_statusPanel release];
   [_statusLabel release];
   [_stikDebugButton release];
   [_gamesTable release];
+  [_emptyLabel release];
+  [_scanner release];
   [_games release];
   [_probeTimer release];
   [_displayLink release];

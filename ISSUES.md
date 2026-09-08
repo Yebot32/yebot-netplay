@@ -41,6 +41,14 @@ strike through / mark FIXED with the commit.
 
 ## Fixed
 
+- I-8 | ios/src/XenraAppDelegate.mm cellForRowAtIndexPath | Per-cell
+  NSFileManager attributesOfItemAtPath on every visible row, every reload
+  (the Android E-class main-thread I/O bug, re-created on iOS) + a flat
+  non-Android UI. | H
+  -> FIXED (session 3, UI pass 1): background scan (XenraGameScanner) feeds
+  cached metadata + covers; library screen rebuilt as the Android dashboard
+  (theme/blade/scanner files). Per-row disk I/O eliminated.
+
 - I-7 | ios/src/XenraAppDelegate.mm exitGame | Exit tapped during boot
   (status==1, "Booting... can take a while" screen, Exit button visible)
   deadlocked: xe_ios_shutdown joins the boot thread from the main thread,
