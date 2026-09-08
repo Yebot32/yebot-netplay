@@ -147,3 +147,44 @@ documentation, (3) UI = exact replica of Android, (4) OG-on-iOS milestone 3.
   xemu_android.cpp, and CI wiring. This session delivers the load-bearing
   piece (interpreter fallback + its libffi dependency) and the local build
   proof.
+
+### Reference studies (DukeX + XeniOS)
+- DukeX (xemu-on-iOS, GPL-2.0, same family as our OG core): native Swift
+  shell, xemu Vulkan renderer over **MoltenVK** presenting through a
+  native CAMetalLayer (xemu_ios_set_external_metal_layer), TCG
+  "version-aware" JIT (iOS 16-18 W^X reprotection; iOS 26+ StikDebug
+  Universal.js via XEMU_IOS_UNIVERSAL_JIT=1), Documents layout
+  BIOS/ROMs/Covers/GameConfigs/ShaderCaches, TB-cache size settings
+  (64/128/256 MB). Adopted: the MoltenVK decision and the Documents
+  layout for the OG path (docs/OG-IOS-PLAN.md). Not copied: their shell
+  code, their renderer diffs.
+- XeniOS (xenia-on-iOS, BSD-3, Xenia Edge based): their shipping iOS
+  entitlements were already borrowed in milestone 1 (xenra.entitlements
+  documents it); their surface technique (explicit CALayer resize, no
+  autoresizingMask on iOS, screen-scale backing) is the same shape our
+  surface_ios.mm implements. Their xb/CMakePresets flow is desktop-only;
+  nothing further to borrow for the 360 path.
+
+### Final verification traces (the no-JIT requirement, both cores)
+- 360, no JIT: launch -> library renders (MEASURED on device, session #7
+  stable); probe never executes without CS_DEBUGGED (memory.cc gate,
+  MEASURED: no SIGKILL on iOS 27); game tap -> clean alert with the exact
+  reason (code-read, launchGame + the fixed xe_ios_boot gate). A 360 game
+  CANNOT run without JIT because xenia has no interpreter anywhere - the
+  app must and does refuse cleanly, tell the user why, and offer the
+  handoff. This is the honest limit of the 360 core.
+- 360, JIT after attach: the stale-cache fix (fix 1) is what makes this
+  path work at all - boot re-probes fresh, Boot() prepares both engine
+  regions idempotently, detach follows SetupSubsystems. Protocol order
+  matches handoff 2.2.
+- OG, no JIT: TCI (the vendored QEMU interpreter) needs NO executable
+  memory, so the JIT question does not arise; build-proven end to end on
+  aarch64 (full libxemu_core.a, TCI=ON). Runtime on a device awaits the
+  milestone-3 iOS entry point.
+- CI: run 34242471544 (0be2b59bd) GREEN - every iOS change this session
+  compiles on macos-15/Xcode 16/arm64. IPA delivered:
+  Downloads/xenra-ios_0be2b59.ipa (8.4 MB, ad-hoc signed, entitlements
+  embedded).
+- App-repo commits this session: e3129854 (TCI + libffi), 15622ade
+  (OG-IOS-PLAN.md). Submodule pointer NOT advanced (standing practice).
+
