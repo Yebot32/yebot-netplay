@@ -585,7 +585,12 @@ int xe_ios_boot(const char* path) {
   if (!g_app || !g_app->emu_) {
     return -1;
   }
-  if (xe::memory::QueryJitStatus().capability ==
+  // Re-probe fresh, never trust the cached snapshot: the enabler attaches
+  // seconds after launch, and a boot attempt that races ahead of it must
+  // still see the attach (QueryJitStatus() caches its first answer for the
+  // life of the process, which would keep refusing boots forever after a
+  // too-early "no"). The probe is cheap and boot is rare.
+  if (xe::memory::QueryJitStatusRefresh().capability ==
       xe::memory::JitCapability::kUnavailable) {
     g_status_detail = "JIT is OFF - enable it via StikDebug first";
     return -2;
