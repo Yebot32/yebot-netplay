@@ -243,6 +243,70 @@ static bool is_well_formed_utf8(const std::string& s) {
     return true;
 }
 
+// Standard UTF-8 -> UTF-16 JNI string. NewStringUTF requires MODIFIED UTF-8,
+// which has no 4-byte form; STFS/GOD metadata is standard UTF-8 and can carry
+// supplementary characters (emoji, rare CJK). Invalid sequences become U+FFFD
+// instead of letting ART reject the string or abort the process.
+static jstring make_utf8_jstring(JNIEnv* env, const std::string& s) {
+    std::u16string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        uint32_t cp;
+        size_t len;
+        if (c < 0x80) {
+            cp = c;
+            len = 1;
+        } else if ((c & 0xE0) == 0xC0 && c >= 0xC2) {
+            cp = c & 0x1F;
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            cp = c & 0x0F;
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0 && c <= 0xF4) {
+            cp = c & 0x07;
+            len = 4;
+        } else {
+            out.push_back(u'\uFFFD');
+            ++i;
+            continue;
+        }
+
+        if (i + len > s.size()) {
+            out.push_back(u'\uFFFD');
+            break;
+        }
+        bool ok = true;
+        for (size_t k = 1; k < len; ++k) {
+            const unsigned char cc =
+                static_cast<unsigned char>(s[i + k]);
+            if ((cc & 0xC0) != 0x80) {
+                ok = false;
+                break;
+            }
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if (!ok || cp > 0x10FFFF || (len == 2 && cp < 0x80) ||
+            (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000) ||
+            (cp >= 0xD800 && cp <= 0xDFFF)) {
+            out.push_back(u'\uFFFD');
+            ++i;
+            continue;
+        }
+        if (cp <= 0xFFFF) {
+            out.push_back(static_cast<char16_t>(cp));
+        } else {
+            cp -= 0x10000;
+            out.push_back(static_cast<char16_t>(0xD800 | (cp >> 10)));
+            out.push_back(static_cast<char16_t>(0xDC00 | (cp & 0x3FF)));
+        }
+        i += len;
+    }
+    return env->NewString(reinterpret_cast<const jchar*>(out.data()),
+                          static_cast<jsize>(out.size()));
+}
+
 // BOUNDED title-name read for ONE language from an already-parsed XDBF/SPA. Does NOT
 // call spa.Load(): SpaInfo::LoadLanguageData (spa_info.cc:50-83) walks the XSTR string
 // table with `ptr += string_length + 4` and NO clamp to section->data.size(), so a
@@ -622,8 +686,9 @@ static jobject j_meta_from_path(JNIEnv* env, jobject self,
     // NAME: bounded reader already NUL-cut + UTF-8-validated. Empty -> leave
     // null so Kotlin uses the filename fallback (do NOT set "").
     if (!meta.name.empty()) {
-        jstring name_j = env->NewStringUTF(meta.name.c_str());
+        jstring name_j = make_utf8_jstring(env, meta.name);
         env->SetObjectField(game_info, fid_name, name_j);
+        if (name_j) env->DeleteLocalRef(name_j);
     }
 
     // TITLE_ID: reuse the 8-hex helper (null when 0).
@@ -680,7 +745,9 @@ static jobject j_meta_info_from_god_path(JNIEnv* env, jobject self,
     const std::string& name = !meta->title_name.empty() ? meta->title_name
                                                          : meta->display_name;
     if (!name.empty()) {
-        env->SetObjectField(game_info, fid_name, env->NewStringUTF(name.c_str()));
+        jstring name_j = make_utf8_jstring(env, name);
+        env->SetObjectField(game_info, fid_name, name_j);
+        if (name_j) env->DeleteLocalRef(name_j);
     }
 
     // TITLE_ID: 8-char uppercase hex for the per-game config stem (null when 0).
@@ -1383,8 +1450,12 @@ static jobjectArray j_list_disc_content(JNIEnv* env, jobject self,
     jobjectArray arr = env->NewObjectArray((jsize)items.size(), cls, nullptr);
     for (jsize i = 0; i < (jsize)items.size(); ++i) {
         jobject obj = env->NewObject(cls, ctor);
-        env->SetObjectField(obj, fid_inner, env->NewStringUTF(items[i].inner_path.c_str()));
-        env->SetObjectField(obj, fid_name, env->NewStringUTF(items[i].display_name.c_str()));
+        jstring inner_j = make_utf8_jstring(env, items[i].inner_path);
+        jstring name_j = make_utf8_jstring(env, items[i].display_name);
+        env->SetObjectField(obj, fid_inner, inner_j);
+        env->SetObjectField(obj, fid_name, name_j);
+        if (inner_j) env->DeleteLocalRef(inner_j);
+        if (name_j) env->DeleteLocalRef(name_j);
         env->SetIntField(obj, fid_title, (jint)items[i].title_id);
         env->SetIntField(obj, fid_type, (jint)items[i].content_type);
         env->SetLongField(obj, fid_size, (jlong)items[i].size);
@@ -1464,7 +1535,9 @@ static jobject j_content_header(JNIEnv* env, jobject self, jstring srcPath) {
     const std::string& name = !meta->display_name.empty() ? meta->display_name
                                                           : meta->title_name;
     if (!name.empty()) {
-        env->SetObjectField(info, fid_name, env->NewStringUTF(name.c_str()));
+        jstring name_j = make_utf8_jstring(env, name);
+        env->SetObjectField(info, fid_name, name_j);
+        if (name_j) env->DeleteLocalRef(name_j);
     }
     if (!meta->icon_data.empty()) {
         jbyteArray icon = env->NewByteArray((jsize)meta->icon_data.size());
@@ -1514,8 +1587,12 @@ static jobjectArray j_list_content(JNIEnv* env, jobject self, jstring contentRoo
     jobjectArray arr = env->NewObjectArray((jsize)items.size(), cls, nullptr);
     for (jsize i = 0; i < (jsize)items.size(); ++i) {
         jobject obj = env->NewObject(cls, ctor);
-        env->SetObjectField(obj, fid_pkg, env->NewStringUTF(items[i].pkg_dir.c_str()));
-        env->SetObjectField(obj, fid_name, env->NewStringUTF(items[i].display_name.c_str()));
+        jstring pkg_j = make_utf8_jstring(env, items[i].pkg_dir);
+        jstring name_j = make_utf8_jstring(env, items[i].display_name);
+        env->SetObjectField(obj, fid_pkg, pkg_j);
+        env->SetObjectField(obj, fid_name, name_j);
+        if (pkg_j) env->DeleteLocalRef(pkg_j);
+        if (name_j) env->DeleteLocalRef(name_j);
         env->SetLongField(obj, fid_size, (jlong)items[i].size);
         env->SetObjectArrayElement(arr, i, obj);
         env->DeleteLocalRef(obj);
@@ -1604,8 +1681,12 @@ static jobjectArray j_list_profiles(JNIEnv* env, jobject self, jstring contentRo
     for (jsize i = 0; i < (jsize)profiles.size(); ++i) {
         jobject obj = env->NewObject(cls, ctor);
         std::string xuid = fmt::format("{:016X}", profiles[i].xuid);
-        env->SetObjectField(obj, fid_xuid, env->NewStringUTF(xuid.c_str()));
-        env->SetObjectField(obj, fid_tag, env->NewStringUTF(profiles[i].gamertag.c_str()));
+        jstring xuid_j = make_utf8_jstring(env, xuid);
+        jstring tag_j = make_utf8_jstring(env, profiles[i].gamertag);
+        env->SetObjectField(obj, fid_xuid, xuid_j);
+        env->SetObjectField(obj, fid_tag, tag_j);
+        if (xuid_j) env->DeleteLocalRef(xuid_j);
+        if (tag_j) env->DeleteLocalRef(tag_j);
         env->SetIntField(obj, fid_lang, (jint)profiles[i].language);
         env->SetIntField(obj, fid_country, (jint)profiles[i].country);
         env->SetBooleanField(obj, fid_avatar, (jboolean)profiles[i].has_avatar);
