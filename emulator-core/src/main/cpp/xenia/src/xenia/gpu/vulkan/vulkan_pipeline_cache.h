@@ -22,6 +22,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <shared_mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -638,6 +639,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
 
   // Vulkan pipeline cache for faster pipeline creation.
   VkPipelineCache vk_pipeline_cache_ = VK_NULL_HANDLE;
+  // Vulkan requires host access to a VkPipelineCache to be externally
+  // synchronized. Creation threads take a shared lock around
+  // vkCreateGraphicsPipelines; saving takes an exclusive lock around
+  // vkGetPipelineCacheData, so a save cannot race creation.
+  std::shared_mutex vk_pipeline_cache_access_mutex_;
 
   std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher>
       pipelines_;
@@ -665,8 +671,9 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   std::atomic<bool> creation_completion_set_event_{false};
   std::function<void()> creation_completion_callback_;
   // During startup loading, don't block on pipeline creation to allow game
-  // boot.
-  bool startup_loading_ = false;
+  // boot. Written by a creation thread's completion callback and read by the
+  // GPU thread.
+  std::atomic<bool> startup_loading_{false};
 
   // Deferred destruction of pipelines.
   // Pipelines are only destroyed after the GPU submission that might reference
@@ -687,8 +694,8 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // VkPipelineCache persistence path.
   std::filesystem::path vk_pipeline_cache_path_;
   // Saves vk_pipeline_cache_ to vk_pipeline_cache_path_ (no-op if either is
-  // unset). Safe to call from the GPU thread concurrently with pipeline
-  // creation (the pipeline cache is internally synchronized by the driver).
+  // unset). Takes vk_pipeline_cache_access_mutex_ exclusively, so it cannot
+  // run concurrently with pipeline creation.
   void SaveVkPipelineCache();
   // Periodically persist vk_pipeline_cache_ on the GPU thread so the cache
   // survives Android process kills (upstream only saves at clean shutdown,
