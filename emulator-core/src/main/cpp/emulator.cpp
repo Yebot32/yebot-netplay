@@ -452,8 +452,15 @@ static void j_change_surface(JNIEnv* env,jobject self,jint w,jint h){
 static void j_setup_surface(JNIEnv* env,jobject self,jobject surface){
     if(surface){
         // ANativeWindow_fromSurface returns one owned reference; ae::surface_*
-        // owns it from here and releases it on detach.
+        // owns it from here and releases it on detach. It can return null for
+        // an abandoned/invalid Surface, and ANativeWindow_getWidth(null) would
+        // SIGSEGV before the caller can react.
         ANativeWindow* w = ANativeWindow_fromSurface(env,surface);
+        if(!w){
+            LOGE("j_setup_surface: ANativeWindow_fromSurface returned null");
+            ae::surface_detach();
+            return;
+        }
         ae::surface_attach(w, ANativeWindow_getWidth(w), ANativeWindow_getHeight(w));
     } else {
         ae::surface_detach();

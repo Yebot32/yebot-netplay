@@ -251,6 +251,13 @@ std::unique_ptr<xe::ui::Surface> AndroidWindow::CreateSurfaceImpl(xe::ui::Surfac
     if(allowed_types&xe::ui::Surface::kTypeFlag_AndroidNativeWindow) {
         std::lock_guard<std::mutex> lk(ae::window_mutex);
         ANativeWindow *window = ae::window;
+        if (!window) {
+            // The surface can be torn down between boot and the first paint;
+            // constructing AndroidNativeWindowSurface with a null window would
+            // hand vkCreateAndroidSurfaceKHR a null ANativeWindow.
+            XELOGW("CreateSurfaceImpl: no ANativeWindow attached");
+            return nullptr;
+        }
         return std::make_unique<xe::ui::AndroidNativeWindowSurface>(window);
     }
     return nullptr;
