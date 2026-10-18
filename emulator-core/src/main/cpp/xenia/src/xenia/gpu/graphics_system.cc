@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/graphics_system.h"
 
+#include <cstdlib>
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -320,9 +322,15 @@ void GraphicsSystem::OnHostGpuLossFromAnyThread(
   // editor's config, right before we crash anyway. The editor is the only
   // intended writer; the emulator reads at boot (see config.cc:57-64).
   config::SaveConfig();
-#endif
-
   xe::FatalError("Graphics device lost (probably due to an internal error)");
+#else
+  // Android: a device loss is typically a Turnip/Adreno driver fault and is
+  // not recoverable. FatalError aborts on a GPU thread, producing a native
+  // tombstone and a false "Xenra crashed" report; end the emulator process
+  // instead so the dashboard remains usable.
+  XELOGE("Graphics device lost; ending the 360 session");
+  std::_Exit(0);
+#endif
 }
 
 uint32_t GraphicsSystem::ReadRegisterThunk(void* ppc_context,
