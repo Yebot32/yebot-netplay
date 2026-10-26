@@ -979,15 +979,13 @@ void XeCryptAesCbc_entry(pointer_t<XECRYPT_AES_STATE> state_ptr,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeCryptAesCbc, kNone, kImplemented);
 
-// HMAC-SHA1 over up to three inputs. This was the body of the guest shim
-// below; it is a plain function now because XeKeysHmacSha needs it too, to
-// derive the System Link LAN keys from the title's LAN key. Same code, so the
-// shim's behaviour cannot drift from the internal caller's.
-static void XeCryptHmacSha(const uint8_t* key, uint32_t key_size_in,
-                           const uint8_t* inp_1, uint32_t inp_1_size,
-                           const uint8_t* inp_2, uint32_t inp_2_size,
-                           const uint8_t* inp_3, uint32_t inp_3_size,
-                           uint8_t* out, uint32_t out_size) {
+// Host-side so code outside a guest export can use it - upstream's System Link
+// key exchange derives its keys through XeKeysHmacSha, which calls this.
+void XeCryptHmacSha(const uint8_t* key, uint32_t key_size_in,
+                    const uint8_t* inp_1, uint32_t inp_1_size,
+                    const uint8_t* inp_2, uint32_t inp_2_size,
+                    const uint8_t* inp_3, uint32_t inp_3_size, uint8_t* out,
+                    uint32_t out_size) {
   uint32_t key_size = key_size_in;
   sha1::SHA1 sha;
   uint8_t kpad_i[0x40];

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -148,8 +149,8 @@ typedef struct {
   SGADDR abOnline;               // Online identification
 } XNADDR;
 static_assert_size(XNADDR, 0x24);
-// XNetGetTitleXnAddr hands the transport's identity straight out through this,
-// so the two have to be the same 36 bytes.
+// The secure transport reads XNADDRs as its own address type, so they must
+// agree on size; this fails the build rather than corrupting peers silently.
 static_assert_size(XNADDR, sizeof(net::secure::Address));
 
 struct XNDNS {
@@ -348,10 +349,8 @@ dword_result_t NetDll_XNetStartup_entry(dword_t caller,
     std::memcpy(&xnet_startup_params, params, sizeof(XNetStartupParams));
   }
 
-  // Gives the transport time to come up before the title looks for peers. A
-  // no-op unless systemlink_transport names one.
+  // Gives the transport time to come up before the title looks for peers.
   GetSystemLink(kernel_state());
-
   // *** THE QoS RESPONDER USED TO START ONLY WHEN THE LOCAL TITLE CALLED
   // XNetQosListen(ENABLE), AND THAT IS THE WRONG TRIGGER. *** On real hardware
   // QoS is answered by the XNet layer, not the title: a console replies to a
@@ -1001,7 +1000,6 @@ dword_result_t NetDll_XNetUnregisterInAddr_entry(dword_t caller,
   if (auto link = GetSystemLink(kernel_state())) {
     return link->Unmap(addr);
   }
-
   // The mapping XNetXnAddrToInAddr hands out is the identity on a LAN, so
   // there is nothing held to release.
   XELOGI("XNetUnregisterInAddr({:08X})", addr.value());
@@ -1042,8 +1040,8 @@ dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> xn_addr,
                                                lpvoid_t xid,
                                                pointer_t<in_addr> in_addr) {
-  in_addr.Zero();
-
+  // Over the System Link transport the IN_ADDR is the link's opaque handle for
+  // the peer's secure address, as on a real console.
   if (auto link = GetSystemLink(kernel_state())) {
     if (!xn_addr || !xid || !in_addr) {
       return 10014;  // WSAEFAULT
@@ -1055,12 +1053,12 @@ dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
     uint32_t secure = 0;
     const uint32_t result = link->Map(address, id, secure);
     if (!result) {
-      // Same convention as the rest of this file: the guest field holds the
-      // address in network byte order.
-      in_addr->s_addr = htonl(secure);
+      xe::store_and_swap<uint32_t>(&in_addr->s_addr, secure);
     }
     return result;
   }
+
+  in_addr.Zero();
 
   // On a real console the returned IN_ADDR is an opaque handle that the XNet
   // layer maps back to a secure address. On a LAN there is nothing to secure
@@ -1091,12 +1089,27 @@ dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
 
   return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kSketchy);
+DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kImplemented);
 
 // Does the reverse of the above.
 dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
                                                pointer_t<XNADDR> xn_addr,
                                                lpvoid_t xid) {
+  if (auto link = GetSystemLink(kernel_state())) {
+    net::secure::Address address;
+    net::KeyId id;
+    const uint32_t result = link->Reverse(in_addr, address, id);
+    if (!result) {
+      if (xn_addr) {
+        std::memcpy(xn_addr, address.data(), address.size());
+      }
+      if (xid) {
+        std::memcpy(xid, id.data(), id.size());
+      }
+    }
+    return result;
+  }
+
   if (xn_addr) {
     std::memset(xn_addr, 0, sizeof(XNADDR));
   }
@@ -1120,22 +1133,6 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
   if (xid) {
     std::memset(reinterpret_cast<void*>(xid.host_address()), 0,
                 sizeof(uint64_t));
-  }
-
-  if (auto link = GetSystemLink(kernel_state())) {
-    net::secure::Address address;
-    net::KeyId id;
-    const uint32_t result = link->Reverse(in_addr, address, id);
-    if (!result) {
-      if (xn_addr) {
-        std::memcpy(xn_addr, address.data(), address.size());
-      }
-      if (xid) {
-        std::memcpy(reinterpret_cast<void*>(xid.host_address()), id.data(),
-                    id.size());
-      }
-    }
-    return result;
   }
 
   if (cvars::network_mode != NETWORK_MODE::LAN) {
@@ -1184,7 +1181,7 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
 
   return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kSketchy);
+DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kImplemented);
 
 // https://www.google.com/patents/WO2008112448A1?cl=en
 // Reserves a port for use by system link
@@ -1204,11 +1201,6 @@ DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kSketchy);
 // Kai-assigned IP. Xenia-to-xenia already works over the current traffic.
 dword_result_t NetDll_XNetSetSystemLinkPort_entry(dword_t caller,
                                                   dword_t port) {
-  // The transport owns the port when one is running.
-  if (GetSystemLink(kernel_state())) {
-    return 0;
-  }
-
   // The guest passes this already byte-swapped, as it would go on the wire.
   const uint16_t host_port = xe::byte_swap(static_cast<uint16_t>(port));
   system_link_port.store(host_port);
@@ -1262,11 +1254,9 @@ struct XEthernetStatus {
 // (no socket, no bind, no discovery traffic, an empty browser that never
 // errors) came from this one return value.
 dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
-  // A running transport is a link, whatever the host adapter says.
   if (GetSystemLink(kernel_state())) {
     return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE;
   }
-
   if (cvars::network_mode == NETWORK_MODE::OFFLINE) {
     return 0;
   }
@@ -1285,35 +1275,6 @@ dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
 }
 DECLARE_XAM_EXPORT2(NetDll_XNetGetEthernetLinkStatus, kNetworking, kImplemented,
                     kHighFrequency);
-
-// The original Xbox emulator puts its emulated network adapter on the LAN
-// through these. |send_filter| would vet xam's own frames, but a title with
-// its own stack sends none.
-dword_result_t NetDll_XnpEthernetInterceptSetCallbacks_entry(
-    dword_t caller, dword_t send_filter, dword_t receive, dword_t context,
-    dword_t flags) {
-  auto link = GetSystemLink(kernel_state());
-  if (!link) {
-    return uint32_t(X_WSAError::X_WSANOTINITIALISED);
-  }
-  return kernel_state()
-      ->GetKernelModule<XamModule>("xam.xex")
-      ->ethernet_intercept()
-      .SetCallbacks(*link, caller, receive, context);
-}
-DECLARE_XAM_EXPORT1(NetDll_XnpEthernetInterceptSetCallbacks, kNetworking,
-                    kImplemented);
-
-dword_result_t NetDll_XnpEthernetInterceptXmit_entry(dword_t caller,
-                                                     lpvoid_t frame,
-                                                     dword_t length) {
-  auto link = GetSystemLink(kernel_state());
-  if (!link) {
-    return uint32_t(X_WSAError::X_WSANOTINITIALISED);
-  }
-  return link->SendFrame({frame.as<const uint8_t*>(), length.value()});
-}
-DECLARE_XAM_EXPORT1(NetDll_XnpEthernetInterceptXmit, kNetworking, kImplemented);
 
 dword_result_t NetDll_XNetDnsLookup_entry(dword_t caller, lpstring_t host,
                                           dword_t event_handle,
@@ -2045,7 +2006,6 @@ dword_result_t NetDll_XNetConnect_entry(dword_t caller, dword_t addr) {
   if (auto link = GetSystemLink(kernel_state())) {
     return link->Connect(addr);
   }
-
   XELOGI("XNetConnect({:08X})", addr.value());
 
   // Upstream sleeps here, with the note that 43430806, 43430821 and 5841124E
@@ -2063,7 +2023,6 @@ dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller,
   if (auto link = GetSystemLink(kernel_state())) {
     return link->ConnectStatus(addr);
   }
-
   // Once per address, not once per call - titles poll this in a loop until it
   // reports CONNECTED. It was silent, so a title stuck waiting on a peer we
   // never report as connected would have left no trace at all. Rule 79.
@@ -2355,8 +2314,8 @@ struct x_fd_set {
   xe::be<uint32_t> fd_array[64];
 };
 
-// Which select set a host_set is, since System Link sockets have no host
-// handle to be waited on and answer for themselves.
+// Which select set a host_set is, since System Link sockets answer for
+// themselves.
 enum class SelectSet { kRead, kWrite, kExcept };
 
 struct host_set {
@@ -2482,9 +2441,8 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
   if (exceptfds) {
     host_exceptfds.Load(exceptfds);
   }
-  // How many host handles the native sets carry. Windows fails a select given
-  // no handles at all, and a set of only System Link sockets has none.
   uint32_t native_count = 0;
+  // A select with nothing ready empties the sets, so this refills them too.
   auto store_native = [&]() {
     native_count = host_readfds.Store(&native_readfds) +
                    host_writefds.Store(&native_writefds) +
@@ -2501,62 +2459,52 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
         reinterpret_cast<int32_t*>(&timeout.tv_usec));
     timeout_in = &timeout;
   }
-  // A guest select with a null timeout blocks forever, and on the cooperative
-  // scheduler that pins the dispatch thread inside the host syscall: the fiber
-  // never reaches another safepoint, so no other guest thread sharing that CPU
-  // runs again. MEASURED on 2026-08-23: GTA V's network thread calls this at
-  // boot and wedged the whole title on a black screen at ~f:440, with every
-  // other fiber blocked on it. Poll with a zero timeout and park between
-  // passes instead - the same shape XSocket::RunCooperatively already uses for
-  // a blocking recv or send.
-  XThread* self =
-      GuestScheduler::enabled() ? XThread::GetCurrentFiberThread() : nullptr;
-  // System Link sockets have no host handle, so a set that holds one has to be
-  // polled rather than handed to the host.
+  // XENRA: this replaced the fork's own fix for the same bug. MEASURED on
+  // 2026-08-23, GTA V's network thread selects with a null timeout at boot and
+  // wedged the title at ~f:440 on the cooperative scheduler. Upstream's offload
+  // path polls and parks exactly as that fix did, so only one copy is kept.
+  const bool offload = GuestScheduler::CurrentThreadOffloadsBlockingCalls();
   const bool system_link = host_readfds.HasSystemLink() ||
                            host_writefds.HasSystemLink() ||
                            host_exceptfds.HasSystemLink();
   int ret;
-  if (!self && !system_link) {
+  if (!offload && !system_link) {
     ret = select(nfds, readfds ? &native_readfds : nullptr,
                  writefds ? &native_writefds : nullptr,
                  exceptfds ? &native_exceptfds : nullptr, timeout_in);
   } else {
-    const uint64_t deadline_ms =
-        timeout_in ? Clock::QueryHostUptimeMillis() +
-                         static_cast<uint64_t>(timeout.tv_sec) * 1000 +
-                         static_cast<uint64_t>(timeout.tv_usec) / 1000
-                   : 0;
-    auto* scheduler = self ? self->kernel_state()->guest_scheduler() : nullptr;
+    // A blocking select would stall the other guest threads on this host
+    // thread and System Link sockets have no host handle to wait on. Poll
+    // instead and wait between polls until the timeout.
+    auto* scheduler = kernel_state()->guest_scheduler();
+    uint64_t deadline_ms = 0;
+    if (timeout_in) {
+      // Rounded up so it never waits less than asked.
+      deadline_ms = Clock::QueryHostUptimeMillis() +
+                    uint64_t(timeout.tv_sec) * 1000 +
+                    (timeout.tv_usec + 999) / 1000;
+    }
     while (true) {
-      // select() rewrites the sets it is handed, so rebuild them every pass.
-      // Store() zeroes first, and the host_set itself is only narrowed by
-      // UpdateFrom, which does not run until the loop is done.
-      store_native();
       ret = 0;
+      // Windows fails a select with no handles at all.
       if (native_count || !system_link) {
-        timeval poll_immediately = {0, 0};
+        timeval poll_timeout = {0, 0};
         ret = select(nfds, readfds ? &native_readfds : nullptr,
                      writefds ? &native_writefds : nullptr,
-                     exceptfds ? &native_exceptfds : nullptr,
-                     &poll_immediately);
+                     exceptfds ? &native_exceptfds : nullptr, &poll_timeout);
       }
       if (ret >= 0) {
         ret += host_readfds.CountSystemLinkReady() +
                host_writefds.CountSystemLinkReady() +
                host_exceptfds.CountSystemLinkReady();
       }
-      // Ready descriptors, or an error the guest has to see.
-      if (ret != 0) {
+      if (ret != 0 ||
+          (timeout_in && Clock::QueryHostUptimeMillis() >= deadline_ms)) {
         break;
       }
-      // ret == 0 is "nothing ready yet", which is only an answer once the
-      // guest's own timeout has run out. A null timeout means wait forever.
-      if (timeout_in && Clock::QueryHostUptimeMillis() >= deadline_ms) {
-        break;
-      }
-      if (scheduler) {
-        scheduler->BlockCurrentThread();
+      store_native();
+      if (offload) {
+        scheduler->BlockCurrentThread(deadline_ms);
       } else {
         xe::threading::Sleep(std::chrono::milliseconds(1));
       }
@@ -2778,27 +2726,49 @@ void NetDll_WSASetLastError_entry(dword_t error_code) {
 }
 DECLARE_XAM_EXPORT1(NetDll_WSASetLastError, kNetworking, kImplemented);
 
-dword_result_t NetDll_getsockname_entry(dword_t caller, dword_t socket_handle,
-                                        lpvoid_t buf_ptr, lpdword_t len_ptr) {
+// getsockname and getpeername, which write the guest's sockaddr_in.
+static int GetSocketName(uint32_t socket_handle, bool peer,
+                         pointer_t<XSOCKADDR_IN> name_ptr, lpdword_t len_ptr) {
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
     XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
     return -1;
   }
+  if (!name_ptr || !len_ptr || *len_ptr < sizeof(XSOCKADDR_IN)) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAEFAULT));
+    return -1;
+  }
 
-  int buffer_len = *len_ptr;
-
-  X_STATUS status = socket->GetSockName(buf_ptr, &buffer_len);
+  N_XSOCKADDR_IN name;
+  X_STATUS status =
+      peer ? socket->GetPeerName(&name) : socket->GetSockName(&name);
   if (XFAILED(status)) {
     XThread::SetLastError(socket->GetLastWSAError());
     return -1;
   }
 
-  *len_ptr = buffer_len;
+  name_ptr->sin_family = name.sin_family;
+  name_ptr->sin_port = name.sin_port;
+  name_ptr->sin_addr = name.sin_addr;
+  std::memset(name_ptr->x_sin_zero, 0, sizeof(name_ptr->x_sin_zero));
+  *len_ptr = sizeof(XSOCKADDR_IN);
   return 0;
 }
+
+dword_result_t NetDll_getsockname_entry(dword_t caller, dword_t socket_handle,
+                                        pointer_t<XSOCKADDR_IN> name_ptr,
+                                        lpdword_t len_ptr) {
+  return GetSocketName(socket_handle, false, name_ptr, len_ptr);
+}
 DECLARE_XAM_EXPORT1(NetDll_getsockname, kNetworking, kImplemented);
+
+dword_result_t NetDll_getpeername_entry(dword_t caller, dword_t socket_handle,
+                                        pointer_t<XSOCKADDR_IN> name_ptr,
+                                        lpdword_t len_ptr) {
+  return GetSocketName(socket_handle, true, name_ptr, len_ptr);
+}
+DECLARE_XAM_EXPORT1(NetDll_getpeername, kNetworking, kImplemented);
 
 // The top byte of an XNKID is its session class. Only these three are valid;
 // upstream's IsValidXNKID rejects anything else outright.
@@ -2809,6 +2779,17 @@ constexpr uint8_t XNKID_SERVER = 0xC0;
 
 dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
                                           lpdword_t exchange_key) {
+  if (auto link = GetSystemLink(kernel_state())) {
+    if (!key_id || !exchange_key) {
+      return 10014;  // WSAEFAULT
+    }
+    net::KeyId id;
+    net::Key key;
+    net::SystemLink::CreateKey(id, key, link->cross_platform());
+    std::memcpy(key_id, id.data(), id.size());
+    std::memcpy(exchange_key, key.data(), key.size());
+    return 0;
+  }
   // *** THIS USED TO Fill() BOTH BUFFERS WITH 0xBE. *** Two things wrong with
   // that, both measured on two consoles during a System Link join:
   //
@@ -2823,23 +2804,6 @@ dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
   //
   // Generated the way upstream's GenerateSessionId does: the class in the top
   // byte, 48 random bits below it, stored big-endian as the guest expects.
-  if (auto link = GetSystemLink(kernel_state())) {
-    // A running transport derives the pair itself, so its peers can verify it.
-    if (!key_id || !exchange_key) {
-      return 10014;  // WSAEFAULT
-    }
-    net::KeyId id;
-    net::Key key;
-    net::SystemLink::CreateKey(id, key, /*cross_platform=*/false);
-    std::memcpy(kernel_memory()->TranslateVirtual<uint8_t*>(
-                    key_id.guest_address()),
-                id.data(), id.size());
-    std::memcpy(kernel_memory()->TranslateVirtual<uint8_t*>(
-                    exchange_key.guest_address()),
-                key.data(), key.size());
-    return 0;
-  }
-
   static std::mt19937_64 rng(std::random_device{}());
   std::uniform_int_distribution<uint64_t> dist;
 
@@ -2863,7 +2827,7 @@ dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
   XELOGI("XNetCreateKey: session id {:016X}", session_id);
   return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetCreateKey, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetCreateKey, kNetworking, kImplemented);
 
 // Both of these returned 0 with NO log line of any kind, so "the title never
 // registers a key" was never a statement anybody could make about them - rule
@@ -2880,6 +2844,16 @@ static std::map<uint64_t, std::array<uint8_t, 16>> registered_keys;
 
 dword_result_t NetDll_XNetRegisterKey_entry(dword_t caller, lpdword_t key_id,
                                             lpdword_t exchange_key) {
+  if (auto link = GetSystemLink(kernel_state())) {
+    if (!key_id || !exchange_key) {
+      return 10014;  // WSAEFAULT
+    }
+    net::KeyId id;
+    net::Key key;
+    std::memcpy(id.data(), key_id, id.size());
+    std::memcpy(key.data(), exchange_key, key.size());
+    return link->RegisterKey(id, key);
+  }
   if (!key_id) {
     XELOGW("XNetRegisterKey: null key id");
     return 0;
@@ -2907,26 +2881,22 @@ dword_result_t NetDll_XNetRegisterKey_entry(dword_t caller, lpdword_t key_id,
   // whether it is the right one.
   current_session_id.store(session_id);
 
-  // Our own registry above answers XNetInAddrToXnAddr. A running transport
-  // keeps its own, which is what makes its peers able to resolve the key.
-  if (auto link = GetSystemLink(kernel_state())) {
-    net::KeyId id;
-    net::Key transport_key;
-    std::memcpy(id.data(),
-                reinterpret_cast<const void*>(key_id.host_address()),
-                id.size());
-    std::memcpy(transport_key.data(), key.data(), transport_key.size());
-    link->RegisterKey(id, transport_key);
-  }
-
   XELOGI("XNetRegisterKey: session {:016X} (now current), key {}", session_id,
          HexDumpPacket(key.data(), key.size()));
   return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetRegisterKey, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetRegisterKey, kNetworking, kImplemented);
 
 dword_result_t NetDll_XNetUnregisterKey_entry(dword_t caller,
                                               lpdword_t key_id) {
+  if (auto link = GetSystemLink(kernel_state())) {
+    if (!key_id) {
+      return 10014;  // WSAEFAULT
+    }
+    net::KeyId id;
+    std::memcpy(id.data(), key_id, id.size());
+    return link->UnregisterKey(id);
+  }
   if (!key_id) {
     return 0;
   }
@@ -2952,18 +2922,9 @@ dword_result_t NetDll_XNetUnregisterKey_entry(dword_t caller,
   }
 
   XELOGI("XNetUnregisterKey: session {:016X}", session_id);
-
-  if (auto link = GetSystemLink(kernel_state())) {
-    net::KeyId id;
-    std::memcpy(id.data(),
-                reinterpret_cast<const void*>(key_id.host_address()),
-                id.size());
-    link->UnregisterKey(id);
-  }
-
   return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterKey, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterKey, kNetworking, kImplemented);
 
 }  // namespace xam
 }  // namespace kernel

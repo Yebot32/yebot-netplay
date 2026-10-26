@@ -1031,6 +1031,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   device->properties_.driverVersion = properties.driverVersion;
   device->properties_.vendorID = properties.vendorID;
   device->properties_.deviceID = properties.deviceID;
+  std::memcpy(device->properties_.pipelineCacheUUID,
+              properties.pipelineCacheUUID, VK_UUID_SIZE);
   std::strcpy(device->properties_.deviceName, properties.deviceName);
 
   XELOGI(

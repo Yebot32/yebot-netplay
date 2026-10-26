@@ -60,6 +60,11 @@ class VulkanDevice {
     uint32_t vendorID = 0;
     uint32_t deviceID = 0;
     char deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
+    // What the Vulkan specification uses to say whether pipeline cache data
+    // from one device may be loaded on another. It is the only thing that
+    // distinguishes the stock driver from a custom one - Turnip and the
+    // proprietary Adreno driver share vendorID, deviceID and deviceName.
+    uint8_t pipelineCacheUUID[VK_UUID_SIZE] = {};
 
     uint32_t maxImageDimension2D = 4096;
     uint32_t maxImageDimension3D = 256;

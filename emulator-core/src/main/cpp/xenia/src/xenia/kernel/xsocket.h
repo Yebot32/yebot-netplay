@@ -41,9 +41,6 @@ enum class X_WSAError : uint32_t {
   // whether retrying is worth anything; DiRT 3's receive wrapper branches on
   // exactly that pair.
   X_WSAENOTCONN = 0x2749,
-  // 10093. XNet is not up, which is what XnpEthernetIntercept answers when no
-  // System Link transport is running.
-  X_WSANOTINITIALISED = 0x276D,
 };
 
 struct XSOCKADDR {
@@ -141,12 +138,8 @@ class XSocket : public XObject {
   X_STATUS Connect(N_XSOCKADDR* name, int name_len);
   X_STATUS Bind(N_XSOCKADDR_IN* name, int name_len);
   X_STATUS Listen(int backlog);
-  X_STATUS GetSockName(uint8_t* buf, int* buf_len);
-  X_STATUS GetPeerName(uint8_t* buf, int* buf_len);
-  // Reads the local or remote address into xenia's own layout. Some hosts lay
-  // sockaddr_in out differently, and a System Link socket has no host handle
-  // at all, so both callers come through here.
-  X_STATUS QueryName(bool peer, N_XSOCKADDR_IN* name);
+  X_STATUS GetSockName(N_XSOCKADDR_IN* name);
+  X_STATUS GetPeerName(N_XSOCKADDR_IN* name);
   object_ref<XSocket> Accept(N_XSOCKADDR* name, int* name_len);
   int Shutdown(int how);
 
@@ -209,6 +202,10 @@ class XSocket : public XObject {
   // Hooks the WSAEventSelect event up to the System Link port. select_mutex_
   // held.
   void ArmSystemLinkEvent();
+
+  // Reads the local or remote address into xenia's own layout. Some hosts lay
+  // sockaddr_in out differently.
+  X_STATUS QueryName(bool peer, N_XSOCKADDR_IN* name);
 
   // Socket storage - either TCP or UDP
   std::optional<asio::ip::tcp::socket> tcp_socket_;

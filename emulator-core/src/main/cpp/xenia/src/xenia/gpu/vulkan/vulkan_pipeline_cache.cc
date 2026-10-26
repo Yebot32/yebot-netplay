@@ -2975,14 +2975,52 @@ void VulkanPipelineCache::InitializeShaderStorage(
     std::error_code ec;
     std::filesystem::create_directories(shader_storage_local_root, ec);
   }
-  vk_pipeline_cache_path_ =
-      shader_storage_local_root /
-      fmt::format("{:08X}.vk.bin", shader_storage_title_id_);
 
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  // The name carries the driver as well as the title, because pipeline cache
+  // data is only valid for the device it was built on. Switching between the
+  // stock driver and a custom one - Turnip and the proprietary Adreno driver
+  // report the same vendorID, deviceID and deviceName - used to reuse the
+  // previous driver's blobs, which is at best a cache miss and at worst a
+  // driver crash.
+  //
+  // pipelineCacheUUID is the token the Vulkan specification defines for
+  // exactly this question, so it is the identity here. driverID is folded in
+  // for drivers that leave the UUID zeroed. driverVersion is deliberately not:
+  // the UUID is what a driver changes when its cache format changes, and
+  // including the version would throw away a still-valid cache on every
+  // driver point release.
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      vulkan_device->properties();
+  uint64_t pipeline_cache_uuid_tag = 0;
+  static_assert(sizeof(pipeline_cache_uuid_tag) <= VK_UUID_SIZE);
+  std::memcpy(&pipeline_cache_uuid_tag, device_properties.pipelineCacheUUID,
+              sizeof(pipeline_cache_uuid_tag));
+  vk_pipeline_cache_path_ =
+      shader_storage_local_root /
+      fmt::format("{:08X}-{:08X}-{:016X}.vk.bin", shader_storage_title_id_,
+                  uint32_t(device_properties.driverID),
+                  pipeline_cache_uuid_tag);
+
+  // The per-title name this used to have is now unreachable. Drop it once so
+  // it does not sit on the device forever.
+  {
+    const std::filesystem::path legacy_path =
+        shader_storage_local_root /
+        fmt::format("{:08X}.vk.bin", shader_storage_title_id_);
+    std::error_code ec;
+    if (std::filesystem::exists(legacy_path, ec)) {
+      std::filesystem::remove(legacy_path, ec);
+      if (!ec) {
+        XELOGI("Removed the pre-driver-keyed pipeline cache {}",
+               xe::path_to_utf8(legacy_path));
+      }
+    }
+  }
 
   // Try to load existing VkPipelineCache data.
   std::vector<uint8_t> pipeline_cache_data;
@@ -3320,15 +3358,43 @@ void VulkanPipelineCache::SaveVkPipelineCache() {
   if (cache_data.empty()) {
     return;
   }
-  if (FILE* cache_file =
-          xe::filesystem::OpenFile(vk_pipeline_cache_path_, "wb")) {
-    fwrite(cache_data.data(), 1, cache_data.size(), cache_file);
-    fclose(cache_file);
-    XELOGI("Saved {} bytes of VkPipelineCache data", cache_data.size());
-  } else {
-    XELOGE("Failed to open VkPipelineCache file for writing: {}",
-           xe::path_to_utf8(vk_pipeline_cache_path_));
+  // Write beside the real file and rename over it. A crash or a kill part way
+  // through used to leave a truncated file that the next run would load as a
+  // cache; now the previous cache survives until the new one is complete.
+  const std::filesystem::path temporary_path =
+      std::filesystem::path(vk_pipeline_cache_path_).concat(".tmp");
+  bool written = false;
+  if (FILE* cache_file = xe::filesystem::OpenFile(temporary_path, "wb")) {
+    written = fwrite(cache_data.data(), 1, cache_data.size(), cache_file) ==
+              cache_data.size();
+    if (fclose(cache_file) != 0) {
+      written = false;
+    }
   }
+  if (!written) {
+    std::error_code discard_ec;
+    std::filesystem::remove(temporary_path, discard_ec);
+    XELOGE("Failed to write VkPipelineCache file: {}",
+           xe::path_to_utf8(vk_pipeline_cache_path_));
+    return;
+  }
+  std::error_code rename_ec;
+  std::filesystem::rename(temporary_path, vk_pipeline_cache_path_, rename_ec);
+  if (rename_ec) {
+    // Some platforms refuse to rename onto an existing file.
+    std::error_code remove_ec;
+    std::filesystem::remove(vk_pipeline_cache_path_, remove_ec);
+    rename_ec.clear();
+    std::filesystem::rename(temporary_path, vk_pipeline_cache_path_, rename_ec);
+  }
+  if (rename_ec) {
+    std::error_code discard_ec;
+    std::filesystem::remove(temporary_path, discard_ec);
+    XELOGE("Failed to replace VkPipelineCache file {}: {}",
+           xe::path_to_utf8(vk_pipeline_cache_path_), rename_ec.message());
+    return;
+  }
+  XELOGI("Saved {} bytes of VkPipelineCache data", cache_data.size());
 }
 
 void VulkanPipelineCache::ShutdownShaderStorage() {

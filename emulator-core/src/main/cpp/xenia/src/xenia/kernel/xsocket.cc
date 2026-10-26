@@ -1100,10 +1100,6 @@ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,
   return true;
 }
 
-// Upstream answers both getsockname and getpeername here so a System Link
-// socket, which has no host handle to ask, has one place to be answered from.
-// Our fork keeps its own raw-buffer entry points below, because xam_net calls
-// them that way; they delegate here for the System Link case.
 X_STATUS XSocket::QueryName(bool peer, N_XSOCKADDR_IN* name) {
   if (system_link_port_) {
     if (peer && !system_link_peer_) {
@@ -1149,71 +1145,12 @@ X_STATUS XSocket::QueryName(bool peer, N_XSOCKADDR_IN* name) {
   return X_STATUS_SUCCESS;
 }
 
-X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
-  if (system_link_port_) {
-    N_XSOCKADDR_IN name;
-    X_STATUS status = QueryName(false, &name);
-    if (XFAILED(status)) {
-      return status;
-    }
-    if (*buf_len < static_cast<int>(sizeof(name))) {
-      last_error_ = 10014;  // WSAEFAULT
-      return X_STATUS_UNSUCCESSFUL;
-    }
-    std::memcpy(buf, &name, sizeof(name));
-    *buf_len = static_cast<int>(sizeof(name));
-    return X_STATUS_SUCCESS;
-  }
-  auto handle = native_handle();
-  if (handle == static_cast<uint64_t>(-1)) {
-    return X_STATUS_INVALID_HANDLE;
-  }
-
-  socklen_t len = static_cast<socklen_t>(*buf_len);
-  int result = getsockname(static_cast<int>(handle),
-                           reinterpret_cast<sockaddr*>(buf), &len);
-  if (result == -1) {
-    last_error_ = AsioErrorToWSAError(
-        asio::error_code(errno, asio::error::get_system_category()));
-    return X_STATUS_UNSUCCESSFUL;
-  }
-
-  *buf_len = static_cast<int>(len);
-  return X_STATUS_SUCCESS;
+X_STATUS XSocket::GetSockName(N_XSOCKADDR_IN* name) {
+  return QueryName(false, name);
 }
 
-X_STATUS XSocket::GetPeerName(uint8_t* buf, int* buf_len) {
-  if (system_link_port_) {
-    N_XSOCKADDR_IN name;
-    X_STATUS status = QueryName(true, &name);
-    if (XFAILED(status)) {
-      return status;
-    }
-    if (*buf_len < static_cast<int>(sizeof(name))) {
-      last_error_ = 10014;  // WSAEFAULT
-      return X_STATUS_UNSUCCESSFUL;
-    }
-    std::memcpy(buf, &name, sizeof(name));
-    *buf_len = static_cast<int>(sizeof(name));
-    return X_STATUS_SUCCESS;
-  }
-
-  auto handle = native_handle();
-  if (handle == static_cast<uint64_t>(-1)) {
-    return X_STATUS_INVALID_HANDLE;
-  }
-
-  socklen_t len = static_cast<socklen_t>(*buf_len);
-  int result = getpeername(static_cast<int>(handle),
-                           reinterpret_cast<sockaddr*>(buf), &len);
-  if (result == -1) {
-    last_error_ = AsioErrorToWSAError(
-        asio::error_code(errno, asio::error::get_system_category()));
-    return X_STATUS_UNSUCCESSFUL;
-  }
-
-  *buf_len = static_cast<int>(len);
-  return X_STATUS_SUCCESS;
+X_STATUS XSocket::GetPeerName(N_XSOCKADDR_IN* name) {
+  return QueryName(true, name);
 }
 
 bool XSocket::UsesSystemLink() const { return udp_socket_ && on_system_link_; }
