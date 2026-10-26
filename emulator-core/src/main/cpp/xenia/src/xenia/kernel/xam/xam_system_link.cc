@@ -402,7 +402,10 @@ bool EthernetIntercept::Start() {
   if (!buffer_) {
     return false;
   }
-  queue_->arrived = object_ref<XEvent>(new XEvent(kernel_state_, true));
+  // This fork's XEvent and XHostThread predate upstream's host_object and
+  // on_fiber flags, and its guest scheduler owns that distinction itself, so
+  // the intercept builds them the way the rest of this tree does.
+  queue_->arrived = object_ref<XEvent>(new XEvent(kernel_state_));
   queue_->arrived->Initialize(false, false);
   thread_ = object_ref<XHostThread>(new XHostThread(
       kernel_state_, 128 * 1024, 0,
@@ -410,7 +413,7 @@ bool EthernetIntercept::Start() {
         Deliver(kernel_state, *queue, buffer);
         return 0;
       },
-      kernel_state_->GetSystemProcess(), true));
+      kernel_state_->GetSystemProcess()));
   thread_->set_can_debugger_suspend(true);
   thread_->set_name("XNet Ethernet Intercept");
   if (XFAILED(thread_->Create())) {

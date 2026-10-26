@@ -2830,7 +2830,7 @@ dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
     }
     net::KeyId id;
     net::Key key;
-    net::SystemLink::CreateKey(id, key);
+    net::SystemLink::CreateKey(id, key, /*cross_platform=*/false);
     std::memcpy(kernel_memory()->TranslateVirtual<uint8_t*>(
                     key_id.guest_address()),
                 id.data(), id.size());
