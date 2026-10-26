@@ -128,9 +128,28 @@ std::vector<uint8_t> Ports(uint16_t source, uint16_t destination,
 
 bool ValidSpi(uint32_t spi) { return spi && spi <= 0xFFFFFF; }
 
+// Sequence, acknowledgment, offset, flags and window.
+constexpr size_t kTcpHeaderSize = 12;
+
+// The header length must cover the fixed fields and its options come out of
+// the encrypted part.
+bool ValidTcpOffset(uint8_t offset, size_t encrypted_size) {
+  const size_t words = offset >> 4;
+  return words >= 5 && (words - 5) * 4 <= encrypted_size;
+}
+
+constexpr uint16_t kQosProbeType = 0x0658;
+constexpr uint16_t kQosReplyType = 0x0758;
+constexpr size_t kQosProbeSize = 78;
+constexpr size_t kQosReplyHeaderSize = 39;
+constexpr size_t kQosTagSize = 12;
+// Records that carry it are dropped.
+constexpr uint8_t kQosRejectedFlags = 0x20;
+
 bool ValidExchange(const Exchange& exchange) {
-  if ((exchange.id[0] & 0xE0) || !ValidSpi(exchange.initiator_spi) ||
-      !(exchange.hops & 0xFF)) {
+  if ((!SystemLinkKeyId(exchange.id, false) &&
+       !SystemLinkKeyId(exchange.id, true)) ||
+      !ValidSpi(exchange.initiator_spi) || !(exchange.hops & 0xFF)) {
     return false;
   }
   return exchange.response ? ValidSpi(exchange.responder_spi)
@@ -236,6 +255,49 @@ Metadata MakeMetadata(uint32_t executable_id, uint32_t version, uint16_t major,
   return result;
 }
 
+std::optional<Metadata> PeekMetadata(std::span<const uint8_t> wire) {
+  // The metadata, the block count, the sequence and the tag end the packet.
+  constexpr size_t kTrailer = 12 + 1 + 2 + 10;
+  if (wire.size() < 4 + kTrailer || Read(wire.subspan(1, 3))) {
+    return std::nullopt;
+  }
+  const uint8_t kind = wire[0] & 15;
+  const size_t reserved = (wire[0] >> 5) | ((wire[0] & 0x10) >> 1);
+  if (kind < 7 || kind > 9 || reserved > 7) {
+    return std::nullopt;
+  }
+  // Ports that don't fit in the padding come before the metadata.
+  const size_t ports = 2 * ((kind - 1) % 3);
+  const size_t clear_ports = ports - std::min(reserved, ports);
+  const size_t blocks = wire[wire.size() - 13];
+  if (wire.size() != 4 + blocks * 8 + clear_ports + kTrailer) {
+    return std::nullopt;
+  }
+  Metadata metadata;
+  std::copy_n(wire.end() - kTrailer, metadata.size(), metadata.begin());
+  return metadata;
+}
+
+uint32_t BroadcastVersionDifference(const Metadata& own,
+                                    const Metadata& theirs) {
+  auto field = [](const Metadata& metadata, size_t index) {
+    return Read(std::span(metadata).subspan(4 * index, 4), true);
+  };
+  if (field(theirs, 0) != field(own, 0)) {
+    return 0;
+  }
+  uint32_t difference = 0;
+  // The version, then the kernel.
+  for (size_t index : {1, 2}) {
+    if (field(theirs, index) < field(own, index)) {
+      difference |= kBroadcastVersionOlder;
+    } else if (field(theirs, index) > field(own, index)) {
+      difference |= kBroadcastVersionNewer;
+    }
+  }
+  return difference;
+}
+
 bool FreshnessNewer(uint64_t incoming, uint64_t previous, bool response) {
   return response ? std::bit_cast<int64_t>(incoming - previous) > 0
                   : std::bit_cast<int64_t>(incoming) >
@@ -252,10 +314,19 @@ bool Encode(const ProtectionKeys& keys, uint32_t spi, uint32_t sequence,
     return false;
   }
   uint8_t encoding = 0;
-  auto ports =
+  auto header =
       packet.kind == Kind::Control
           ? std::vector<uint8_t>{}
           : Ports(packet.source_port, packet.destination_port, encoding);
+  if (packet.kind == Kind::Tcp) {
+    header.resize(header.size() + kTcpHeaderSize);
+    auto fields = std::span(header).last(kTcpHeaderSize);
+    Write(fields.first(4), packet.tcp.sequence);
+    Write(fields.subspan(4, 4), packet.tcp.acknowledgment);
+    fields[8] = packet.tcp.offset;
+    fields[9] = packet.tcp.flags;
+    Write(fields.last(2), packet.tcp.window);
+  }
   std::vector<uint8_t> plain = packet.encrypted;
   uint8_t kind;
   if (packet.kind == Kind::Control) {
@@ -274,6 +345,12 @@ bool Encode(const ProtectionKeys& keys, uint32_t spi, uint32_t sequence,
       return false;
     }
     kind = 7 + encoding;
+  } else if (packet.kind == Kind::Tcp) {
+    if (!packet.clear.empty() ||
+        !ValidTcpOffset(packet.tcp.offset, plain.size())) {
+      return false;
+    }
+    kind = 1 + encoding;
   } else if (packet.kind == Kind::Udp) {
     if (!packet.clear.empty()) {
       return false;
@@ -283,11 +360,11 @@ bool Encode(const ProtectionKeys& keys, uint32_t spi, uint32_t sequence,
     kind = (plain.empty() ? 10 : packet.clear.empty() ? 13 : 7) + encoding;
   }
   const uint8_t reserved = uint8_t((8 - plain.size() % 8) % 8);
-  // Port bytes fill the cipher padding first and any remainder goes in the
-  // clear tail.
-  const size_t embedded = std::min<size_t>(reserved, ports.size());
+  // Header bytes, the ports and then the rest of a TCP header, fill the cipher
+  // padding first and any remainder goes in the clear tail.
+  const size_t embedded = std::min<size_t>(reserved, header.size());
   plain.resize(plain.size() + reserved - embedded, 0);
-  plain.insert(plain.end(), ports.begin(), ports.begin() + embedded);
+  plain.insert(plain.end(), header.begin(), header.begin() + embedded);
   const bool count = kind >= 7 && kind <= 9;
   if (count && plain.size() > 2040) {
     return false;
@@ -299,7 +376,7 @@ bool Encode(const ProtectionKeys& keys, uint32_t spi, uint32_t sequence,
       discovery ? sequence | (sequence << 16) : sequence;
   auto ciphertext = Cbc(keys.cipher, PacketIv(keys.iv_seed, full_sequence),
                         plain, true, discovery);
-  std::vector<uint8_t> tail(ports.begin() + embedded, ports.end());
+  std::vector<uint8_t> tail(header.begin() + embedded, header.end());
   tail.insert(tail.end(), packet.clear.begin(), packet.clear.end());
   if (discovery) {
     tail.insert(tail.end(), packet.metadata.begin(), packet.metadata.end());
@@ -331,7 +408,7 @@ std::optional<Packet> Decode(const ProtectionKeys& keys, uint32_t spi,
     return std::nullopt;
   }
   const uint8_t kind = wire[0] & 15;
-  if ((kind >= 1 && kind <= 3) || (discovery && (kind < 7 || kind > 9))) {
+  if (discovery && (kind < 7 || kind > 9)) {
     return std::nullopt;
   }
   const size_t reserved = (wire[0] >> 5) | ((wire[0] & 0x10) >> 1);
@@ -339,14 +416,15 @@ std::optional<Packet> Decode(const ProtectionKeys& keys, uint32_t spi,
   if (reserved > 7) {
     return std::nullopt;
   }
-  const uint8_t encoding = kind ? (kind - 4) % 3 : 0;
-  const size_t port_size = 2 * encoding;
-  const size_t embedded = std::min(reserved, port_size);
-  const size_t clear_ports = port_size - embedded;
+  const uint8_t encoding = kind ? (kind - 1) % 3 : 0;
+  const bool tcp = kind >= 1 && kind <= 3;
+  const size_t header_size = 2 * encoding + (tcp ? kTcpHeaderSize : 0);
+  const size_t embedded = std::min(reserved, header_size);
+  const size_t clear_header = header_size - embedded;
   const bool count = kind >= 7 && kind <= 9;
   size_t ciphertext_size;
   if (count) {
-    if (wire.size() < 17 + clear_ports + (discovery ? 12 : 0)) {
+    if (wire.size() < 17 + clear_header + (discovery ? 12 : 0)) {
       return std::nullopt;
     }
     ciphertext_size = size_t(wire[wire.size() - 13]) * 8;
@@ -356,10 +434,10 @@ std::optional<Packet> Decode(const ProtectionKeys& keys, uint32_t spi,
     }
     ciphertext_size = 0;
   } else {
-    if (wire.size() < 16 + clear_ports) {
+    if (wire.size() < 16 + clear_header) {
       return std::nullopt;
     }
-    ciphertext_size = (wire.size() - 16 - clear_ports) & ~size_t(7);
+    ciphertext_size = (wire.size() - 16 - clear_header) & ~size_t(7);
   }
   if (ciphertext_size < reserved || ciphertext_size > wire.size() - 16) {
     return std::nullopt;
@@ -367,7 +445,7 @@ std::optional<Packet> Decode(const ProtectionKeys& keys, uint32_t spi,
   const auto ciphertext = wire.subspan(4, ciphertext_size);
   auto tail =
       wire.subspan(4 + ciphertext_size, wire.size() - 16 - ciphertext_size);
-  if (tail.size() < clear_ports + (count ? 1 : 0) + (discovery ? 12 : 0)) {
+  if (tail.size() < clear_header + (count ? 1 : 0) + (discovery ? 12 : 0)) {
     return std::nullopt;
   }
   const uint32_t full_sequence =
@@ -388,19 +466,31 @@ std::optional<Packet> Decode(const ProtectionKeys& keys, uint32_t spi,
   Packet packet;
   packet.kind = discovery   ? Kind::Discovery
                 : kind == 0 ? Kind::Control
+                : tcp       ? Kind::Tcp
                 : kind <= 6 ? Kind::Udp
                             : Kind::Vdp;
-  std::vector<uint8_t> ports(plain.end() - embedded, plain.end());
-  ports.insert(ports.end(), tail.begin(), tail.begin() + clear_ports);
+  std::vector<uint8_t> header(plain.end() - embedded, plain.end());
+  header.insert(header.end(), tail.begin(), tail.begin() + clear_header);
   if (encoding == 1) {
-    packet.source_port = 1000 + ports[0];
-    packet.destination_port = 1000 + ports[1];
+    packet.source_port = 1000 + header[0];
+    packet.destination_port = 1000 + header[1];
   } else if (encoding == 2) {
-    packet.source_port = uint16_t(Read(std::span(ports).first(2)));
-    packet.destination_port = uint16_t(Read(std::span(ports).last(2)));
+    packet.source_port = uint16_t(Read(std::span(header).first(2)));
+    packet.destination_port = uint16_t(Read(std::span(header).subspan(2, 2)));
+  }
+  if (tcp) {
+    auto fields = std::span(header).last(kTcpHeaderSize);
+    packet.tcp.sequence = uint32_t(Read(fields.first(4)));
+    packet.tcp.acknowledgment = uint32_t(Read(fields.subspan(4, 4)));
+    packet.tcp.offset = fields[8];
+    packet.tcp.flags = fields[9];
+    packet.tcp.window = uint16_t(Read(fields.last(2)));
+    if (!ValidTcpOffset(packet.tcp.offset, body_size)) {
+      return std::nullopt;
+    }
   }
   packet.encrypted.assign(plain.begin(), plain.begin() + body_size);
-  tail = tail.subspan(clear_ports);
+  tail = tail.subspan(clear_header);
   if (count) {
     tail = tail.first(tail.size() - 1);
   }
@@ -548,9 +638,7 @@ bool ResponseMatches(const Exchange& request, const Exchange& response) {
   return !request.response && response.response && ValidExchange(request) &&
          ValidExchange(response) && request.id == response.id &&
          request.initiator_spi == response.initiator_spi &&
-         request.initiator_challenge == response.initiator_challenge &&
-         request.initiator_address == response.initiator_address &&
-         request.responder_address == response.responder_address;
+         request.initiator_challenge == response.initiator_challenge;
 }
 
 bool ReplayWindow::Permitted(uint32_t sequence) const {
@@ -588,6 +676,161 @@ bool ReplayWindow::Commit(uint32_t sequence) {
     seen_ |= uint32_t(1) << (highest_ - sequence);
   }
   return true;
+}
+
+std::optional<QosHeader> PeekQos(std::span<const uint8_t> wire) {
+  if (wire.size() < 4 || Read(wire.first(4))) {
+    return std::nullopt;
+  }
+  const auto record = wire.subspan(4);
+  if (record.size() < kQosReplyHeaderSize) {
+    return std::nullopt;
+  }
+  const uint16_t type = uint16_t(Read(record.first(2)));
+  QosHeader header;
+  if (type == kQosProbeType) {
+    if (record.size() < kQosProbeSize) {
+      return std::nullopt;
+    }
+    std::copy_n(record.begin() + 18, 8, header.id.begin());
+  } else if (type == kQosReplyType) {
+    header.reply = true;
+  } else {
+    return std::nullopt;
+  }
+  std::copy_n(record.begin() + 6, 8, header.nonce.begin());
+  header.target = uint16_t(Read(record.subspan(14, 2), true));
+  return header;
+}
+
+std::vector<uint8_t> EncodeQosProbe(const RegistrationKeys& keys,
+                                    const QosProbe& probe) {
+  std::vector<uint8_t> wire(4 + kQosProbeSize, 0);
+  const auto record = std::span(wire).subspan(4);
+  Write(record.first(2), kQosProbeType);
+  Write(record.subspan(2, 2), kQosProbeSize, true);
+  std::copy(probe.nonce.begin(), probe.nonce.end(), record.begin() + 6);
+  Write(record.subspan(14, 2), probe.target, true);
+  record[16] = probe.sequence;
+  record[17] = probe.flags;
+  std::copy(probe.id.begin(), probe.id.end(), record.begin() + 18);
+  std::array<uint8_t, 40> address{};
+  std::copy(probe.address.begin(), probe.address.end(), address.begin());
+  const auto ciphertext = Cbc(keys.cipher, probe.nonce, address, true, true);
+  std::copy(ciphertext.begin(), ciphertext.end(), record.begin() + 26);
+  const auto tag = HmacSha1(keys.authentication, {record.first(66)});
+  std::copy_n(tag.begin(), kQosTagSize, record.begin() + 66);
+  return wire;
+}
+
+std::optional<QosProbe> DecodeQosProbe(const RegistrationKeys& keys,
+                                       std::span<const uint8_t> wire) {
+  const auto header = PeekQos(wire);
+  if (!header || header->reply) {
+    return std::nullopt;
+  }
+  const auto record = wire.subspan(4);
+  // The tag also covers whatever a longer record carries after it.
+  const size_t size = Read(record.subspan(2, 2), true);
+  if (size < kQosProbeSize || size > record.size() ||
+      (record[17] & kQosRejectedFlags)) {
+    return std::nullopt;
+  }
+  const auto tag = HmacSha1(
+      keys.authentication,
+      {record.first(66), record.subspan(kQosProbeSize, size - kQosProbeSize)});
+  if (!Equal(std::span(tag).first(kQosTagSize),
+             record.subspan(66, kQosTagSize))) {
+    return std::nullopt;
+  }
+  const auto address =
+      Cbc(keys.cipher, header->nonce, record.subspan(26, 40), false, true);
+  if (std::any_of(address.begin() + 36, address.end(),
+                  [](uint8_t byte) { return byte != 0; })) {
+    return std::nullopt;
+  }
+  QosProbe probe;
+  probe.nonce = header->nonce;
+  probe.target = header->target;
+  probe.sequence = record[16];
+  probe.flags = record[17];
+  probe.id = header->id;
+  std::copy_n(address.begin(), 36, probe.address.begin());
+  return probe;
+}
+
+std::optional<std::vector<uint8_t>> EncodeQosReply(const RegistrationKeys& keys,
+                                                   const QosReply& reply) {
+  if (!(reply.flags & kQosReplyData) && !reply.data.empty()) {
+    return std::nullopt;
+  }
+  std::vector<uint8_t> plain(reply.data.begin(), reply.data.end());
+  plain.resize((plain.size() + 7) & ~size_t(7), 0);
+  const size_t size = kQosReplyHeaderSize + plain.size();
+  if (size > 0xFFFF) {
+    return std::nullopt;
+  }
+  std::vector<uint8_t> wire(4 + size, 0);
+  const auto record = std::span(wire).subspan(4);
+  Write(record.first(2), kQosReplyType);
+  Write(record.subspan(2, 2), size, true);
+  std::copy(reply.nonce.begin(), reply.nonce.end(), record.begin() + 6);
+  Write(record.subspan(14, 2), reply.target, true);
+  record[16] = reply.sequence;
+  record[17] = reply.flags;
+  Write(record.subspan(18, 4), reply.delay, true);
+  Write(record.subspan(22, 4), reply.gap, true);
+  record[26] = uint8_t(plain.size() - reply.data.size());
+  if (!plain.empty()) {
+    const auto ciphertext = Cbc(keys.cipher, reply.nonce, plain, true, true);
+    std::copy(ciphertext.begin(), ciphertext.end(),
+              record.begin() + kQosReplyHeaderSize);
+  }
+  const auto tag =
+      HmacSha1(keys.authentication,
+               {record.first(27), record.subspan(kQosReplyHeaderSize)});
+  std::copy_n(tag.begin(), kQosTagSize, record.begin() + 27);
+  return wire;
+}
+
+std::optional<QosReply> DecodeQosReply(const RegistrationKeys& keys,
+                                       std::span<const uint8_t> wire) {
+  const auto header = PeekQos(wire);
+  if (!header || !header->reply) {
+    return std::nullopt;
+  }
+  const auto record = wire.subspan(4);
+  const size_t size = Read(record.subspan(2, 2), true);
+  if (size < kQosReplyHeaderSize || size > record.size() ||
+      (record[17] & kQosRejectedFlags)) {
+    return std::nullopt;
+  }
+  const auto ciphertext =
+      record.subspan(kQosReplyHeaderSize, size - kQosReplyHeaderSize);
+  const size_t padding = record[26];
+  if ((record[17] & kQosReplyData)
+          ? padding > 7 || padding > ciphertext.size() || ciphertext.size() % 8
+          : padding || !ciphertext.empty()) {
+    return std::nullopt;
+  }
+  const auto tag =
+      HmacSha1(keys.authentication, {record.first(27), ciphertext});
+  if (!Equal(std::span(tag).first(kQosTagSize),
+             record.subspan(27, kQosTagSize))) {
+    return std::nullopt;
+  }
+  QosReply reply;
+  reply.nonce = header->nonce;
+  reply.target = header->target;
+  reply.sequence = record[16];
+  reply.flags = record[17];
+  reply.delay = uint32_t(Read(record.subspan(18, 4), true));
+  reply.gap = uint32_t(Read(record.subspan(22, 4), true));
+  if (!ciphertext.empty()) {
+    const auto plain = Cbc(keys.cipher, reply.nonce, ciphertext, false, true);
+    reply.data.assign(plain.begin(), plain.end() - padding);
+  }
+  return reply;
 }
 
 }  // namespace xe::net::secure

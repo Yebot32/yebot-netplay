@@ -91,7 +91,47 @@ TrafficKeys DeriveTraffic(const Key& registration_auth, const DhValue& shared,
 Block PacketIv(const Block& seed, uint32_t sequence);
 Metadata MakeMetadata(uint32_t executable_id, uint32_t version, uint16_t major,
                       uint16_t minor, uint16_t build, uint8_t revision);
+// The metadata a discovery packet sends in the clear, none for a packet that
+// isn't laid out as one.
+std::optional<Metadata> PeekMetadata(std::span<const uint8_t> wire);
+// XNetGetBroadcastVersionStatus bits.
+inline constexpr uint32_t kBroadcastVersionOlder = 0x01;
+inline constexpr uint32_t kBroadcastVersionNewer = 0x02;
+// Whether a broadcast from |theirs| came from an older or newer version or
+// kernel than |own|, 0 for another title.
+uint32_t BroadcastVersionDifference(const Metadata& own,
+                                    const Metadata& theirs);
 bool FreshnessNewer(uint64_t incoming, uint64_t previous, bool response);
+
+inline constexpr uint16_t kSystemLinkPort = 3074;
+
+// Titles with cross-platform System Link talk over the real IPs of one subnet
+// on their System Link port. Host byte order.
+struct CrossPlatform {
+  uint32_t address = 0, mask = 0;
+  uint16_t port = kSystemLinkPort;
+};
+
+// System Link key ids carry this type in their top three bits.
+constexpr uint8_t SystemLinkKeyType(bool cross_platform) {
+  return cross_platform ? 0x40 : 0x00;
+}
+constexpr bool SystemLinkKeyId(const KeyId& id, bool cross_platform) {
+  return (id[0] & 0xE0) == SystemLinkKeyType(cross_platform);
+}
+
+// Frames name a machine by its MAC, cross-platform ones by IpMachine() of its
+// IP.
+Mac IpMachine(uint32_t address);
+// The machine an XNADDR names.
+Mac Machine(const Address& address, bool cross_platform);
+// Whether |a| and |b| name one machine by its MAC and for cross-platform
+// System Link also by its IP. xam ignores the other fields, which titles may
+// garble.
+bool SameMachine(const Address& a, const Address& b, bool cross_platform);
+// Whether the IP of |address| belongs to a peer of the subnet, which isn't
+// this machine, the subnet's broadcast address or a loopback address.
+bool SubnetPeer(const Address& address, const CrossPlatform& cross_platform);
 
 struct Frame {
   Mac source{}, destination{};
@@ -99,15 +139,37 @@ struct Frame {
   std::vector<uint8_t> payload;
 };
 
-std::optional<std::vector<uint8_t>> EncodeFrame(const Frame& frame);
-std::optional<Frame> DecodeFrame(std::span<const uint8_t> wire);
+// Whether a frame's payload uses the broadcast keys, which only broadcasts do.
+bool BroadcastPayload(std::span<const uint8_t> payload);
 
-enum class Kind { Control, Udp, Vdp, Discovery };
+std::optional<std::vector<uint8_t>> EncodeFrame(
+    const Frame& frame,
+    const std::optional<CrossPlatform>& cross_platform = std::nullopt);
+// A cross-platform frame must come from another machine of the subnet on the
+// System Link port and go to this machine or 255.255.255.255.
+std::optional<Frame> DecodeFrame(
+    std::span<const uint8_t> wire,
+    const std::optional<CrossPlatform>& cross_platform = std::nullopt);
+
+enum class Kind { Control, Tcp, Udp, Vdp, Discovery };
+
+// The part of a TCP header that follows the ports. There is no checksum or
+// urgent pointer.
+struct TcpHeader {
+  uint32_t sequence = 0, acknowledgment = 0;
+  // Header length in 32-bit words, options included, in the high nibble.
+  uint8_t offset = 0x50;
+  uint8_t flags = 0;
+  uint16_t window = 0;
+  bool operator==(const TcpHeader&) const = default;
+};
 
 struct Packet {
   Kind kind = Kind::Udp;
   uint16_t source_port = 1000, destination_port = 1000;
   uint16_t control_type = 0;
+  // TCP options lead |encrypted|, the segment's data follows them.
+  TcpHeader tcp;
   std::vector<uint8_t> encrypted, clear;
   Metadata metadata{};
 };
@@ -144,7 +206,62 @@ std::optional<std::array<uint8_t, 256>> EncodeExchange(
 std::optional<Exchange> DecodeExchange(const RegistrationKeys& keys,
                                        const KeyId& id,
                                        std::span<const uint8_t> wire);
+// The responder names itself by its own XNADDR and the initiator by the one it
+// keeps for it, which the caller matches by machine.
 bool ResponseMatches(const Exchange& request, const Exchange& response);
+
+// QoS records follow a zero SPI like exchanges and use the registration keys
+// of the key id they name. A prober asks a host for the data it listens with,
+// or times the path with probes sent in pairs.
+inline constexpr uint8_t kQosProbeSecond = 0x01;
+inline constexpr uint8_t kQosProbeDataRequest = 0x02;
+inline constexpr uint8_t kQosReplySecond = 0x01;
+inline constexpr uint8_t kQosReplyData = 0x04;
+// The prober then has no data to ask for.
+inline constexpr uint8_t kQosReplyNoData = 0x08;
+inline constexpr uint8_t kQosReplyDisabled = 0x10;
+
+struct QosProbe {
+  // Per lookup and echoed by replies.
+  Block nonce{};
+  uint16_t target = 0;
+  uint8_t sequence = 0;
+  uint8_t flags = 0;
+  KeyId id{};
+  // The host's XNADDR, which only that host accepts.
+  Address address{};
+};
+
+struct QosReply {
+  Block nonce{};
+  uint16_t target = 0;
+  uint8_t sequence = 0;
+  uint8_t flags = 0;
+  // Microseconds the host held the probe, and between the probes of a pair.
+  uint32_t delay = 0, gap = 0;
+  std::vector<uint8_t> data;
+};
+
+// The clear part of a QoS record, which picks its keys.
+struct QosHeader {
+  bool reply = false;
+  Block nonce{};
+  uint16_t target = 0;
+  // Probes only.
+  KeyId id{};
+};
+
+std::optional<QosHeader> PeekQos(std::span<const uint8_t> wire);
+std::vector<uint8_t> EncodeQosProbe(const RegistrationKeys& keys,
+                                    const QosProbe& probe);
+// Checks the tag and that the address decrypts cleanly. The caller checks
+// that it names this console.
+std::optional<QosProbe> DecodeQosProbe(const RegistrationKeys& keys,
+                                       std::span<const uint8_t> wire);
+std::optional<std::vector<uint8_t>> EncodeQosReply(const RegistrationKeys& keys,
+                                                   const QosReply& reply);
+std::optional<QosReply> DecodeQosReply(const RegistrationKeys& keys,
+                                       std::span<const uint8_t> wire);
 
 // One window per receive direction and generation. Candidates() never changes
 // state, Commit() follows a successful decode.

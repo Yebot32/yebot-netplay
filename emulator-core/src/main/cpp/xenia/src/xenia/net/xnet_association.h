@@ -37,6 +37,8 @@ struct AssociationConfig {
   unsigned retries = 5;
   // Starts sequences at zero and accepts zero from peers.
   bool sequence_zero = false;
+  // Set for titles with cross-platform System Link.
+  std::optional<CrossPlatform> cross_platform;
 };
 
 enum class AssociationStatus { Missing, Pending, Established };
@@ -62,16 +64,29 @@ class Associations {
   void Receive(const Frame& frame, uint64_t now_ms);
   void Tick(uint64_t now_ms);
   void Unregister(const KeyId& id, uint64_t now_ms);
-  void Close(const Address& peer, const KeyId& id, uint64_t now_ms);
+  // Sends |reason| in place of the configured teardown reason when set.
+  // |report| queues a Retired event.
+  void Close(const Address& peer, const KeyId& id, uint64_t now_ms,
+             std::optional<std::array<uint8_t, 4>> reason = std::nullopt,
+             bool report = true);
   void Reset();
   AssociationStatus Status(const Address& peer, const KeyId& id) const;
   std::vector<Frame> TakeOutbound();
   std::vector<AssociationEvent> TakeEvents();
+  // The kBroadcastVersion* bits of broadcasts that didn't authenticate since
+  // the last |reset|.
+  uint32_t BroadcastVersionStatus(bool reset);
 
  private:
   struct State;
   using PeerKey = std::pair<Address, KeyId>;
 
+  Mac MachineOf(const Address& address) const;
+  bool SystemLinkKey(const KeyId& id) const;
+  bool SameMachine(const Address& a, const Address& b) const;
+  // The state of the MAC |peer| names, keyed by the XNADDR it was first named
+  // by.
+  State* Find(const Address& peer, const KeyId& id) const;
   uint32_t NewSpi();
   uint64_t NewFreshness();
   bool Emit(Mac destination, std::vector<uint8_t> payload,
@@ -79,7 +94,9 @@ class Associations {
   bool ExchangePacket(State& state, uint64_t now_ms);
   bool Protected(State& state, const Packet& packet, uint64_t now_ms);
   void Established(State& state, uint64_t now_ms);
-  void Retired(PeerKey key);
+  // Drops |key| and the output it queued. |report| also drops its events and
+  // tells the owner it retired.
+  void Retired(PeerKey key, bool report = true);
 
   AssociationConfig config_;
   Mac local_{};
@@ -88,6 +105,7 @@ class Associations {
   std::vector<AssociationEvent> events_;
   uint16_t discovery_sequence_ = 0;
   uint64_t freshness_ = 0;
+  uint32_t broadcast_version_status_ = 0;
 };
 
 }  // namespace xe::net::secure
