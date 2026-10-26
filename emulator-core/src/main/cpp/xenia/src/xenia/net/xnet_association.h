@@ -1,0 +1,95 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#ifndef XENIA_NET_XNET_ASSOCIATION_H_
+#define XENIA_NET_XNET_ASSOCIATION_H_
+
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <utility>
+#include <vector>
+
+#include "xenia/net/xnet_secure.h"
+
+namespace xe::net::secure {
+
+struct AssociationConfig {
+  Address identity{};
+  ProtectionKeys broadcast;
+  Metadata metadata{};
+  // Reason bytes carried by teardown packets.
+  std::array<uint8_t, 4> teardown_reason{};
+  std::function<std::optional<Key>(const KeyId&)> credential;
+  std::function<uint64_t()> freshness_time;
+  uint32_t mtu = 1500;
+  size_t peer_limit = 32;
+  // Local timing policy, not values taken from the console.
+  uint64_t retry_ms = 1000, idle_ms = 60000, keepalive_ms = 10000;
+  unsigned retries = 5;
+  // Starts sequences at zero and accepts zero from peers.
+  bool sequence_zero = false;
+};
+
+enum class AssociationStatus { Missing, Pending, Established };
+
+struct AssociationEvent {
+  enum class Type { Datagram, Connected, Retired } type = Type::Datagram;
+  Address peer{};
+  KeyId id{};
+  Mac source{};
+  Packet packet;
+};
+
+// The owner serializes calls. State changes only after a packet authenticates.
+class Associations {
+ public:
+  explicit Associations(AssociationConfig config);
+  ~Associations();
+
+  bool Connect(const Address& peer, const KeyId& id, uint64_t now_ms);
+  bool Send(const Address& peer, const KeyId& id, Packet packet,
+            uint64_t now_ms);
+  bool Discover(Packet packet);
+  void Receive(const Frame& frame, uint64_t now_ms);
+  void Tick(uint64_t now_ms);
+  void Unregister(const KeyId& id, uint64_t now_ms);
+  void Close(const Address& peer, const KeyId& id, uint64_t now_ms);
+  void Reset();
+  AssociationStatus Status(const Address& peer, const KeyId& id) const;
+  std::vector<Frame> TakeOutbound();
+  std::vector<AssociationEvent> TakeEvents();
+
+ private:
+  struct State;
+  using PeerKey = std::pair<Address, KeyId>;
+
+  uint32_t NewSpi();
+  uint64_t NewFreshness();
+  bool Emit(Mac destination, std::vector<uint8_t> payload,
+            bool broadcast = false);
+  bool ExchangePacket(State& state, uint64_t now_ms);
+  bool Protected(State& state, const Packet& packet, uint64_t now_ms);
+  void Established(State& state, uint64_t now_ms);
+  void Retired(PeerKey key);
+
+  AssociationConfig config_;
+  Mac local_{};
+  std::map<PeerKey, std::unique_ptr<State>> states_;
+  std::vector<Frame> outbound_;
+  std::vector<AssociationEvent> events_;
+  uint16_t discovery_sequence_ = 0;
+  uint64_t freshness_ = 0;
+};
+
+}  // namespace xe::net::secure
+
+#endif  // XENIA_NET_XNET_ASSOCIATION_H_

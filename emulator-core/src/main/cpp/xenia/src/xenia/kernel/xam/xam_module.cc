@@ -17,6 +17,7 @@
 #include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xam/xam_system_link.h"
 
 namespace xe {
 namespace kernel {
@@ -66,6 +67,15 @@ void XamModule::RegisterExportTable(xe::cpu::ExportResolver* export_resolver) {
 }
 
 XamModule::~XamModule() {}
+
+std::shared_ptr<net::SystemLink> XamModule::system_link() {
+  std::lock_guard lock(system_link_mutex_);
+  if (!system_link_started_) {
+    system_link_started_ = true;
+    system_link_ = CreateSystemLink(kernel_state_);
+  }
+  return system_link_;
+}
 
 }  // namespace xam
 }  // namespace kernel

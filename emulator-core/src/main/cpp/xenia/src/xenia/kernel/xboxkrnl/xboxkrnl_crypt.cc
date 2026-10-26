@@ -14,6 +14,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_crypt.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 
 #include "third_party/crypto/TinySHA1.hpp"
@@ -978,10 +979,15 @@ void XeCryptAesCbc_entry(pointer_t<XECRYPT_AES_STATE> state_ptr,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeCryptAesCbc, kNone, kImplemented);
 
-void XeCryptHmacSha_entry(lpvoid_t key, dword_t key_size_in, lpvoid_t inp_1,
-                          dword_t inp_1_size, lpvoid_t inp_2,
-                          dword_t inp_2_size, lpvoid_t inp_3,
-                          dword_t inp_3_size, lpvoid_t out, dword_t out_size) {
+// HMAC-SHA1 over up to three inputs. This was the body of the guest shim
+// below; it is a plain function now because XeKeysHmacSha needs it too, to
+// derive the System Link LAN keys from the title's LAN key. Same code, so the
+// shim's behaviour cannot drift from the internal caller's.
+static void XeCryptHmacSha(const uint8_t* key, uint32_t key_size_in,
+                           const uint8_t* inp_1, uint32_t inp_1_size,
+                           const uint8_t* inp_2, uint32_t inp_2_size,
+                           const uint8_t* inp_3, uint32_t inp_3_size,
+                           uint8_t* out, uint32_t out_size) {
   uint32_t key_size = key_size_in;
   sha1::SHA1 sha;
   uint8_t kpad_i[0x40];
@@ -1033,6 +1039,16 @@ void XeCryptHmacSha_entry(lpvoid_t key, dword_t key_size_in, lpvoid_t inp_1,
 
   std::memcpy(out, digest, std::min((uint32_t)out_size, 0x14u));
 }
+
+void XeCryptHmacSha_entry(lpvoid_t key, dword_t key_size_in, lpvoid_t inp_1,
+                          dword_t inp_1_size, lpvoid_t inp_2,
+                          dword_t inp_2_size, lpvoid_t inp_3,
+                          dword_t inp_3_size, lpvoid_t out, dword_t out_size) {
+  XeCryptHmacSha(key.as<uint8_t*>(), key_size_in, inp_1.as<uint8_t*>(),
+                 inp_1_size, inp_2.as<uint8_t*>(), inp_2_size,
+                 inp_3.as<uint8_t*>(), inp_3_size, out.as<uint8_t*>(),
+                 out_size);
+}
 DECLARE_XBOXKRNL_EXPORT1(XeCryptHmacSha, kNone, kImplemented);
 
 dword_result_t XeKeysGetKeyProperties_entry(dword_t key) {
@@ -1058,24 +1074,28 @@ dword_result_t XeKeysGetKey_entry(word_t key, lpvoid_t key_buffer,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetKey, kNone, kSketchy);
 
+bool XeKeysHmacSha(uint32_t key_num, const uint8_t* inp_1, uint32_t inp_1_size,
+                   const uint8_t* inp_2, uint32_t inp_2_size,
+                   const uint8_t* inp_3, uint32_t inp_3_size, uint8_t* out,
+                   uint32_t out_size) {
+  if (key_num != 0x19) {
+    return false;
+  }
+  XeCryptHmacSha(key19, sizeof(key19), inp_1, inp_1_size, inp_2, inp_2_size,
+                 inp_3, inp_3_size, out, out_size);
+  return true;
+}
+
 dword_result_t XeKeysHmacSha_entry(dword_t key_num, lpvoid_t inp_1,
                                    dword_t inp_1_size, lpvoid_t inp_2,
                                    dword_t inp_2_size, lpvoid_t inp_3,
                                    dword_t inp_3_size, lpvoid_t out,
                                    dword_t out_size) {
-  const uint8_t* key = nullptr;
-  if (key_num == 0x19) {
-    key = key19;
-  }
-
-  if (key) {
-    XeCryptHmacSha_entry((void*)key, 0x10, inp_1, inp_1_size, inp_2, inp_2_size,
-                         inp_3, inp_3_size, out, out_size);
-
-    return X_STATUS_SUCCESS;
-  }
-
-  return X_STATUS_UNSUCCESSFUL;
+  return XeKeysHmacSha(key_num, inp_1.as<uint8_t*>(), inp_1_size,
+                       inp_2.as<uint8_t*>(), inp_2_size, inp_3.as<uint8_t*>(),
+                       inp_3_size, out.as<uint8_t*>(), out_size)
+             ? X_STATUS_SUCCESS
+             : X_STATUS_UNSUCCESSFUL;
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacSha, kNone, kImplemented);
 

@@ -133,3 +133,6 @@
 [submodule "third_party/game-patches"]
 	path = patches/xenia-canary
 	url = https://github.com/xenia-canary/game-patches
+[submodule "third_party/mbedtls"]
+	path = emulator-core/src/main/cpp/xenia/third_party/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git

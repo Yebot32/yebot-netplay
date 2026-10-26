@@ -21,6 +21,7 @@
 
 #include "xenia/base/byte_order.h"
 #include "xenia/kernel/xobject.h"
+#include "xenia/net/system_link.h"
 
 namespace xe {
 namespace kernel {
@@ -139,6 +140,10 @@ class XSocket : public XObject {
   X_STATUS Listen(int backlog);
   X_STATUS GetSockName(uint8_t* buf, int* buf_len);
   X_STATUS GetPeerName(uint8_t* buf, int* buf_len);
+  // Reads the local or remote address into xenia's own layout. Some hosts lay
+  // sockaddr_in out differently, and a System Link socket has no host handle
+  // at all, so both callers come through here.
+  X_STATUS QueryName(bool peer, N_XSOCKADDR_IN* name);
   object_ref<XSocket> Accept(N_XSOCKADDR* name, int* name_len);
   int Shutdown(int how);
 
@@ -153,6 +158,10 @@ class XSocket : public XObject {
   // Associates the socket with an XEvent signaled on readiness for any of the
   // requested Winsock FD_* flags. flags == 0 detaches.
   int WSAEventSelect(object_ref<XEvent> event, uint32_t flags);
+
+  // Bound on the System Link LAN, so there is no host handle to select on.
+  bool system_link() const { return system_link_port_ != nullptr; }
+  bool SystemLinkReadable() const { return system_link_port_->Readable(); }
 
   uint32_t GetLastWSAError() const;
 
@@ -184,6 +193,19 @@ class XSocket : public XObject {
   void RunCooperatively(asio::error_code& ec, RetryMode mode,
                         const std::function<void()>& attempt);
   void SetHostNonBlocking(bool enable);
+
+  // UDP and VDP sockets bind on the System Link LAN when the title runs it.
+  bool UsesSystemLink() const;
+  X_STATUS BindSystemLink(uint32_t address, uint16_t port);
+  int SystemLinkReceive(uint8_t* buf, uint32_t buf_len, uint32_t flags,
+                        N_XSOCKADDR_IN* from, uint32_t* from_len);
+  int SystemLinkSend(const uint8_t* buf, uint32_t buf_len,
+                     const N_XSOCKADDR_IN* to);
+  // How long a System Link receive waits on this thread.
+  uint32_t SystemLinkWait() const;
+  // Hooks the WSAEventSelect event up to the System Link port. select_mutex_
+  // held.
+  void ArmSystemLinkEvent();
 
   // Socket storage - either TCP or UDP
   std::optional<asio::ip::tcp::socket> tcp_socket_;
@@ -222,6 +244,14 @@ class XSocket : public XObject {
   std::mutex select_mutex_;
   object_ref<XEvent> selected_event_;
   uint32_t selected_event_flags_ = 0;
+
+  // A datagram socket of a title running System Link.
+  bool on_system_link_ = false;
+  std::unique_ptr<net::SystemLinkPort> system_link_port_;
+  // This console's XNADDR ina, what getsockname reports.
+  uint32_t system_link_address_ = 0;
+  // Set by connect(), where send() goes.
+  std::optional<net::Endpoint> system_link_peer_;
 };
 
 }  // namespace kernel
