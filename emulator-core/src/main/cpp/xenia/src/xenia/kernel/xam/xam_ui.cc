@@ -350,7 +350,9 @@ void KeyboardInputDialog::OnDraw(ImGuiIO& io) {
   // Center the window on screen
   ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
   ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSizeConstraints(ImVec2(350, 0), ImVec2(500, 300));
+  // Size constraints leave an auto-resize popup a pixel short of its contents
+  ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 30.0f, 0.0f),
+                           ImGuiCond_Always);
 
   // Style like Xbox - white background, black text, Xbox green highlights
   const ImVec4 xbox_green(0.063f, 0.486f, 0.063f, 1.0f);
@@ -862,7 +864,7 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
   // filter for content list, usually just -1
   // content_category:
   // filter on item types for games (e.g. cars, maps, weapons, etc)
-  if (user_index >= XUserMaxUserCount) {
+  if (user_index >= XUserMaxUserCount || ui_type >= MaxEntrypoint) {
     return X_ERROR_INVALID_PARAMETER;
   }
 
@@ -945,7 +947,7 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
       // Used by XamShowForcedNameChangeUI NXE and up
       desc = fmt::format("Changing gamertag currently not implemented.");
       break;
-    case X_MARKETPLACE_ENTRYPOINT::ProfileNameChange:
+    case X_MARKETPLACE_ENTRYPOINT::GamerTagPurchase:
       // Used by dashboard when selecting change gamertag in profile menu
       desc = fmt::format("Changing gamertag currently not implemented.");
       break;

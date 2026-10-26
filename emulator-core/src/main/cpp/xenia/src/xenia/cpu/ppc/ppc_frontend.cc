@@ -52,8 +52,6 @@ PPCFrontend::~PPCFrontend() {
   translator_pool_.Reset();
 }
 
-Memory* PPCFrontend::memory() const { return processor_->memory(); }
-
 // Checks the state of the global lock and sets scratch to the current MSR
 // value.
 void CheckGlobalLock(PPCContext* ppc_context, void* arg0, void* arg1) {

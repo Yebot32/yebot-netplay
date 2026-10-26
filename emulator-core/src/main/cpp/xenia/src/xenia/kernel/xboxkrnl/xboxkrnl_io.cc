@@ -11,6 +11,7 @@
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_ob.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xfile.h"
@@ -23,6 +24,10 @@
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+// Boost a thread woken by a completed file read or write, as NT's I/O manager
+// does with IO_DISK_INCREMENT.
+constexpr uint32_t kIoDiskIncrement = 1;
 
 struct CreateOptions {
   // https://processhacker.sourceforge.io/doc/ntioapi_8h.html
@@ -54,21 +59,31 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
   }
   assert_not_null(handle_out);
 
+  // A null name opens what the root directory handle refers to. That's how a
+  // file is reopened from a handle.
   auto object_name =
-      kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(object_attrs->name_ptr);
+      util::TranslateAnsiStringPointer(kernel_memory(), object_attrs->name_ptr);
 
   vfs::Entry* root_entry = nullptr;
 
+  const bool has_root_handle =
+      object_attrs->root_directory != 0xFFFFFFFD &&  // ObDosDevices
+      object_attrs->root_directory != 0;
+
   // Compute path, possibly attrs relative.
   auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
+  // A name relative to a directory handle is never under \??\.
+  if (!has_root_handle) {
+    xeObStripDosDevicesPrefix(target_path);
+  }
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
+    XELOGFS("NtCreateFile({}) = OBJECT_NAME_INVALID", target_path);
     return X_STATUS_OBJECT_NAME_INVALID;
   }
 
-  if (object_attrs->root_directory != 0xFFFFFFFD &&  // ObDosDevices
-      object_attrs->root_directory != 0) {
+  if (has_root_handle) {
     auto root_file = kernel_state()->object_table()->LookupObject<XFile>(
         object_attrs->root_directory);
     assert_not_null(root_file);
@@ -88,7 +103,8 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
       &file_action);
   object_ref<XFile> file = nullptr;
 
-  X_HANDLE handle = X_INVALID_HANDLE_VALUE;
+  // A failed open leaves the handle and the information 0.
+  X_HANDLE handle = 0;
   if (XSUCCEEDED(result)) {
     // If true, desired_access SYNCHRONIZE flag must be set.
     bool synchronous =
@@ -102,10 +118,14 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
 
   if (io_status_block) {
     io_status_block->status = result;
-    io_status_block->information = (uint32_t)file_action;
+    io_status_block->information =
+        XSUCCEEDED(result) ? uint32_t(file_action) : 0;
   }
 
   *handle_out = handle;
+
+  XELOGFS("NtCreateFile({}) = {:08X}, handle={:08X}", target_path, result,
+          handle);
 
   return result;
 }
@@ -114,10 +134,11 @@ DECLARE_XBOXKRNL_EXPORT1(NtCreateFile, kFileSystem, kImplemented);
 dword_result_t NtOpenFile_entry(
     lpdword_t handle_out, dword_t desired_access,
     pointer_t<X_OBJECT_ATTRIBUTES> object_attributes,
-    pointer_t<X_IO_STATUS_BLOCK> io_status_block, dword_t open_options) {
+    pointer_t<X_IO_STATUS_BLOCK> io_status_block, dword_t share_access,
+    dword_t open_options) {
   return NtCreateFile_entry(
       handle_out, desired_access, object_attributes, io_status_block, nullptr,
-      0, 0, static_cast<uint32_t>(xe::vfs::FileDisposition::kOpen),
+      0, share_access, static_cast<uint32_t>(xe::vfs::FileDisposition::kOpen),
       open_options);
 }
 DECLARE_XBOXKRNL_EXPORT1(NtOpenFile, kFileSystem, kImplemented);
@@ -138,6 +159,10 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   auto file = kernel_state()->object_table()->LookupObject<XFile>(file_handle);
   if (!file) {
     result = X_STATUS_INVALID_HANDLE;
+  } else if (XSUCCEEDED(result) && !file->is_synchronous() &&
+             !byte_offset_ptr) {
+    // Without a byte offset, only a synchronous handle uses its file position.
+    result = X_STATUS_INVALID_PARAMETER;
   }
 
   if (XSUCCEEDED(result)) {
@@ -208,7 +233,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   }
 
   if (ev && signal_event) {
-    ev->Set(0, false);
+    ev->Set(kIoDiskIncrement, false);
   }
 
   return result;
@@ -230,6 +255,10 @@ dword_result_t NtReadFileScatter_entry(
   auto file = kernel_state()->object_table()->LookupObject<XFile>(file_handle);
   if (!file) {
     result = X_STATUS_INVALID_HANDLE;
+  } else if (XSUCCEEDED(result) && !file->is_synchronous() &&
+             !byte_offset_ptr) {
+    // Without a byte offset, only a synchronous handle uses its file position.
+    result = X_STATUS_INVALID_PARAMETER;
   }
 
   if (XSUCCEEDED(result)) {
@@ -294,7 +323,7 @@ dword_result_t NtReadFileScatter_entry(
   }
 
   if (ev && signal_event) {
-    ev->Set(0, false);
+    ev->Set(kIoDiskIncrement, false);
   }
 
   return result;
@@ -319,6 +348,10 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
   auto file = kernel_state()->object_table()->LookupObject<XFile>(file_handle);
   if (!file) {
     result = X_STATUS_INVALID_HANDLE;
+  } else if (XSUCCEEDED(result) && !file->is_synchronous() &&
+             !byte_offset_ptr) {
+    // Without a byte offset, only a synchronous handle uses its file position.
+    result = X_STATUS_INVALID_PARAMETER;
   }
 
   // Execute write.
@@ -381,7 +414,7 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
   }
 
   if (ev && signal_event) {
-    ev->Set(0, false);
+    ev->Set(kIoDiskIncrement, false);
   }
 
   return result;
@@ -475,7 +508,7 @@ dword_result_t NtQueryFullAttributesFile_entry(
     pointer_t<X_OBJECT_ATTRIBUTES> obj_attribs,
     pointer_t<X_FILE_NETWORK_OPEN_INFORMATION> file_info) {
   auto object_name =
-      kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(obj_attribs->name_ptr);
+      util::TranslateAnsiStringPointer(kernel_memory(), obj_attribs->name_ptr);
 
   object_ref<XFile> root_file;
   if (obj_attribs->root_directory != 0xFFFFFFFD &&  // ObDosDevices
@@ -488,6 +521,10 @@ dword_result_t NtQueryFullAttributesFile_entry(
   }
 
   auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
+  // A name relative to a directory handle is never under \??\.
+  if (!root_file) {
+    xeObStripDosDevicesPrefix(target_path);
+  }
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
@@ -498,6 +535,7 @@ dword_result_t NtQueryFullAttributesFile_entry(
   auto entry = kernel_state()->file_system()->ResolvePath(target_path);
   if (entry) {
     // Found.
+    entry->update();
     file_info->creation_time = entry->create_timestamp();
     file_info->last_access_time = entry->access_timestamp();
     file_info->last_write_time = entry->write_timestamp();
@@ -581,9 +619,10 @@ dword_result_t NtOpenSymbolicLinkObject_entry(
   assert_true(object_attrs->attributes == 64);  // case insensitive
 
   auto object_name =
-      kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(object_attrs->name_ptr);
+      util::TranslateAnsiStringPointer(kernel_memory(), object_attrs->name_ptr);
 
-  auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
+  auto target_path = xeObSymbolicLinkName(
+      util::TranslateAnsiPath(kernel_memory(), object_name));
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
@@ -592,10 +631,6 @@ dword_result_t NtOpenSymbolicLinkObject_entry(
 
   if (object_attrs->root_directory != 0) {
     assert_always();
-  }
-
-  if (utf8::starts_with(target_path, "\\??\\")) {
-    target_path = target_path.substr(4);  // Strip the full qualifier
   }
 
   std::string link_path;
@@ -676,6 +711,25 @@ dword_result_t NtDeviceIoControlFile_entry(
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtDeviceIoControlFile, kFileSystem, kStub);
+
+// cache: is a host folder mounted for every title, so no STFS volume is made
+// over a cache partition and the caller's device object stays as it was.
+dword_result_t StfsCreateDevice_entry(lpvoid_t params, dword_t params_size) {
+  if (params_size != 0x58) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsCreateDevice, kFileSystem, kStub);
+
+dword_result_t StfsControlDevice_entry(lpvoid_t device, dword_t control_code,
+                                       lpvoid_t buffer) {
+  if (control_code > 4) {
+    return X_STATUS_INVALID_DEVICE_REQUEST;
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsControlDevice, kFileSystem, kStub);
 // device_extension_size = additional bytes of data (aligned up to 8 byte
 // granularity) that will be allocated at the tail of the resulting device
 // object. although it is allocated at the tail, it is accessed through a

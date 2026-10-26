@@ -28,6 +28,7 @@
 #include "xenia/gpu/dxbc.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_provider.h"
@@ -834,30 +835,32 @@ bool D3D12RenderTargetCache::Initialize() {
     dump_root_source_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     dump_root_source_range.NumDescriptors = 1;
     dump_root_source_range.BaseShaderRegister = 0;
-    dump_root_source_range.RegisterSpace = 0;
+    dump_root_source_range.RegisterSpace = kDumpDescriptorSetSource;
     dump_root_source_range.OffsetInDescriptorsFromTableStart = 0;
     D3D12_DESCRIPTOR_RANGE dump_root_stencil_range;
     dump_root_stencil_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     dump_root_stencil_range.NumDescriptors = 1;
     dump_root_stencil_range.BaseShaderRegister = 1;
-    dump_root_stencil_range.RegisterSpace = 0;
+    dump_root_stencil_range.RegisterSpace = kDumpDescriptorSetSource;
     dump_root_stencil_range.OffsetInDescriptorsFromTableStart = 0;
     D3D12_ROOT_PARAMETER
     dump_root_color_parameters[kDumpRootParameterColorCount];
     D3D12_ROOT_PARAMETER
     dump_root_depth_parameters[kDumpRootParameterDepthCount];
     for (uint32_t i = 0; i < 2; ++i) {
-      // Offsets.
-      D3D12_ROOT_PARAMETER& dump_root_offsets =
-          i ? dump_root_depth_parameters[kDumpRootParameterOffsets]
-            : dump_root_color_parameters[kDumpRootParameterOffsets];
-      dump_root_offsets.ParameterType =
+      // Push constants.
+      D3D12_ROOT_PARAMETER& dump_root_push_constants =
+          i ? dump_root_depth_parameters[kDumpRootParameterPushConstants]
+            : dump_root_color_parameters[kDumpRootParameterPushConstants];
+      dump_root_push_constants.ParameterType =
           D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-      dump_root_offsets.Constants.ShaderRegister = kDumpCbufferOffsets;
-      dump_root_offsets.Constants.RegisterSpace = 0;
-      dump_root_offsets.Constants.Num32BitValues =
-          sizeof(DumpOffsets) / sizeof(uint32_t);
-      dump_root_offsets.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+      dump_root_push_constants.Constants.ShaderRegister =
+          SpirvToDxilCompiler::kPushConstantShaderRegister;
+      dump_root_push_constants.Constants.RegisterSpace =
+          SpirvToDxilCompiler::kPushConstantRegisterSpace;
+      dump_root_push_constants.Constants.Num32BitValues =
+          kDumpRootPushConstantDwords;
+      dump_root_push_constants.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
       // Source.
       D3D12_ROOT_PARAMETER& dump_root_source =
           i ? dump_root_depth_parameters[kDumpRootParameterSource]
@@ -879,24 +882,13 @@ bool D3D12RenderTargetCache::Initialize() {
             &dump_root_stencil_range;
         dump_root_stencil.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
       }
-      // Pitches.
-      D3D12_ROOT_PARAMETER& dump_root_pitches =
-          i ? dump_root_depth_parameters[kDumpRootParameterDepthPitches]
-            : dump_root_color_parameters[kDumpRootParameterColorPitches];
-      dump_root_pitches.ParameterType =
-          D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-      dump_root_pitches.Constants.ShaderRegister = kDumpCbufferPitches;
-      dump_root_pitches.Constants.RegisterSpace = 0;
-      dump_root_pitches.Constants.Num32BitValues =
-          sizeof(DumpPitches) / sizeof(uint32_t);
-      dump_root_pitches.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
       // EDRAM.
       D3D12_ROOT_PARAMETER& dump_root_edram =
           i ? dump_root_depth_parameters[kDumpRootParameterDepthEdram]
             : dump_root_color_parameters[kDumpRootParameterColorEdram];
       dump_root_edram.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
       dump_root_edram.Descriptor.ShaderRegister = 0;
-      dump_root_edram.Descriptor.RegisterSpace = 0;
+      dump_root_edram.Descriptor.RegisterSpace = kDumpDescriptorSetEdram;
       dump_root_edram.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
     D3D12_ROOT_SIGNATURE_DESC dump_root_desc;
@@ -1370,11 +1362,11 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
     // If everything owning the source is native, copy at 1x1 into shared
     // memory.
     bool copy_native = false;
+    uint32_t dump_base = 0;
+    uint32_t dump_row_length_used = 0;
+    uint32_t dump_rows = 0;
+    uint32_t dump_pitch = 0;
     if (GetPath() == Path::kHostRenderTargets) {
-      uint32_t dump_base;
-      uint32_t dump_row_length_used;
-      uint32_t dump_rows;
-      uint32_t dump_pitch;
       resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used,
                                         dump_rows, dump_pitch);
       copy_native = IsResolveSourceNativeOnly(dump_base, dump_row_length_used,
@@ -1389,12 +1381,6 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
           return false;
         }
       }
-      // Dump the current contents of the render targets owning the affected
-      // range to edram_buffer_.
-      // TODO(Triang3l): Direct host render target -> shared memory resolve
-      // shaders for non-converting cases.
-      DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
-                        copy_native);
     }
     bool copy_dest_scaled = draw_resolution_scaled && !copy_native;
 
@@ -1405,7 +1391,41 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
         copy_native ? 1 : draw_resolution_scale_y(), copy_shader_constants,
         copy_group_count_x, copy_group_count_y);
     assert_true(copy_group_count_x && copy_group_count_y);
-    if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
+
+    bool resolved_directly = false;
+    if (GetPath() == Path::kHostRenderTargets) {
+      // Read the render targets straight into shared memory where the copy
+      // wouldn't have converted anything, otherwise dump the current contents
+      // of the ones owning the affected range to edram_buffer_ for it.
+      if (cvars::direct_host_resolve &&
+          GetDirectResolveEligibility(resolve_info, copy_shader) ==
+              DirectResolveEligibility::kEligible) {
+        resolved_directly = DirectResolveRenderTargets(
+            resolve_info, copy_shader_constants, dump_base,
+            dump_row_length_used, dump_rows, dump_pitch, shared_memory);
+      }
+      if (!resolved_directly) {
+        DumpRenderTargets(dump_base, dump_row_length_used, dump_rows,
+                          dump_pitch, copy_native);
+      }
+    }
+
+    if (resolved_directly) {
+      // Invalidate textures - the direct shaders never write the scaled
+      // destination layout, so the range is always unscaled.
+      texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                        resolve_info.copy_dest_extent_length,
+                                        false);
+      written_address_out = resolve_info.copy_dest_extent_start;
+      written_length_out = resolve_info.copy_dest_extent_length;
+      if (copy_dest_info_out) {
+        *copy_dest_info_out = resolve_info.copy_dest_info;
+      }
+      if (written_scaled_out) {
+        *written_scaled_out = false;
+      }
+      copied = true;
+    } else if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
 
@@ -2010,8 +2030,10 @@ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(
     D3D12_SHADER_RESOURCE_VIEW_DESC stencil_srv_desc;
     stencil_srv_desc.Format =
         GetDepthSRVStencilDXGIFormat(key.GetDepthFormat());
+    // X24_TYPELESS_G8_UINT puts stencil in G, but the shared SPIR-V emitters
+    // read component 0 like a Vulkan stencil aspect view, so route G there.
     stencil_srv_desc.Shader4ComponentMapping =
-        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(1, 1, 1, 1);
     if (resource_desc.SampleDesc.Count > 1) {
       dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
       stencil_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
@@ -5817,868 +5839,66 @@ void D3D12RenderTargetCache::SetCommandListRenderTargets(
 }
 
 ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(
-    DumpPipelineKey key) {
+    EdramDumpShaderKey key) {
   auto pipeline_it = dump_pipelines_.find(key);
   if (pipeline_it != dump_pipelines_.end()) {
     return pipeline_it->second;
   }
 
-  // Because of built_shader_.resize(), pointers can't be kept persistently
-  // here! Resizing also zeroes the memory.
-
-  built_shader_.clear();
-
-  // RDEF, ISGN, OSGN, SHEX, STAT.
-  constexpr uint32_t kBlobCount = 5;
-
-  // Allocate space for the container header and the blob offsets.
-  built_shader_.resize(sizeof(dxbc::ContainerHeader) / sizeof(uint32_t) +
-                       kBlobCount);
-  uint32_t blob_offset_position_dwords =
-      sizeof(dxbc::ContainerHeader) / sizeof(uint32_t);
-  uint32_t blob_position_dwords = uint32_t(built_shader_.size());
-  constexpr uint32_t kBlobHeaderSizeDwords =
-      sizeof(dxbc::BlobHeader) / sizeof(uint32_t);
-
-  uint32_t name_ptr;
-
-  // ***************************************************************************
-  // Resource definition
-  // ***************************************************************************
-
-  built_shader_[blob_offset_position_dwords] =
-      uint32_t(blob_position_dwords * sizeof(uint32_t));
-  uint32_t rdef_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
-  // Not needed, as the next operation done is resize, to allocate the space for
-  // both the blob header and the resource definition header.
-  // built_shader_.resize(rdef_position_dwords);
-
-  // Allocate space for the RDEF header.
-  built_shader_.resize(rdef_position_dwords +
-                       sizeof(dxbc::RdefHeader) / sizeof(uint32_t));
-  // Generator name.
-  dxbc::AppendAlignedString(built_shader_, "Xenia");
-
-  // Constant types - uint (aka "dword" when it's scalar) only.
-  // Names.
-  name_ptr = uint32_t((built_shader_.size() - rdef_position_dwords) *
-                      sizeof(uint32_t));
-  uint32_t rdef_dword_name_ptr = name_ptr;
-  name_ptr += dxbc::AppendAlignedString(built_shader_, "dword");
-  // Types.
-  uint32_t rdef_type_uint_position_dwords = uint32_t(built_shader_.size());
-  uint32_t rdef_type_uint_ptr =
-      uint32_t((rdef_type_uint_position_dwords - rdef_position_dwords) *
-               sizeof(uint32_t));
-  built_shader_.resize(rdef_type_uint_position_dwords +
-                       sizeof(dxbc::RdefType) / sizeof(uint32_t));
-  {
-    auto& rdef_type_uint = *reinterpret_cast<dxbc::RdefType*>(
-        built_shader_.data() + rdef_type_uint_position_dwords);
-    rdef_type_uint.variable_class = dxbc::RdefVariableClass::kScalar;
-    rdef_type_uint.variable_type = dxbc::RdefVariableType::kUInt;
-    rdef_type_uint.row_count = 1;
-    rdef_type_uint.column_count = 1;
-    rdef_type_uint.name_ptr = rdef_dword_name_ptr;
+  EdramDumpShaderOptions shader_options;
+  // The emitter declares the EDRAM buffer with the pre-1.3 BufferBlock and
+  // Uniform forms, so it has to be emitted as SPIR-V 1.0.
+  shader_options.spirv_version = 0x00010000;
+  shader_options.descriptor_set_dest = kDumpDescriptorSetEdram;
+  shader_options.descriptor_set_source = kDumpDescriptorSetSource;
+  shader_options.resolution_scale_x = draw_resolution_scale_x();
+  shader_options.resolution_scale_y = draw_resolution_scale_y();
+  shader_options.msaa_2x_attachments_supported = msaa_2x_supported_;
+  if (!key.is_depth) {
+    GetColorOwnershipTransferDXGIFormat(key.GetColorFormat(),
+                                        &shader_options.source_is_uint);
   }
+  shader_options.depth_float24_round = depth_float24_round();
+  shader_options.depth_float24_convert_in_pixel_shader =
+      depth_float24_convert_in_pixel_shader();
 
-  // Constants:
-  // - uint xe_edram_dump_offsets
-  // - uint xe_edram_dump_pitches
-  enum Constant : uint32_t {
-    kConstantOffsets,
-    kConstantPitches,
-    kConstantCount,
-  };
-  // Names.
-  name_ptr = uint32_t((built_shader_.size() - rdef_position_dwords) *
-                      sizeof(uint32_t));
-  uint32_t rdef_xe_edram_dump_offsets_name_ptr = name_ptr;
-  name_ptr += dxbc::AppendAlignedString(built_shader_, "xe_edram_dump_offsets");
-  uint32_t rdef_xe_edram_dump_pitches_name_ptr = name_ptr;
-  name_ptr += dxbc::AppendAlignedString(built_shader_, "xe_edram_dump_pitches");
-  // Constants.
-  uint32_t rdef_constants_position_dwords = uint32_t(built_shader_.size());
-  uint32_t rdef_constants_ptr =
-      uint32_t((rdef_constants_position_dwords - rdef_position_dwords) *
-               sizeof(uint32_t));
-  built_shader_.resize(rdef_constants_position_dwords +
-                       sizeof(dxbc::RdefVariable) / sizeof(uint32_t) *
-                           kConstantCount);
-  {
-    auto rdef_constants = reinterpret_cast<dxbc::RdefVariable*>(
-        built_shader_.data() + rdef_constants_position_dwords);
-    // uint xe_edram_dump_offsets
-    dxbc::RdefVariable& rdef_constant_offsets =
-        rdef_constants[kConstantOffsets];
-    rdef_constant_offsets.name_ptr = rdef_xe_edram_dump_offsets_name_ptr;
-    rdef_constant_offsets.size_bytes = sizeof(uint32_t);
-    rdef_constant_offsets.flags = dxbc::kRdefVariableFlagUsed;
-    rdef_constant_offsets.type_ptr = rdef_type_uint_ptr;
-    rdef_constant_offsets.start_texture = UINT32_MAX;
-    rdef_constant_offsets.start_sampler = UINT32_MAX;
-    // uint xe_edram_dump_pitches
-    dxbc::RdefVariable& rdef_constant_pitches =
-        rdef_constants[kConstantPitches];
-    rdef_constant_pitches.name_ptr = rdef_xe_edram_dump_pitches_name_ptr;
-    rdef_constant_pitches.size_bytes = sizeof(uint32_t);
-    rdef_constant_pitches.flags = dxbc::kRdefVariableFlagUsed;
-    rdef_constant_pitches.type_ptr = rdef_type_uint_ptr;
-    rdef_constant_pitches.start_texture = UINT32_MAX;
-    rdef_constant_pitches.start_sampler = UINT32_MAX;
-  }
-
-  // Constant buffers:
-  // - xe_edram_dump_offsets : b0 { uint xe_edram_dump_offsets; }
-  // - xe_edram_dump_pitches : b1 { uint xe_edram_dump_pitches; }
-  // Reusing the constant names for constant buffers.
-  uint32_t rdef_cbuffer_position_dwords = uint32_t(built_shader_.size());
-  built_shader_.resize(rdef_cbuffer_position_dwords +
-                       sizeof(dxbc::RdefCbuffer) / sizeof(uint32_t) *
-                           kDumpCbufferCount);
-  {
-    auto rdef_cbuffers = reinterpret_cast<dxbc::RdefCbuffer*>(
-        built_shader_.data() + rdef_cbuffer_position_dwords);
-    // xe_edram_dump_offsets
-    dxbc::RdefCbuffer& rdef_cbuffer_offsets =
-        rdef_cbuffers[kDumpCbufferOffsets];
-    rdef_cbuffer_offsets.name_ptr = rdef_xe_edram_dump_offsets_name_ptr;
-    rdef_cbuffer_offsets.variable_count = 1;
-    rdef_cbuffer_offsets.variables_ptr = uint32_t(
-        rdef_constants_ptr + sizeof(dxbc::RdefVariable) * kConstantOffsets);
-    rdef_cbuffer_offsets.size_vector_aligned_bytes = sizeof(uint32_t) * 4;
-    // xe_edram_dump_pitches
-    dxbc::RdefCbuffer& rdef_cbuffer_pitches =
-        rdef_cbuffers[kDumpCbufferPitches];
-    rdef_cbuffer_pitches.name_ptr = rdef_xe_edram_dump_pitches_name_ptr;
-    rdef_cbuffer_pitches.variable_count = 1;
-    rdef_cbuffer_pitches.variables_ptr = uint32_t(
-        rdef_constants_ptr + sizeof(dxbc::RdefVariable) * kConstantPitches);
-    rdef_cbuffer_pitches.size_vector_aligned_bytes = sizeof(uint32_t) * 4;
-  }
-
-  // Bindings.
-  // - Texture2D/Texture2DMS<float4/uint4> xe_edram_dump_source : t0
-  // - Optionally, Texture2D/Texture2DMS<uint2> xe_edram_dump_stencil : t1
-  // - RWByteAddressBuffer xe_edram : u0
-  // - Constant buffers
-  uint32_t rdef_binding_count = 1 + key.is_depth + 1 + kDumpCbufferCount;
-  // Names.
-  name_ptr = uint32_t((built_shader_.size() - rdef_position_dwords) *
-                      sizeof(uint32_t));
-  uint32_t rdef_xe_edram_dump_source_name_ptr = name_ptr;
-  name_ptr += dxbc::AppendAlignedString(built_shader_, "xe_edram_dump_source");
-  uint32_t rdef_xe_edram_dump_stencil_name_ptr = name_ptr;
-  if (key.is_depth) {
-    name_ptr +=
-        dxbc::AppendAlignedString(built_shader_, "xe_edram_dump_stencil");
-  }
-  uint32_t rdef_xe_edram_name_ptr = name_ptr;
-  name_ptr += dxbc::AppendAlignedString(built_shader_, "xe_edram");
-  // Bindings.
-  uint32_t rdef_binding_position_dwords = uint32_t(built_shader_.size());
-  built_shader_.resize(rdef_binding_position_dwords +
-                       sizeof(dxbc::RdefInputBind) / sizeof(uint32_t) *
-                           rdef_binding_count);
-  bool source_is_uint;
-  if (key.is_depth) {
-    source_is_uint = false;
-  } else {
-    GetColorOwnershipTransferDXGIFormat(key.GetColorFormat(), &source_is_uint);
-  }
-  dxbc::ResourceReturnType source_return_type =
-      source_is_uint ? dxbc::ResourceReturnType::kUInt
-                     : dxbc::ResourceReturnType::kFloat;
-  uint32_t source_component_count =
-      key.is_depth ? 1
-                   : xenos::GetColorRenderTargetFormatComponentCount(
-                         key.GetColorFormat());
-  bool format_is_64bpp = !key.is_depth && xenos::IsColorRenderTargetFormat64bpp(
-                                              key.GetColorFormat());
-  {
-    auto rdef_bindings = reinterpret_cast<dxbc::RdefInputBind*>(
-        built_shader_.data() + rdef_binding_position_dwords);
-    uint32_t rdef_binding_index = 0;
-    // xe_edram_dump_source
-    dxbc::RdefInputBind& rdef_binding_source =
-        rdef_bindings[rdef_binding_index++];
-    rdef_binding_source.name_ptr = rdef_xe_edram_dump_source_name_ptr;
-    rdef_binding_source.type = dxbc::RdefInputType::kTexture;
-    rdef_binding_source.return_type = source_return_type;
-    if (key.msaa_samples != xenos::MsaaSamples::k1X) {
-      rdef_binding_source.dimension = dxbc::RdefDimension::kSRVTexture2DMS;
-      // Sample count is dynamic on Shader Model 5.
-    } else {
-      rdef_binding_source.dimension = dxbc::RdefDimension::kSRVTexture2D;
-      rdef_binding_source.sample_count = UINT32_MAX;
-    }
-    rdef_binding_source.bind_count = 1;
-    rdef_binding_source.flags = (source_component_count - 1)
-                                << dxbc::kRdefInputFlagsComponentsShift;
-    // xe_edram_dump_stencil
-    if (key.is_depth) {
-      dxbc::RdefInputBind& rdef_binding_stencil =
-          rdef_bindings[rdef_binding_index++];
-      rdef_binding_stencil.name_ptr = rdef_xe_edram_dump_stencil_name_ptr;
-      rdef_binding_stencil.type = dxbc::RdefInputType::kTexture;
-      rdef_binding_stencil.return_type = dxbc::ResourceReturnType::kUInt;
-      rdef_binding_stencil.dimension = rdef_binding_source.dimension;
-      rdef_binding_stencil.sample_count = rdef_binding_source.sample_count;
-      rdef_binding_stencil.bind_point = 1;
-      rdef_binding_stencil.bind_count = 1;
-      rdef_binding_stencil.flags = dxbc::kRdefInputFlags2Component;
-      rdef_binding_stencil.id = 1;
-    }
-    // xe_edram
-    dxbc::RdefInputBind& rdef_binding_edram =
-        rdef_bindings[rdef_binding_index++];
-    rdef_binding_edram.name_ptr = rdef_xe_edram_name_ptr;
-    rdef_binding_edram.type = dxbc::RdefInputType::kUAVRWByteAddress;
-    rdef_binding_edram.return_type = dxbc::ResourceReturnType::kMixed;
-    rdef_binding_edram.dimension = dxbc::RdefDimension::kUAVBuffer;
-    rdef_binding_edram.bind_count = 1;
-    // xe_edram_dump_offsets
-    dxbc::RdefInputBind& rdef_binding_offsets =
-        rdef_bindings[rdef_binding_index++];
-    rdef_binding_offsets.name_ptr = rdef_xe_edram_dump_offsets_name_ptr;
-    rdef_binding_offsets.type = dxbc::RdefInputType::kCbuffer;
-    rdef_binding_offsets.bind_point = kDumpCbufferOffsets;
-    rdef_binding_offsets.bind_count = 1;
-    rdef_binding_offsets.flags = dxbc::kRdefInputFlagUserPacked;
-    rdef_binding_offsets.id = kDumpCbufferOffsets;
-    // xe_edram_dump_pitches
-    dxbc::RdefInputBind& rdef_binding_pitches =
-        rdef_bindings[rdef_binding_index++];
-    rdef_binding_pitches.name_ptr = rdef_xe_edram_dump_pitches_name_ptr;
-    rdef_binding_pitches.type = dxbc::RdefInputType::kCbuffer;
-    rdef_binding_pitches.bind_point = kDumpCbufferPitches;
-    rdef_binding_pitches.bind_count = 1;
-    rdef_binding_pitches.flags = dxbc::kRdefInputFlagUserPacked;
-    rdef_binding_pitches.id = kDumpCbufferPitches;
-  }
-
-  // Header.
-  {
-    auto& rdef_header = *reinterpret_cast<dxbc::RdefHeader*>(
-        built_shader_.data() + rdef_position_dwords);
-    rdef_header.cbuffer_count = kDumpCbufferCount;
-    rdef_header.cbuffers_ptr =
-        uint32_t((rdef_cbuffer_position_dwords - rdef_position_dwords) *
-                 sizeof(uint32_t));
-    rdef_header.input_bind_count = rdef_binding_count;
-    rdef_header.input_binds_ptr =
-        uint32_t((rdef_binding_position_dwords - rdef_position_dwords) *
-                 sizeof(uint32_t));
-    rdef_header.shader_model = dxbc::RdefShaderModel::kComputeShader5_1;
-    rdef_header.compile_flags =
-        dxbc::kCompileFlagNoPreshader | dxbc::kCompileFlagPreferFlowControl |
-        dxbc::kCompileFlagIeeeStrictness | dxbc::kCompileFlagAllResourcesBound;
-    // Generator name is right after the header.
-    rdef_header.generator_name_ptr = sizeof(dxbc::RdefHeader);
-    rdef_header.fourcc = dxbc::RdefHeader::FourCC::k5_1;
-    rdef_header.InitializeSizes();
-  }
-
-  {
-    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
-        built_shader_.data() + blob_position_dwords);
-    blob_header.fourcc = dxbc::BlobHeader::FourCC::kResourceDefinition;
-    blob_position_dwords = uint32_t(built_shader_.size());
-    blob_header.size_bytes =
-        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
-        built_shader_[blob_offset_position_dwords++];
-  }
-
-  // ***************************************************************************
-  // Input and output signatures (empty)
-  // ***************************************************************************
-
-  for (uint32_t i = 0; i < 2; ++i) {
-    built_shader_[blob_offset_position_dwords] =
-        uint32_t(blob_position_dwords * sizeof(uint32_t));
-    uint32_t signature_position_dwords =
-        blob_position_dwords + kBlobHeaderSizeDwords;
-    built_shader_.resize(signature_position_dwords +
-                         sizeof(dxbc::Signature) / sizeof(uint32_t));
-    {
-      auto& signature = *reinterpret_cast<dxbc::Signature*>(
-          built_shader_.data() + signature_position_dwords);
-      // Empty - just set parameter pointer to the end.
-      signature.parameter_info_ptr = sizeof(dxbc::Signature);
-    }
-    {
-      auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
-          built_shader_.data() + blob_position_dwords);
-      blob_header.fourcc = i ? dxbc::BlobHeader::FourCC::kOutputSignature
-                             : dxbc::BlobHeader::FourCC::kInputSignature;
-      blob_position_dwords = uint32_t(built_shader_.size());
-      blob_header.size_bytes =
-          (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
-          built_shader_[blob_offset_position_dwords++];
-    }
-  }
-
-  // ***************************************************************************
-  // Shader program
-  // ***************************************************************************
-
-  built_shader_[blob_offset_position_dwords] =
-      uint32_t(blob_position_dwords * sizeof(uint32_t));
-  uint32_t shex_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
-  built_shader_.resize(shex_position_dwords);
-
-  built_shader_.push_back(
-      dxbc::VersionToken(dxbc::ProgramType::kComputeShader, 5, 1));
-  // Reserve space for the length token.
-  built_shader_.push_back(0);
-
-  dxbc::Statistics stat;
-  std::memset(&stat, 0, sizeof(dxbc::Statistics));
-  dxbc::Assembler a(built_shader_, stat);
-
-  a.OpDclGlobalFlags(dxbc::kGlobalFlagAllResourcesBound);
-  a.OpDclConstantBuffer(dxbc::Src::CB(dxbc::Src::Dcl, kDumpCbufferOffsets,
-                                      kDumpCbufferOffsets, kDumpCbufferOffsets),
-                        1);
-  a.OpDclConstantBuffer(dxbc::Src::CB(dxbc::Src::Dcl, kDumpCbufferPitches,
-                                      kDumpCbufferPitches, kDumpCbufferPitches),
-                        1);
-  // Source texture.
-  dxbc::ResourceDimension source_dimension =
-      key.msaa_samples != xenos::MsaaSamples::k1X
-          ? dxbc::ResourceDimension::kTexture2DMS
-          : dxbc::ResourceDimension::kTexture2D;
-  a.OpDclResource(source_dimension,
-                  dxbc::ResourceReturnTypeX4Token(
-                      source_is_uint ? dxbc::ResourceReturnType::kUInt
-                                     : dxbc::ResourceReturnType::kFloat),
-                  dxbc::Src::T(dxbc::Src::Dcl, 0, 0, 0));
-  // Source stencil texture.
-  if (key.is_depth) {
-    a.OpDclResource(
-        source_dimension,
-        dxbc::ResourceReturnTypeX4Token(dxbc::ResourceReturnType::kUInt),
-        dxbc::Src::T(dxbc::Src::Dcl, 1, 1, 1));
-  }
-  // EDRAM buffer.
-  a.OpDclUnorderedAccessViewRaw(0, dxbc::Src::U(dxbc::Src::Dcl, 0, 0, 0));
-  a.OpDclInput(dxbc::Dest::VThreadID(0b0011));
-  // r0 - addressing before the load, then addressing and conversion scratch
-  // r1 - addressing scratch before the load, then data
-  stat.temp_register_count = 2;
-  a.OpDclTemps(stat.temp_register_count);
-  // There's no strict dependency on the group size here, for simplicity of
-  // calculations especially with resolution scaling, dividing manually (as the
-  // group size is not unlimited). The only restriction is that an integer
-  // multiple of it must be 80x16 samples (and no larger than that) for 32bpp,
-  // or 40x16 samples for 64bpp (because only a half of the pair of tiles may
-  // need to be dumped). The group size limit in Direct3D 11 is 1024, and 40x16
-  // fits in it, while 80x16 doesn't.
-  a.OpDclThreadGroup(40, 16, 1);
-
-  // Dumps for fully native resolves address the EDRAM buffer with the plain
-  // 1x1 tile layout.
-  uint32_t draw_resolution_scale_x =
-      key.native_layout ? 1 : this->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y =
-      key.native_layout ? 1 : this->draw_resolution_scale_y();
-
-  // For now, as the exact addressing in 64bpp render targets relatively to
-  // 32bpp is unknown, treating 64bpp tiles as storing 40x16 samples rather than
-  // 80x16 for simplicity of addressing into the texture.
-
-  uint32_t tile_width =
-      (xenos::kEdramTileWidthSamples * draw_resolution_scale_x) >>
-      uint32_t(format_is_64bpp);
-  uint32_t tile_height =
-      xenos::kEdramTileHeightSamples * draw_resolution_scale_y;
-
-  // Get the parts of the address - tile row index within the dispatch to r0.zw,
-  // sample Y within the tile to r0.xy.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = X tile position
-  // r0.w = Y tile position
-  a.OpUDiv(dxbc::Dest::R(0, 0b1100), dxbc::Dest::R(0, 0b0011),
-           dxbc::Src::VThreadID(0b01000100),
-           dxbc::Src::LU(tile_width, tile_height, tile_width, tile_height));
-
-  // Extract the dump rectangle tile row pitch to r1.x.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = X tile position
-  // r0.w = Y tile position
-  // r1.x = dump rectangle pitch in tiles
-  a.OpUBFE(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(xenos::kEdramPitchTilesBits),
-           dxbc::Src::LU(0),
-           dxbc::Src::CB(kDumpCbufferPitches, kDumpCbufferPitches, 0,
-                         dxbc::Src::kXXXX));
-  // Get the tile index in the EDRAM relative to the dump rectangle base tile to
-  // r0.w.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = free
-  // r0.w = tile index relative to the dump rectangle base
-  // r1.x = free
-  a.OpUMAd(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kWWWW),
-           dxbc::Src::R(1, dxbc::Src::kXXXX),
-           dxbc::Src::R(0, dxbc::Src::kZZZZ));
-
-  // Extract the index of the first tile (taking EDRAM addressing wrapping into
-  // account) of the dispatch in the EDRAM to r0.z.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = first EDRAM tile index in the dispatch
-  // r0.w = tile index relative to the dump rectangle base
-  a.OpUBFE(dxbc::Dest::R(0, 0b0100),
-           dxbc::Src::LU(xenos::kEdramBaseTilesBits + 1), dxbc::Src::LU(0),
-           dxbc::Src::CB(kDumpCbufferOffsets, kDumpCbufferOffsets, 0,
-                         dxbc::Src::kXXXX));
-  // Add the base tile in the dispatch to the dispatch-local tile index to r0.w,
-  // not wrapping yet so in case of a wraparound, the address relative to the
-  // base in the texture after subtraction of the base won't be negative.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = free
-  // r0.w = non-wrapped tile index in the EDRAM
-  a.OpIAdd(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kWWWW),
-           dxbc::Src::R(0, dxbc::Src::kZZZZ));
-  // Wrap the address of the tile in the EDRAM to r0.z.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = wrapped tile index in the EDRAM
-  // r0.w = non-wrapped tile index in the EDRAM
-  a.OpAnd(dxbc::Dest::R(0, 0b0100), dxbc::Src::R(0, dxbc::Src::kWWWW),
-          dxbc::Src::LU(xenos::kEdramTileCount - 1));
-  // Convert the tile index to samples and add the X sample index to it to r0.z.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = tile sample offset in the EDRAM plus X sample offset
-  // r0.w = non-wrapped tile index in the EDRAM
-  a.OpUMAd(dxbc::Dest::R(0, 0b0100), dxbc::Src::R(0, dxbc::Src::kZZZZ),
-           dxbc::Src::LU(
-               draw_resolution_scale_x * draw_resolution_scale_y *
-               (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) *
-               xenos::kEdramTileHeightSamples),
-           dxbc::Src::R(0, dxbc::Src::kXXXX));
-  // Add the contribution of the Y sample position within the tile to the sample
-  // address in the EDRAM to r0.z.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = sample offset in the EDRAM without the depth column swapping
-  // r0.w = non-wrapped tile index in the EDRAM
-  a.OpUMAd(dxbc::Dest::R(0, 0b0100), dxbc::Src::R(0, dxbc::Src::kYYYY),
-           dxbc::Src::LU(tile_width), dxbc::Src::R(0, dxbc::Src::kZZZZ));
-  if (key.is_depth) {
-    uint32_t tile_width_half = tile_width >> 1;
-    // Get which 40-sample half within the tile is being processed to r1.x.
-    // r0.x = X sample position within the tile
-    // r0.y = Y sample position within the tile
-    // r0.z = sample offset in the EDRAM without the depth column swapping
-    // r0.w = non-wrapped tile index in the EDRAM
-    // r1.x = 0xFFFFFFFF if in the right 40-sample half, 0 otherwise
-    a.OpUGE(dxbc::Dest::R(1, 0b0001), dxbc::Src::R(0, dxbc::Src::kXXXX),
-            dxbc::Src::LU(tile_width_half));
-    // Get the offset needed to swap 40-sample halves for depth.
-    // r0.x = X sample position within the tile
-    // r0.y = Y sample position within the tile
-    // r0.z = sample offset in the EDRAM without the depth column swapping
-    // r0.w = non-wrapped tile index in the EDRAM
-    // r1.x = depth half-tile flipping offset
-    a.OpMovC(dxbc::Dest::R(1, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX),
-             dxbc::Src::LI(-int32_t(tile_width_half)),
-             dxbc::Src::LI(int32_t(tile_width_half)));
-    // Swap 40-sample columns in the depth buffer in the destination address in
-    // r0.w to get the final address of the sample in EDRAM.
-    // r0.x = X sample position within the tile
-    // r0.y = Y sample position within the tile
-    // r0.z = sample offset in the EDRAM
-    // r0.w = non-wrapped tile index in the EDRAM
-    // r1.x = free
-    a.OpIAdd(dxbc::Dest::R(0, 0b0100), dxbc::Src::R(0, dxbc::Src::kZZZZ),
-             dxbc::Src::R(1, dxbc::Src::kXXXX));
-  }
-  // Convert the destination address from samples to bytes.
-  a.OpIShL(dxbc::Dest::R(0, 0b0100), dxbc::Src::R(0, dxbc::Src::kZZZZ),
-           dxbc::Src::LU(format_is_64bpp ? 3 : 2));
-
-  // Extract the source texture base tile index to r1.x.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = sample offset in the EDRAM
-  // r0.w = non-wrapped tile index in the EDRAM
-  // r1.x = source texture base tile index
-  a.OpUBFE(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(xenos::kEdramBaseTilesBits),
-           dxbc::Src::LU(xenos::kEdramBaseTilesBits + 1),
-           dxbc::Src::CB(kDumpCbufferOffsets, kDumpCbufferOffsets, 0,
-                         dxbc::Src::kXXXX));
-  // Get the linear tile index within the source texture to r0.w.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = sample offset in the EDRAM
-  // r0.w = linear tile index in the source texture
-  // r1.x = free
-  a.OpIAdd(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kWWWW),
-           -dxbc::Src::R(1, dxbc::Src::kXXXX));
-  // Get the source texture pitch in tiles to r1.x.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = sample offset in the EDRAM
-  // r0.w = linear tile index in the source texture
-  // r1.x = source texture pitch in tiles
-  a.OpUBFE(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(xenos::kEdramPitchTilesBits),
-           dxbc::Src::LU(xenos::kEdramPitchTilesBits),
-           dxbc::Src::CB(kDumpCbufferPitches, kDumpCbufferPitches, 0,
-                         dxbc::Src::kXXXX));
-  // Split the linear tile index in the source texture into X and Y in tiles.
-  // r0.x = X sample position within the tile
-  // r0.y = Y sample position within the tile
-  // r0.z = sample offset in the EDRAM
-  // r0.w = X tile index within the tile row in the source texture
-  // r1.x = Y tile row index within the source texture
-  a.OpUDiv(dxbc::Dest::R(1, 0b0001), dxbc::Dest::R(0, 0b1000),
-           dxbc::Src::R(0, dxbc::Src::kWWWW),
-           dxbc::Src::R(1, dxbc::Src::kXXXX));
-  // Add the source texture tile X offset to the source texture sample X
-  // coordinate.
-  // r0.x = X sample position within the source texture
-  // r0.y = Y sample position within the tile
-  // r0.z = sample offset in the EDRAM
-  // r0.w = free
-  // r1.x = Y tile row index within the source texture
-  a.OpUMAd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(0, dxbc::Src::kWWWW),
-           dxbc::Src::LU(tile_width), dxbc::Src::R(0, dxbc::Src::kXXXX));
-  // Add the source texture tile Y offset to the source texture sample Y
-  // coordinate.
-  // r0.x = X sample position within the source texture
-  // r0.y = Y sample position within the source texture
-  // r0.z = sample offset in the EDRAM
-  // r1.x = free
-  a.OpUMAd(
-      dxbc::Dest::R(0, 0b0010), dxbc::Src::R(1, dxbc::Src::kXXXX),
-      dxbc::Src::LU(xenos::kEdramTileHeightSamples * draw_resolution_scale_y),
-      dxbc::Src::R(0, dxbc::Src::kYYYY));
-  // Will be using the source texture coordinates from r0.xy, and for
-  // single-sampled source, LOD from r0.w.
-  dxbc::Src source_address_src(dxbc::Src::R(0, 0b11000100));
-  if (key.msaa_samples >= xenos::MsaaSamples::k2X) {
-    if (key.msaa_samples >= xenos::MsaaSamples::k4X) {
-      // 4x MSAA source texture sample index - bit 0 for horizontal, bit 1 for
-      // vertical.
-      // Extract the horizontal sample index to r0.w.
-      // r0.x = X sample position within the source texture
-      // r0.y = Y sample position within the source texture
-      // r0.z = sample offset in the EDRAM
-      // r0.w = horizontal sample index within the source pixel
-      a.OpAnd(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kXXXX),
-              dxbc::Src::LU(1));
-      // Insert the vertical sample index to r0.w.
-      // r0.x = X sample position within the source texture
-      // r0.y = Y sample position within the source texture
-      // r0.z = sample offset in the EDRAM
-      // r0.w = sample index within the source pixel
-      a.OpBFI(dxbc::Dest::R(0, 0b1000), dxbc::Src::LU(1), dxbc::Src::LU(1),
-              dxbc::Src::R(0, dxbc::Src::kYYYY),
-              dxbc::Src::R(0, dxbc::Src::kWWWW));
-      // Convert sample to pixel coordinates in the source texture to r0.xy.
-      // r0.x = X pixel position within the source texture
-      // r0.y = Y pixel position within the source texture
-      // r0.z = sample offset in the EDRAM
-      // r0.w = sample index within the source pixel
-      a.OpUShR(dxbc::Dest::R(0, 0b0011), dxbc::Src::R(0), dxbc::Src::LU(1));
-    } else {
-      // 2x MSAA source texture sample index.
-      // Extract the vertical sample index to r0.w.
-      // r0.x = X pixel position within the source texture
-      // r0.y = Y sample position within the source texture
-      // r0.z = sample offset in the EDRAM
-      // r0.w = vertical sample index within the destination pixel
-      a.OpAnd(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kYYYY),
-              dxbc::Src::LU(1));
-      // Convert the 2x MSAA sample index from the guest to Direct3D 10.1+.
-      // r0.x = X pixel position within the source texture
-      // r0.y = Y sample position within the source texture
-      // r0.z = sample offset in the EDRAM
-      // r0.w = sample index within the source pixel
-      a.OpMovC(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kWWWW),
-               dxbc::Src::LU(draw_util::GetD3D10SampleIndexForGuest2xMSAA(
-                   1, msaa_2x_supported_)),
-               dxbc::Src::LU(draw_util::GetD3D10SampleIndexForGuest2xMSAA(
-                   0, msaa_2x_supported_)));
-      // Convert sample Y to pixel Y in the source texture to r0.y.
-      // r0.x = X pixel position within the source texture
-      // r0.y = Y pixel position within the source texture
-      // r0.z = sample offset in the EDRAM
-      // r0.w = sample index within the source pixel
-      a.OpUShR(dxbc::Dest::R(0, 0b0010), dxbc::Src::R(0, dxbc::Src::kYYYY),
-               dxbc::Src::LU(1));
-    }
-    if (key.source_scale_native && !key.native_layout &&
-        IsDrawResolutionScaled()) {
-      // Native source dumped to the scaled EDRAM layout. Duplicate the
-      // guest pixels into all the scaled sample slots covering it. Done after
-      // the sample index is extracted since MSAA isn't affected by the scale.
-      a.OpUDiv(dxbc::Dest::R(0, 0b0011), dxbc::Dest::Null(), dxbc::Src::R(0),
-               dxbc::Src::LU(this->draw_resolution_scale_x(),
-                             this->draw_resolution_scale_y(), 1, 1));
-    }
-    // Load the source to r1.
-    // r0.x = X pixel position within the source texture if stencil is needed
-    // r0.y = Y pixel position within the source texture if stencil is needed
-    // r0.z = sample offset in the EDRAM
-    // r0.w = sample index within the source pixel if stencil is needed
-    // r1 = source texel value
-    a.OpLdMS(dxbc::Dest::R(1, (1 << source_component_count) - 1),
-             source_address_src, 0b0011, dxbc::Src::T(0, 0),
-             dxbc::Src::R(0, dxbc::Src::kWWWW));
-    if (key.is_depth) {
-      // Load the source stencil to r1.y.
-      // r0.x = free
-      // r0.y = free
-      // r0.z = sample offset in the EDRAM
-      // r0.w = free
-      // r1.x = source depth value
-      // r1.y = source stencil value
-      a.OpLdMS(dxbc::Dest::R(1, 0b0010), source_address_src, 0b0011,
-               dxbc::Src::T(1, 1), dxbc::Src::R(0, dxbc::Src::kWWWW));
-    }
-  } else {
-    if (key.source_scale_native && !key.native_layout &&
-        IsDrawResolutionScaled()) {
-      // Same native source duplication as the multisampled path.
-      a.OpUDiv(dxbc::Dest::R(0, 0b0011), dxbc::Dest::Null(), dxbc::Src::R(0),
-               dxbc::Src::LU(this->draw_resolution_scale_x(),
-                             this->draw_resolution_scale_y(), 1, 1));
-    }
-    // Write the LOD index (0) to the register with texture coordinates for
-    // loading from the single-sampled source texture.
-    // r0.x = X pixel position within the source texture
-    // r0.y = Y pixel position within the source texture
-    // r0.z = sample offset in the EDRAM
-    // r0.w = LOD for the texture load (zero)
-    a.OpMov(dxbc::Dest::R(0, 0b1000), dxbc::Src::LF(0.0f));
-    // Load the source to r1.
-    // r0.x = X pixel position within the source texture if stencil is needed
-    // r0.y = Y pixel position within the source texture if stencil is needed
-    // r0.z = sample offset in the EDRAM
-    // r0.w = LOD for the texture load (zero)
-    // r1 = source texel value
-    a.OpLd(dxbc::Dest::R(1, (1 << source_component_count) - 1),
-           source_address_src, 0b1011, dxbc::Src::T(0, 0));
-    if (key.is_depth) {
-      // Load the source stencil to r1.y.
-      // r0.x = free
-      // r0.y = free
-      // r0.z = sample offset in the EDRAM
-      // r0.w = free
-      // r1.x = source depth value
-      // r1.y = source stencil value
-      a.OpLd(dxbc::Dest::R(1, 0b0010), source_address_src, 0b1011,
-             dxbc::Src::T(1, 1));
-    }
-  }
-
-  // Pack in the needed format, writing the result to r1.x for 32bpp or r1.xy
-  // for 64bpp.
-  // r0.xyw are usable as temporary storage.
-  if (key.is_depth) {
-    switch (key.GetDepthFormat()) {
-      case xenos::DepthRenderTargetFormat::kD24S8:
-        // Round to the nearest even integer. This seems to be the correct
-        // conversion, adding +0.5 and rounding towards zero results in red
-        // instead of black in the 4D5307E6 clear shader.
-        a.OpMul(dxbc::Dest::R(1, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX),
-                dxbc::Src::LF(float(0xFFFFFF)));
-        a.OpRoundNE(dxbc::Dest::R(1, 0b0001),
-                    dxbc::Src::R(1, dxbc::Src::kXXXX));
-        a.OpFToU(dxbc::Dest::R(1, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX));
-        break;
-      case xenos::DepthRenderTargetFormat::kD24FS8:
-        // Convert to [0, 2) float24 from [0, 1) float32, using r0.x as
-        // temporary.
-        // When converting the depth in pixel shaders, it's always exact,
-        // truncating not to insert additional rounding instructions.
-        DxbcShaderTranslator::PreClampedDepthTo20e4(
-            a, 1, 0, 1, 0, 0, 0,
-            !depth_float24_convert_in_pixel_shader() && depth_float24_round(),
-            true);
-        break;
-    }
-    // Combine 24-bit depth and stencil into r1.x.
-    a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(24), dxbc::Src::LU(8),
-            dxbc::Src::R(1, dxbc::Src::kXXXX),
-            dxbc::Src::R(1, dxbc::Src::kYYYY));
-  } else {
-    switch (key.GetColorFormat()) {
-      case xenos::ColorRenderTargetFormat::k_8_8_8_8:
-        if (!source_is_uint) {
-          a.OpMAd(dxbc::Dest::R(1), dxbc::Src::R(1), dxbc::Src::LF(255.0f),
-                  dxbc::Src::LF(0.5f));
-          a.OpFToU(dxbc::Dest::R(1), dxbc::Src::R(1));
-        }
-        for (uint32_t i = 1; i < 4; ++i) {
-          a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(8),
-                  dxbc::Src::LU(i * 8), dxbc::Src::R(1).Select(i),
-                  dxbc::Src::R(1, dxbc::Src::kXXXX));
-        }
-        break;
-      case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
-        // 8_8_8_8_GAMMA is represented by linear stored in R16G16B16A16_UNORM.
-        assert_false(source_is_uint);
-        for (uint32_t i = 0; i < 3; ++i) {
-          DxbcShaderTranslator::PreSaturatedLinearToPWLGamma(a, 1, i, 1, i, 0,
-                                                             0, 0, 1);
-        }
-        a.OpMAd(dxbc::Dest::R(1), dxbc::Src::R(1), dxbc::Src::LF(255.0f),
-                dxbc::Src::LF(0.5f));
-        a.OpFToU(dxbc::Dest::R(1), dxbc::Src::R(1));
-        for (uint32_t i = 1; i < 4; ++i) {
-          a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(8),
-                  dxbc::Src::LU(i * 8), dxbc::Src::R(1).Select(i),
-                  dxbc::Src::R(1, dxbc::Src::kXXXX));
-        }
-        break;
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10:
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
-        if (!source_is_uint) {
-          a.OpMAd(dxbc::Dest::R(1), dxbc::Src::R(1),
-                  dxbc::Src::LF(1023.0f, 1023.0f, 1023.0f, 3.0f),
-                  dxbc::Src::LF(0.5f));
-          a.OpFToU(dxbc::Dest::R(1), dxbc::Src::R(1));
-        }
-        for (uint32_t i = 1; i < 4; ++i) {
-          a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(i == 3 ? 2 : 10),
-                  dxbc::Src::LU(i * 10), dxbc::Src::R(1).Select(i),
-                  dxbc::Src::R(1, dxbc::Src::kXXXX));
-        }
-        break;
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
-        // Float16 has a wider range for both color and alpha, also NaNs.
-        // Color - clamp and convert.
-        // Convert red in r1.x to the result register r1.x - the same, but
-        // UnclampedFloat32To7e3 allows that - using r0.x as a temporary.
-        DxbcShaderTranslator::UnclampedFloat32To7e3(a, 1, 0, 1, 0, 0, 0);
-        for (uint32_t i = 1; i < 3; ++i) {
-          // Convert green and blue to a temporary register r0.x using r0.y
-          // as an internal temporary, then insert them into the result in
-          // r1.x.
-          DxbcShaderTranslator::UnclampedFloat32To7e3(a, 0, 0, 1, i, 0, 1);
-          a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(10),
-                  dxbc::Src::LU(i * 10), dxbc::Src::R(0, dxbc::Src::kXXXX),
-                  dxbc::Src::R(1, dxbc::Src::kXXXX));
-        }
-        // Alpha - saturate and convert.
-        a.OpMov(dxbc::Dest::R(1, 0b1000), dxbc::Src::R(1, dxbc::Src::kWWWW),
-                true);
-        a.OpMAd(dxbc::Dest::R(1, 0b1000), dxbc::Src::R(1, dxbc::Src::kWWWW),
-                dxbc::Src::LF(3.0f), dxbc::Src::LF(0.5f));
-        a.OpFToU(dxbc::Dest::R(1, 0b1000), dxbc::Src::R(1, dxbc::Src::kWWWW));
-        a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(2), dxbc::Src::LU(30),
-                dxbc::Src::R(1, dxbc::Src::kWWWW),
-                dxbc::Src::R(1, dxbc::Src::kXXXX));
-        break;
-      case xenos::ColorRenderTargetFormat::k_16_16:
-      case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
-        assert_true(source_is_uint);
-        a.OpBFI(dxbc::Dest::R(1, 0b0001), dxbc::Src::LU(16), dxbc::Src::LU(16),
-                dxbc::Src::R(1, dxbc::Src::kYYYY),
-                dxbc::Src::R(1, dxbc::Src::kXXXX));
-        break;
-      case xenos::ColorRenderTargetFormat::k_16_16_16_16:
-      case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT:
-        assert_true(source_is_uint);
-        a.OpBFI(dxbc::Dest::R(1, 0b0011), dxbc::Src::LU(16), dxbc::Src::LU(16),
-                dxbc::Src::R(1, 0b1101), dxbc::Src::R(1, 0b1000));
-        break;
-      case xenos::ColorRenderTargetFormat::k_32_FLOAT:
-      case xenos::ColorRenderTargetFormat::k_32_32_FLOAT:
-        assert_true(source_is_uint);
-        // Already has the needed representation.
-        break;
-    }
-  }
-
-  // Write the sample to the destination address stored in r0.z.
-  a.OpStoreRaw(dxbc::Dest::U(0, 0, format_is_64bpp ? 0b0011 : 0b0001),
-               dxbc::Src::R(0, dxbc::Src::kZZZZ), dxbc::Src::R(1));
-
-  a.OpRet();
-
-  // Write the shader program length in dwords.
-  built_shader_[shex_position_dwords + 1] =
-      uint32_t(built_shader_.size()) - shex_position_dwords;
-
-  {
-    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
-        built_shader_.data() + blob_position_dwords);
-    blob_header.fourcc = dxbc::BlobHeader::FourCC::kShaderEx;
-    blob_position_dwords = uint32_t(built_shader_.size());
-    blob_header.size_bytes =
-        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
-        built_shader_[blob_offset_position_dwords++];
-  }
-
-  // ***************************************************************************
-  // Statistics
-  // ***************************************************************************
-
-  built_shader_[blob_offset_position_dwords] =
-      uint32_t(blob_position_dwords * sizeof(uint32_t));
-  uint32_t stat_position_dwords = blob_position_dwords + kBlobHeaderSizeDwords;
-  built_shader_.resize(stat_position_dwords +
-                       sizeof(dxbc::Statistics) / sizeof(uint32_t));
-  std::memcpy(built_shader_.data() + stat_position_dwords, &stat,
-              sizeof(dxbc::Statistics));
-  {
-    auto& blob_header = *reinterpret_cast<dxbc::BlobHeader*>(
-        built_shader_.data() + blob_position_dwords);
-    blob_header.fourcc = dxbc::BlobHeader::FourCC::kStatistics;
-    blob_position_dwords = uint32_t(built_shader_.size());
-    blob_header.size_bytes =
-        (blob_position_dwords - kBlobHeaderSizeDwords) * sizeof(uint32_t) -
-        built_shader_[blob_offset_position_dwords++];
-  }
-
-  // ***************************************************************************
-  // Container header
-  // ***************************************************************************
-
-  uint32_t built_shader_size_bytes =
-      uint32_t(built_shader_.size() * sizeof(uint32_t));
-  {
-    auto& container_header =
-        *reinterpret_cast<dxbc::ContainerHeader*>(built_shader_.data());
-    container_header.InitializeIdentification();
-    container_header.size_bytes = built_shader_size_bytes;
-    container_header.blob_count = kBlobCount;
-    CalculateDXBCChecksum(
-        reinterpret_cast<unsigned char*>(built_shader_.data()),
-        static_cast<unsigned int>(built_shader_size_bytes),
-        reinterpret_cast<unsigned int*>(&container_header.hash));
-  }
-
-  // ***************************************************************************
-  // Pipeline
-  // ***************************************************************************
-  ID3D12PipelineState* pipeline = ui::d3d12::util::CreateComputePipeline(
-      command_processor_.GetD3D12Provider().GetDevice(), built_shader_.data(),
-      built_shader_size_bytes,
-      key.is_depth ? dump_root_signature_depth_ : dump_root_signature_color_);
   const char* format_name =
       key.is_depth
           ? xenos::GetDepthRenderTargetFormatName(key.GetDepthFormat())
           : xenos::GetColorRenderTargetFormatName(key.GetColorFormat());
-  if (pipeline) {
-    std::u16string pipeline_name =
-        xe::to_utf16(fmt::format("RT Dump {} {}xMSAA", format_name,
-                                 uint32_t(1) << uint32_t(key.msaa_samples)));
-    pipeline->SetName(reinterpret_cast<LPCWSTR>(pipeline_name.c_str()));
-  } else {
+  uint32_t sample_count = uint32_t(1) << uint32_t(key.msaa_samples);
+  ID3D12PipelineState* pipeline = nullptr;
+  std::vector<uint32_t> spirv = BuildEdramDumpShaderSpirv(key, shader_options);
+  if (spirv.empty()) {
     XELOGE(
-        "D3D12RenderTargetCache: Failed to create a render target dumping "
-        "pipeline for {}-sample render targets with format {}",
-        uint32_t(1) << uint32_t(key.msaa_samples), format_name);
+        "D3D12RenderTargetCache: Failed to emit the render target dumping "
+        "shader for {}-sample render targets with format {}",
+        sample_count, format_name);
+  } else {
+    std::vector<uint8_t> dxil = SpirvToDxilCompiler::Translate(
+        spirv.data(), spirv.size(), SpirvToDxilCompiler::Stage::kCompute);
+    if (dxil.empty()) {
+      XELOGE(
+          "D3D12RenderTargetCache: Failed to translate the render target "
+          "dumping shader for {}-sample render targets with format {}",
+          sample_count, format_name);
+    } else {
+      pipeline = ui::d3d12::util::CreateComputePipeline(
+          command_processor_.GetD3D12Provider().GetDevice(), dxil.data(),
+          dxil.size(),
+          key.is_depth ? dump_root_signature_depth_
+                       : dump_root_signature_color_);
+      if (pipeline) {
+        std::u16string pipeline_name = xe::to_utf16(
+            fmt::format("RT Dump {} {}xMSAA", format_name, sample_count));
+        pipeline->SetName(reinterpret_cast<LPCWSTR>(pipeline_name.c_str()));
+      } else {
+        XELOGE(
+            "D3D12RenderTargetCache: Failed to create a render target dumping "
+            "pipeline for {}-sample render targets with format {}",
+            sample_count, format_name);
+      }
+    }
   }
   // Even if creation fails, still store the null pointer not to try to create
   // again.
@@ -6686,22 +5906,7 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(
   return pipeline;
 }
 
-void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
-                                               uint32_t dump_row_length_used,
-                                               uint32_t dump_rows,
-                                               uint32_t dump_pitch,
-                                               bool native_layout) {
-  assert_true(GetPath() == Path::kHostRenderTargets);
-
-  GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
-                                 dump_pitch, dump_rectangles_);
-  if (dump_rectangles_.empty()) {
-    return;
-  }
-
-  command_processor_.PushDebugMarker(
-      "DumpRenderTargets (EDRAM Write): base tile %u", dump_base);
-
+bool D3D12RenderTargetCache::PrepareDumpSourceDescriptors() {
   // Clear previously set temporary indices.
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
     auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
@@ -6709,21 +5914,10 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     d3d12_rt.SetTemporarySRVDescriptorIndex(UINT32_MAX);
     d3d12_rt.SetTemporarySRVDescriptorIndexStencil(UINT32_MAX);
   }
-  // Gather all needed barriers and info needed to create descriptors and to
-  // sort the invocations.
-  TransitionEdramBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  dump_invocations_.clear();
-  dump_invocations_.reserve(dump_rectangles_.size());
   current_temporary_descriptors_cpu_.clear();
-  bool any_sources_32bpp_64bpp[2] = {};
   uint32_t rt_sort_index = 0;
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
     auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
-    command_processor_.PushTransitionBarrier(
-        d3d12_rt.resource(),
-        d3d12_rt.SetResourceState(
-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (d3d12_rt.temporary_sort_index() == UINT32_MAX) {
       d3d12_rt.SetTemporarySortIndex(rt_sort_index++);
     }
@@ -6733,24 +5927,13 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
       current_temporary_descriptors_cpu_.push_back(
           d3d12_rt.descriptor_srv().GetHandle());
     }
-    RenderTargetKey rt_key = d3d12_rt.key();
-    if (rt_key.is_depth &&
+    if (d3d12_rt.key().is_depth &&
         d3d12_rt.temporary_srv_descriptor_index_stencil() == UINT32_MAX) {
       d3d12_rt.SetTemporarySRVDescriptorIndexStencil(
           uint32_t(current_temporary_descriptors_cpu_.size()));
       current_temporary_descriptors_cpu_.push_back(
           d3d12_rt.descriptor_srv_stencil().GetHandle());
     }
-    any_sources_32bpp_64bpp[size_t(rt_key.Is64bpp())] = true;
-    // Native layout is only for resolves with ALL native sources.
-    assert_true(!native_layout || rt_key.scale_native);
-    DumpPipelineKey pipeline_key;
-    pipeline_key.msaa_samples = rt_key.msaa_samples;
-    pipeline_key.resource_format = rt_key.resource_format;
-    pipeline_key.is_depth = rt_key.is_depth;
-    pipeline_key.source_scale_native = rt_key.scale_native;
-    pipeline_key.native_layout = uint32_t(native_layout);
-    dump_invocations_.emplace_back(rectangle, pipeline_key);
   }
 
   // Copy source descriptors to a shader-visible heap.
@@ -6759,7 +5942,7 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
   current_temporary_descriptors_gpu_.resize(descriptor_count);
   if (!command_processor_.RequestOneUseSingleViewDescriptors(
           descriptor_count, current_temporary_descriptors_gpu_.data())) {
-    return;
+    return false;
   }
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   for (uint32_t i = 0; i < descriptor_count; ++i) {
@@ -6768,31 +5951,104 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
                                   current_temporary_descriptors_cpu_[i],
                                   D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   }
+  return true;
+}
+
+bool D3D12RenderTargetCache::DirectResolveRenderTargets(
+    const draw_util::ResolveInfo& resolve_info,
+    const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+    uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+    uint32_t dump_pitch, D3D12SharedMemory& shared_memory) {
+  assert_true(GetPath() == Path::kHostRenderTargets);
+
+  GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
+                                 dump_pitch, dump_rectangles_);
+  if (dump_rectangles_.empty()) {
+    return false;
+  }
+
+  // Everything that can fail has to be settled before the first dispatch is
+  // encoded - falling back after that would resolve part of the range twice.
+  dump_invocations_.clear();
+  dump_invocations_.reserve(dump_rectangles_.size());
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    RenderTargetKey rt_key =
+        static_cast<D3D12RenderTarget*>(rectangle.render_target)->key();
+    EdramDumpShaderKey pipeline_key;
+    pipeline_key.msaa_samples = rt_key.msaa_samples;
+    pipeline_key.resource_format = rt_key.resource_format;
+    pipeline_key.is_depth = rt_key.is_depth;
+    pipeline_key.source_scale_native = rt_key.scale_native;
+    pipeline_key.direct_resolve = 1;
+    if (!GetOrCreateDumpPipeline(pipeline_key)) {
+      return false;
+    }
+    dump_invocations_.emplace_back(rectangle, pipeline_key);
+  }
+
+  if (!shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
+                                  resolve_info.copy_dest_extent_length)) {
+    XELOGE(
+        "D3D12RenderTargetCache: Failed to obtain the direct resolve "
+        "destination memory region");
+    return false;
+  }
+
+  if (!PrepareDumpSourceDescriptors()) {
+    return false;
+  }
+
+  // Committed to the direct path from here on.
+  command_processor_.PushDebugMarker(
+      "DirectResolveRenderTargets (Shared Memory Write): base tile %u",
+      dump_base);
+
+  shared_memory.UseForWriting();
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
+    command_processor_.PushTransitionBarrier(
+        d3d12_rt.resource(),
+        d3d12_rt.SetResourceState(
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  }
 
   // Sort the invocations to reduce context and binding switches.
   std::sort(dump_invocations_.begin(), dump_invocations_.end());
 
-  // Dump the render targets.
+  // One destination and one rectangle for the whole resolve.
+  uint32_t resolve_constants[kEdramDumpShaderPushConstantCount] = {};
+  resolve_constants[kEdramDumpShaderPushConstantResolveEdramInfo] =
+      copy_shader_constants.dest_relative.edram_info.packed;
+  resolve_constants[kEdramDumpShaderPushConstantResolveCoordinateInfo] =
+      copy_shader_constants.dest_relative.coordinate_info.packed;
+  resolve_constants[kEdramDumpShaderPushConstantResolveDestInfo] =
+      copy_shader_constants.dest_relative.dest_info.value;
+  resolve_constants[kEdramDumpShaderPushConstantResolveDestCoordinateInfo] =
+      copy_shader_constants.dest_relative.dest_coordinate_info.packed;
+  resolve_constants[kEdramDumpShaderPushConstantResolveDestBase] =
+      copy_shader_constants.dest_base;
+  resolve_constants[kEdramDumpShaderPushConstantResolveHeightDiv8] =
+      resolve_info.height_div_8;
+
   DeferredCommandList& command_list =
       command_processor_.GetDeferredCommandList();
   ID3D12RootSignature* last_root_signature = nullptr;
-  // `root_parameters_set` doesn't include the EDRAM buffer, which is never
+  // `root_parameters_set` doesn't include the destination, which is never
   // changed.
   uint32_t root_parameters_set = 0;
   uint32_t last_descriptor_index_source = UINT32_MAX;
   uint32_t last_descriptor_index_stencil = UINT32_MAX;
-  bool last_edram_uav_is_64bpp = false;
-  DumpOffsets last_offsets;
-  DumpPitches last_pitches;
+  bool pitches_set = false;
+  bool resolve_constants_set = false;
+  EdramDumpShaderPitches last_pitches;
   for (const DumpInvocation& invocation : dump_invocations_) {
     const ResolveCopyDumpRectangle& rectangle = invocation.rectangle;
     auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
     RenderTargetKey rt_key = d3d12_rt.key();
-    DumpPipelineKey pipeline_key = invocation.pipeline_key;
+    EdramDumpShaderKey pipeline_key = invocation.pipeline_key;
     ID3D12PipelineState* pipeline = GetOrCreateDumpPipeline(pipeline_key);
-    if (!pipeline) {
-      continue;
-    }
+    assert_not_null(pipeline);
     command_processor_.SetExternalPipeline(pipeline);
 
     ID3D12RootSignature* root_signature = pipeline_key.is_depth
@@ -6802,28 +6058,39 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
       last_root_signature = root_signature;
       command_list.D3DSetComputeRootSignature(root_signature);
       root_parameters_set = 0;
+      pitches_set = false;
+      resolve_constants_set = false;
+      // The whole buffer is bound, which is what lets the destination base
+      // stay the absolute byte offset the shader adds to the tiled address.
       command_list.D3DSetComputeRootUnorderedAccessView(
           pipeline_key.is_depth ? kDumpRootParameterDepthEdram
                                 : kDumpRootParameterColorEdram,
-          edram_buffer_gpu_address_);
+          shared_memory.GetGPUAddress());
     }
 
-    DumpRootParameter root_parameter_pitches =
-        pipeline_key.is_depth ? kDumpRootParameterDepthPitches
-                              : kDumpRootParameterColorPitches;
-    uint32_t root_parameter_pitches_bit = uint32_t(1) << root_parameter_pitches;
-    DumpPitches pitches;
+    if (!resolve_constants_set) {
+      resolve_constants_set = true;
+      command_list.D3DSetComputeRoot32BitConstants(
+          kDumpRootParameterPushConstants,
+          kEdramDumpShaderPushConstantCount -
+              kEdramDumpShaderPushConstantResolveEdramInfo,
+          &resolve_constants[kEdramDumpShaderPushConstantResolveEdramInfo],
+          kEdramDumpShaderPushConstantResolveEdramInfo);
+    }
+
+    EdramDumpShaderPitches pitches;
     pitches.dest_pitch = dump_pitch;
     pitches.source_pitch = rt_key.GetPitchTiles();
     if (last_pitches != pitches) {
       last_pitches = pitches;
-      root_parameters_set &= ~root_parameter_pitches_bit;
+      pitches_set = false;
     }
-    if (!(root_parameters_set & root_parameter_pitches_bit)) {
+    if (!pitches_set) {
+      pitches_set = true;
       command_list.D3DSetComputeRoot32BitConstants(
-          root_parameter_pitches, sizeof(last_pitches) / sizeof(uint32_t),
-          &last_pitches, 0);
-      root_parameters_set |= root_parameter_pitches_bit;
+          kDumpRootParameterPushConstants,
+          sizeof(last_pitches) / sizeof(uint32_t), &last_pitches,
+          kEdramDumpShaderPushConstantPitches);
     }
 
     if (pipeline_key.is_depth) {
@@ -6862,9 +6129,204 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
       root_parameters_set |= kDumpRootParameterSourceBit;
     }
 
-    constexpr uint32_t kDumpRootParameterOffsetsBit =
-        uint32_t(1) << kDumpRootParameterOffsets;
-    DumpOffsets offsets;
+    // A direct resolve dispatches over destination pixels rather than EDRAM
+    // samples, so the runs of pixels the guest layout stores contiguously line
+    // up with whole stores. Tiles cover this many of them.
+    bool format_is_64bpp = rt_key.Is64bpp();
+    uint32_t tile_pixels_x =
+        (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) >>
+        uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k4X);
+    uint32_t tile_pixels_y =
+        xenos::kEdramTileHeightSamples >>
+        uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k2X);
+    uint32_t pixels_per_thread =
+        GetEdramDumpShaderResolvePixelsPerThread(format_is_64bpp);
+
+    EdramDumpShaderOffsets offsets;
+    offsets.source_base_tiles = rt_key.base_tiles;
+    ResolveCopyDumpRectangle::Dispatch
+        dispatches[ResolveCopyDumpRectangle::kMaxDispatches];
+    uint32_t dispatch_count =
+        rectangle.GetDispatches(dump_pitch, dump_row_length_used, dispatches);
+    for (uint32_t i = 0; i < dispatch_count; ++i) {
+      const ResolveCopyDumpRectangle::Dispatch& dispatch = dispatches[i];
+      offsets.dispatch_first_tile = dump_base + dispatch.offset;
+      command_list.D3DSetComputeRoot32BitConstants(
+          kDumpRootParameterPushConstants, sizeof(offsets) / sizeof(uint32_t),
+          &offsets, kEdramDumpShaderPushConstantOffsets);
+
+      // Where this dispatch starts in the resolve's tile grid, which the
+      // threads place themselves against.
+      uint32_t dispatch_tile_relative =
+          offsets.dispatch_first_tile -
+          copy_shader_constants.dest_relative.edram_info.base_tiles;
+      EdramDumpShaderResolveDispatchTile dispatch_tile;
+      dispatch_tile.tile_x = dispatch_tile_relative % dump_pitch;
+      dispatch_tile.tile_y = dispatch_tile_relative / dump_pitch;
+      command_list.D3DSetComputeRoot32BitConstants(
+          kDumpRootParameterPushConstants,
+          sizeof(dispatch_tile) / sizeof(uint32_t), &dispatch_tile,
+          kEdramDumpShaderPushConstantResolveDispatchTile);
+
+      command_processor_.SubmitBarriers();
+      uint32_t threads_x =
+          (dispatch.width_tiles * tile_pixels_x + (pixels_per_thread - 1)) /
+          pixels_per_thread;
+      command_list.D3DDispatch(
+          (threads_x + (kEdramDumpShaderResolveThreadsPerGroupX - 1)) /
+              kEdramDumpShaderResolveThreadsPerGroupX,
+          (dispatch.height_tiles * tile_pixels_y +
+           (kEdramDumpShaderResolveThreadsPerGroupY - 1)) /
+              kEdramDumpShaderResolveThreadsPerGroupY,
+          1);
+    }
+  }
+
+  shared_memory.MarkUAVWritesCommitNeeded();
+
+  command_processor_.PopDebugMarker();
+  return true;
+}
+
+void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
+                                               uint32_t dump_row_length_used,
+                                               uint32_t dump_rows,
+                                               uint32_t dump_pitch,
+                                               bool native_layout) {
+  assert_true(GetPath() == Path::kHostRenderTargets);
+
+  GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
+                                 dump_pitch, dump_rectangles_);
+  if (dump_rectangles_.empty()) {
+    return;
+  }
+
+  command_processor_.PushDebugMarker(
+      "DumpRenderTargets (EDRAM Write): base tile %u", dump_base);
+
+  if (!PrepareDumpSourceDescriptors()) {
+    command_processor_.PopDebugMarker();
+    return;
+  }
+
+  TransitionEdramBuffer(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  dump_invocations_.clear();
+  dump_invocations_.reserve(dump_rectangles_.size());
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
+    command_processor_.PushTransitionBarrier(
+        d3d12_rt.resource(),
+        d3d12_rt.SetResourceState(
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    RenderTargetKey rt_key = d3d12_rt.key();
+    // Native layout is only for resolves with ALL native sources.
+    assert_true(!native_layout || rt_key.scale_native);
+    EdramDumpShaderKey pipeline_key;
+    pipeline_key.msaa_samples = rt_key.msaa_samples;
+    pipeline_key.resource_format = rt_key.resource_format;
+    pipeline_key.is_depth = rt_key.is_depth;
+    pipeline_key.source_scale_native = rt_key.scale_native;
+    pipeline_key.native_layout = uint32_t(native_layout);
+    dump_invocations_.emplace_back(rectangle, pipeline_key);
+  }
+
+  // Sort the invocations to reduce context and binding switches.
+  std::sort(dump_invocations_.begin(), dump_invocations_.end());
+
+  // Dump the render targets.
+  DeferredCommandList& command_list =
+      command_processor_.GetDeferredCommandList();
+  ID3D12RootSignature* last_root_signature = nullptr;
+  // `root_parameters_set` doesn't include the EDRAM buffer, which is never
+  // changed.
+  uint32_t root_parameters_set = 0;
+  uint32_t last_descriptor_index_source = UINT32_MAX;
+  uint32_t last_descriptor_index_stencil = UINT32_MAX;
+  // The pitches and the offsets are two dwords of one root constants
+  // parameter, so they're tracked apart from the descriptor tables' mask.
+  bool pitches_set = false;
+  bool offsets_set = false;
+  EdramDumpShaderOffsets last_offsets;
+  EdramDumpShaderPitches last_pitches;
+  for (const DumpInvocation& invocation : dump_invocations_) {
+    const ResolveCopyDumpRectangle& rectangle = invocation.rectangle;
+    auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
+    RenderTargetKey rt_key = d3d12_rt.key();
+    EdramDumpShaderKey pipeline_key = invocation.pipeline_key;
+    ID3D12PipelineState* pipeline = GetOrCreateDumpPipeline(pipeline_key);
+    if (!pipeline) {
+      continue;
+    }
+    command_processor_.SetExternalPipeline(pipeline);
+
+    ID3D12RootSignature* root_signature = pipeline_key.is_depth
+                                              ? dump_root_signature_depth_
+                                              : dump_root_signature_color_;
+    if (last_root_signature != root_signature) {
+      last_root_signature = root_signature;
+      command_list.D3DSetComputeRootSignature(root_signature);
+      root_parameters_set = 0;
+      pitches_set = false;
+      offsets_set = false;
+      command_list.D3DSetComputeRootUnorderedAccessView(
+          pipeline_key.is_depth ? kDumpRootParameterDepthEdram
+                                : kDumpRootParameterColorEdram,
+          edram_buffer_gpu_address_);
+    }
+
+    EdramDumpShaderPitches pitches;
+    pitches.dest_pitch = dump_pitch;
+    pitches.source_pitch = rt_key.GetPitchTiles();
+    if (last_pitches != pitches) {
+      last_pitches = pitches;
+      pitches_set = false;
+    }
+    if (!pitches_set) {
+      command_list.D3DSetComputeRoot32BitConstants(
+          kDumpRootParameterPushConstants,
+          sizeof(last_pitches) / sizeof(uint32_t), &last_pitches,
+          kEdramDumpShaderPushConstantPitches);
+      pitches_set = true;
+    }
+
+    if (pipeline_key.is_depth) {
+      constexpr uint32_t kDumpRootParameterDepthStencilBit =
+          uint32_t(1) << kDumpRootParameterDepthStencil;
+      uint32_t descriptor_index_stencil =
+          d3d12_rt.temporary_srv_descriptor_index_stencil();
+      assert_true(descriptor_index_stencil != UINT32_MAX);
+      if (last_descriptor_index_stencil != descriptor_index_stencil) {
+        last_descriptor_index_stencil = descriptor_index_stencil;
+        root_parameters_set &= ~kDumpRootParameterDepthStencilBit;
+      }
+      if (!(root_parameters_set & kDumpRootParameterDepthStencilBit)) {
+        command_list.D3DSetComputeRootDescriptorTable(
+            kDumpRootParameterDepthStencil,
+            current_temporary_descriptors_gpu_[last_descriptor_index_stencil]
+                .second);
+        root_parameters_set |= kDumpRootParameterDepthStencilBit;
+      }
+    }
+
+    constexpr uint32_t kDumpRootParameterSourceBit =
+        uint32_t(1) << kDumpRootParameterSource;
+    uint32_t descriptor_index_source =
+        d3d12_rt.temporary_srv_descriptor_index();
+    assert_true(descriptor_index_source != UINT32_MAX);
+    if (last_descriptor_index_source != descriptor_index_source) {
+      last_descriptor_index_source = descriptor_index_source;
+      root_parameters_set &= ~kDumpRootParameterSourceBit;
+    }
+    if (!(root_parameters_set & kDumpRootParameterSourceBit)) {
+      command_list.D3DSetComputeRootDescriptorTable(
+          kDumpRootParameterSource,
+          current_temporary_descriptors_gpu_[last_descriptor_index_source]
+              .second);
+      root_parameters_set |= kDumpRootParameterSourceBit;
+    }
+
+    EdramDumpShaderOffsets offsets;
     offsets.source_base_tiles = rt_key.base_tiles;
     bool format_is_64bpp = rt_key.Is64bpp();
     ResolveCopyDumpRectangle::Dispatch
@@ -6876,24 +6338,28 @@ void D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base,
       offsets.dispatch_first_tile = dump_base + dispatch.offset;
       if (last_offsets != offsets) {
         last_offsets = offsets;
-        root_parameters_set &= ~kDumpRootParameterOffsetsBit;
+        offsets_set = false;
       }
-      if (!(root_parameters_set & kDumpRootParameterOffsetsBit)) {
+      if (!offsets_set) {
         command_list.D3DSetComputeRoot32BitConstants(
-            kDumpRootParameterOffsets, sizeof(last_offsets) / sizeof(uint32_t),
-            &last_offsets, 0);
-        root_parameters_set |= kDumpRootParameterOffsetsBit;
+            kDumpRootParameterPushConstants,
+            sizeof(last_offsets) / sizeof(uint32_t), &last_offsets,
+            kEdramDumpShaderPushConstantOffsets);
+        offsets_set = true;
       }
       command_processor_.SubmitBarriers();
-      // Processing 40 x 16 x scale samples per dispatch (a 32bpp tile in two
-      // dispatches at 1x1 scale, 64bpp in one dispatch). The native layout
-      // has a 1x1 footprint.
+      // The emitter's group covers 8 x 16 samples. The native layout has a
+      // 1x1 footprint.
       command_list.D3DDispatch(
-          (dispatch.width_tiles *
-           (native_layout ? 1 : draw_resolution_scale_x()))
-              << uint32_t(!format_is_64bpp),
-          dispatch.height_tiles *
-              (native_layout ? 1 : draw_resolution_scale_y()),
+          ((native_layout ? 1 : draw_resolution_scale_x()) *
+               (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) *
+               dispatch.width_tiles +
+           (kEdramDumpShaderSamplesPerGroupX - 1)) /
+              kEdramDumpShaderSamplesPerGroupX,
+          ((native_layout ? 1 : draw_resolution_scale_y()) *
+               xenos::kEdramTileHeightSamples * dispatch.height_tiles +
+           (kEdramDumpShaderSamplesPerGroupY - 1)) /
+              kEdramDumpShaderSamplesPerGroupY,
           1);
     }
     MarkEdramBufferModified();

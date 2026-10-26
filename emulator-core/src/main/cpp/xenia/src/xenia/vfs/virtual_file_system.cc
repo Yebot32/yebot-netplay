@@ -142,11 +142,18 @@ namespace {
 // mounted at ...\Content also swallows ...\Content_Eng.
 bool MountPathMatches(const std::string_view path,
                       const std::string_view mount_path) {
-  if (mount_path.empty() || !xe::utf8::starts_with_case(path, mount_path)) {
+  if (mount_path.empty()) {
+    return false;
+  }
+  const char last = mount_path.back();
+  // Links name a \Device\Content\N\ root without the trailing separator.
+  if (last == '\\' && path.size() + 1 == mount_path.size()) {
+    return xe::utf8::equal_case(path, mount_path.substr(0, path.size()));
+  }
+  if (!xe::utf8::starts_with_case(path, mount_path)) {
     return false;
   }
   // Mounts ending in a delimiter already sit on a component boundary.
-  const char last = mount_path.back();
   if (last == '\\' || last == ':') {
     return true;
   }
@@ -186,37 +193,45 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     return nullptr;
   }
 
-  auto relative_path = normalized_path.substr(device->mount_path().size());
+  auto relative_path = normalized_path.substr(
+      std::min(normalized_path.size(), device->mount_path().size()));
   return device->ResolvePath(relative_path);
 }
 
 Entry* VirtualFileSystem::CreatePath(const std::string_view path,
                                      uint32_t attributes) {
-  // Create all required directories recursively.
   auto path_parts = xe::utf8::split_path(path);
   if (path_parts.empty()) {
     return nullptr;
   }
-  auto partial_path = std::string(path_parts[0]);
-  auto partial_entry = ResolvePath(partial_path);
-  if (!partial_entry) {
+
+  // A device mount spans several path components, not just the first.
+  Entry* parent_entry = nullptr;
+  size_t next_part = path_parts.size();
+  while (next_part > 0) {
+    const auto& part = path_parts[next_part - 1];
+    const size_t prefix_length =
+        static_cast<size_t>(part.data() + part.size() - path.data());
+    parent_entry = ResolvePath(path.substr(0, prefix_length));
+    if (parent_entry) {
+      break;
+    }
+    --next_part;
+  }
+  if (!parent_entry) {
     return nullptr;
   }
-  auto parent_entry = partial_entry;
-  for (size_t i = 1; i < path_parts.size() - 1; ++i) {
-    partial_path = xe::utf8::join_guest_paths(partial_path, path_parts[i]);
-    auto child_entry = ResolvePath(partial_path);
-    if (!child_entry) {
-      child_entry =
-          parent_entry->CreateEntry(path_parts[i], kFileAttributeDirectory);
-    }
+
+  for (size_t i = next_part; i < path_parts.size(); ++i) {
+    const bool is_last = i == path_parts.size() - 1;
+    auto child_entry = parent_entry->CreateEntry(
+        path_parts[i], is_last ? attributes : kFileAttributeDirectory);
     if (!child_entry) {
       return nullptr;
     }
     parent_entry = child_entry;
   }
-  return parent_entry->CreateEntry(path_parts[path_parts.size() - 1],
-                                   attributes);
+  return parent_entry;
 }
 
 bool VirtualFileSystem::DeletePath(const std::string_view path) {
@@ -268,6 +283,16 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
 
     auto file_name = xe::utf8::find_name_from_guest_path(path);
     entry = parent_entry->GetChild(file_name);
+  } else if (path.empty() && root_entry) {
+    // An empty relative path is the root entry itself. Replacing it would
+    // delete what the root handle still refers to.
+    if (creation_disposition == FileDisposition::kSuperscede ||
+        creation_disposition == FileDisposition::kOverwrite ||
+        creation_disposition == FileDisposition::kOverwriteIf) {
+      *out_action = FileAction::kDoesNotExist;
+      return X_STATUS_ACCESS_DENIED;
+    }
+    entry = root_entry;
   } else {
     entry = !root_entry ? ResolvePath(path) : root_entry->GetChild(path);
   }

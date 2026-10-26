@@ -100,6 +100,7 @@ typedef uint32_t X_RESULT;
 #define X_ERROR_NOT_ENOUGH_MEMORY               X_RESULT_FROM_WIN32(0x00000008L)
 #define X_ERROR_NO_MORE_FILES                   X_RESULT_FROM_WIN32(0x00000012L)
 #define X_ERROR_NOT_SUPPORTED                   X_RESULT_FROM_WIN32(0x00000032L)
+#define X_ERROR_DUP_NAME                        X_RESULT_FROM_WIN32(0x00000034L)
 #define X_ERROR_INVALID_PARAMETER               X_RESULT_FROM_WIN32(0x00000057L)
 #define X_ERROR_INSUFFICIENT_BUFFER             X_RESULT_FROM_WIN32(0x0000007AL)
 #define X_ERROR_INVALID_NAME                    X_RESULT_FROM_WIN32(0x0000007BL)
@@ -302,7 +303,7 @@ enum FIRMWARE_REENTRY {
 
 // Found by dumping the kSectionStringTable sections of various games:
 // and the language list at
-// https://free60project.github.io/wiki/Profile_Account/
+// https://free60.org/System-Software/Profile_Account/
 enum class XLanguage : uint32_t {
   kInvalid = 0,
   kEnglish = 1,
@@ -592,9 +593,20 @@ enum X_MARKETPLACE_ENTRYPOINT : uint32_t {
   ContentList_Background = 4,
   ContentItem_Background = 5,
   ForcedNameChangeV1 = 6,
+  PrepaidCode = 7,
   ForcedNameChangeV2 = 8,
-  ProfileNameChange = 9,
-  ActiveDownloads = 12
+  GamerTagPurchase = 9,
+  SignUpCreditCard = 10,
+  SignUpParentCreditCard = 11,
+  ActiveDownloads = 12,
+  ViewDownloadDetails = 13,
+  GoldUpsell = 15,
+  TermsOfUse = 16,
+  PaymentOptions = 19,
+  PurchaseOrder = 21,
+  AccountSecurity = 23,
+  ViewTermsOfUse = 24,
+  MaxEntrypoint = 25
 };
 
 enum X_MARKETPLACE_DOWNLOAD_ITEMS_ENTRYPOINTS : uint32_t {

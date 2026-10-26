@@ -212,7 +212,8 @@ Module* Processor::GetModule(const std::string_view name) {
 
 std::vector<Module*> Processor::GetModules() {
   auto global_lock = global_critical_region_.Acquire();
-  std::vector<Module*> clone(modules_.size());
+  std::vector<Module*> clone;
+  clone.reserve(modules_.size());
   for (const auto& module : modules_) {
     clone.push_back(module.get());
   }
@@ -251,6 +252,31 @@ std::vector<Function*> Processor::FindFunctionsWithAddress(uint32_t address) {
 
 void Processor::RemoveFunctionByAddress(uint32_t address) {
   entry_table_.Delete(address);
+}
+
+void Processor::InvalidateCodeRange(uint32_t address, uint32_t length) {
+  if (!length) {
+    return;
+  }
+  const uint32_t end = address + length - 1;
+  auto global_lock = global_critical_region_.Acquire();
+  for (Function* function : entry_table_.DeleteRange(address, end)) {
+    if (!function) {
+      continue;
+    }
+    // The entry is what a call looks up, but the module would hand back the
+    // same already defined symbol and never compile the new code.
+    if (function->module()) {
+      function->module()->ForgetSymbol(function->address());
+    }
+    // The dynamic call cache keys a function by its entry, which a patch
+    // inside it misses.
+    if (function->address() < address) {
+      backend_->InvalidateDynamicCalls(function->address(),
+                                       function->address());
+    }
+  }
+  backend_->InvalidateDynamicCalls(address, end);
 }
 
 Function* Processor::ResolveFunction(uint32_t address) {

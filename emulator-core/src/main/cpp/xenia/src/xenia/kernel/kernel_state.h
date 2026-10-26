@@ -289,8 +289,10 @@ class KernelState {
   util::NativeList* dpc_list() { return &dpc_list_; }
 
   void CompleteOverlapped(uint32_t overlapped_ptr, X_RESULT result);
+  // The completion routine runs on thread_handle, the requester's thread.
   void CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
-                            uint32_t extended_error, uint32_t length);
+                            uint32_t extended_error, uint32_t length,
+                            X_HANDLE thread_handle);
 
   void CompleteOverlappedImmediate(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
@@ -320,6 +322,8 @@ class KernelState {
 
   uint32_t notification_position_ = 2;
   XDeploymentType deployment_type_ = XDeploymentType::kOther;
+  // Launch media mount path, titles can repoint GAME: and D: but not this.
+  std::string title_mount_path_;
 
   uint32_t GetKeTimestampBundle();
 
@@ -380,6 +384,7 @@ class KernelState {
   std::vector<object_ref<XNotifyListener>> notify_listeners_;
   bool has_notified_startup_ = false;
   bool has_notified_live_startup_ = false;
+  bool has_notified_xmp_startup_ = false;
 
   object_ref<UserModule> executable_module_;
   std::vector<object_ref<KernelModule>> kernel_modules_;

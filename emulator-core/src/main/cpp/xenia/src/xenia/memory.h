@@ -10,6 +10,7 @@
 #ifndef XENIA_MEMORY_H_
 #define XENIA_MEMORY_H_
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -217,6 +218,9 @@ class BaseHeap {
   // address.
   bool QueryProtect(uint32_t address, uint32_t* out_protect);
 
+  // True when no allocation covers any page in the range.
+  bool IsRangeUnallocated(uint32_t address, uint32_t size);
+
   // Queries the currently strictest readability and writability for the entire
   // range.
   xe::memory::PageAccess QueryRangeAccess(uint32_t low_address,
@@ -236,6 +240,20 @@ class BaseHeap {
 
   // Rebuilds free_blocks_ by scanning page_table_. Used after Restore.
   void RebuildFreeBlocks();
+
+  // Applies `protect` to the host mapping backing the inclusive guest page
+  // range. Handles a host page larger than the guest page by protecting whole
+  // host pages with the most permissive access any guest page inside one
+  // needs, so a neighbour's protection is never tightened. page_table_ is read
+  // for pages outside the range, so it must still hold their current state.
+  bool ApplyHostProtect(uint32_t start_page_number, uint32_t end_page_number,
+                        uint32_t protect, uint32_t* old_protect);
+
+  // Backs the guest page range on the host at commit time. Equivalent to a
+  // host commit where the guest page size is host-page-aligned, and falls back
+  // to ApplyHostProtect where it is not (4 KB guest pages on a 16 KB host).
+  bool CommitHostPages(uint32_t start_page_number, uint32_t page_count,
+                       uint32_t protect);
 
   // Removes (or splits) the free block covering the given page range.
   void RemoveFreeBlock(uint32_t start_page, uint32_t page_count);
@@ -619,6 +637,28 @@ class Memory {
   // Frees memory allocated with SystemHeapAlloc.
   void SystemHeapFree(uint32_t address, uint32_t* out_region_size = nullptr);
 
+  // Maps the address space user mode code runs in, which shows 64 KB physical
+  // memory at 0x20000000-0x3FFFFFFF. Titles without user mode never create it.
+  bool EnableUserModeViews();
+
+  // Base of the user mode address space, null until it is created.
+  inline uint8_t* user_virtual_membase() const {
+    return user_virtual_membase_.load(std::memory_order_relaxed);
+  }
+
+  // The kernel address with the same contents as a user mode address.
+  static uint32_t UserModeKernelAddress(uint32_t user_address) {
+    return user_address - kUserAliasBase < kUserAliasSize
+               ? user_address + 0x80000000
+               : user_address;
+  }
+  // The inverse of UserModeKernelAddress.
+  static uint32_t KernelModeUserAddress(uint32_t kernel_address) {
+    return kernel_address - 0xA0000000 < kUserAliasSize
+               ? kernel_address - 0x80000000
+               : kernel_address;
+  }
+
   // Gets the heap for the address space containing the given address.
   XE_NOALIAS
   const BaseHeap* LookupHeap(uint32_t address) const;
@@ -654,6 +694,11 @@ class Memory {
 #endif
   int MapViews(uint8_t* mapping_base);
   void UnmapViews();
+  bool MapUserViews(uint8_t* user_membase);
+  void UnmapUserViews();
+
+  static constexpr uint32_t kUserAliasBase = 0x20000000;
+  static constexpr uint32_t kUserAliasSize = 0x20000000;
 
   static uint32_t HostToGuestVirtualThunk(const void* context,
                                           const void* host_address);
@@ -687,6 +732,11 @@ class Memory {
     };
     uint8_t* all_views[9];
   } views_ = {{0}};
+  std::atomic<uint8_t*> user_virtual_membase_{nullptr};
+  struct {
+    uint8_t* base;
+    size_t length;
+  } user_views_[9] = {};
 
   std::unique_ptr<cpu::MMIOHandler> mmio_handler_;
 
@@ -697,6 +747,7 @@ class Memory {
     VirtualHeap v90000000;
 
     VirtualHeap physical;
+    PhysicalHeap v7F000000;
     PhysicalHeap vA0000000;
     PhysicalHeap vC0000000;
     PhysicalHeap vE0000000;

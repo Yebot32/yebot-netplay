@@ -76,6 +76,14 @@ void GetSubresourcesFromFetchConstant(
   uint32_t base_page = fetch.base_address & 0x1FFFF;
   uint32_t mip_page = fetch.mip_address & 0x1FFFF;
 
+  // If level 0 is packed, the whole tail uses base_address, even if
+  // mip_address is nonzero.
+  if (base_page != 0 && fetch.packed_mips &&
+      fetch.dimension != xenos::DataDimension::k1D &&
+      GetPackedMipLevel(width_minus_1 + 1, height_minus_1 + 1) == 0) {
+    mip_page = base_page;
+  }
+
   uint32_t mip_min_level, mip_max_level;
   // Not taking mip_filter == kBaseMap into account for mip_max_level because
   // the mip filter may be overridden by shader fetch instructions.
@@ -162,9 +170,11 @@ bool GetPackedMipOffset(uint32_t width, uint32_t height, uint32_t depth,
   uint32_t packed_mip_base = (log2_size > 4) ? (log2_size - 4) : 0;
   uint32_t packed_mip = mip - packed_mip_base;
 
+  // A 2x1 texture is packed along X, like a square texture.
+  bool is_wide = log2_width > std::max(log2_height, uint32_t(1));
   // Find the block offset of the mip.
   if (packed_mip < 3) {
-    if (log2_width > log2_height) {
+    if (is_wide) {
       // Wider than tall. Laid out vertically.
       x_blocks = 0;
       y_blocks = 16 >> packed_mip;
@@ -176,7 +186,7 @@ bool GetPackedMipOffset(uint32_t width, uint32_t height, uint32_t depth,
     z_blocks = 0;
   } else {
     uint32_t offset;
-    if (log2_width > log2_height) {
+    if (is_wide) {
       // Wider than tall. Laid out horizontally.
       offset = (1 << (log2_width - packed_mip_base)) >> (packed_mip - 2);
       x_blocks = offset;
@@ -190,8 +200,8 @@ bool GetPackedMipOffset(uint32_t width, uint32_t height, uint32_t depth,
     if (offset < 4) {
       // Pack 1x1 Z mipmaps along Z - not reached for 2D.
       uint32_t log2_depth = xe::log2_ceil(depth);
-      if (log2_depth > 1 + packed_mip) {
-        z_blocks = (log2_depth - packed_mip) * 4;
+      if (log2_depth > 1 + mip) {
+        z_blocks = (log2_depth - mip) * 4;
       } else {
         z_blocks = 4;
       }
@@ -243,6 +253,11 @@ TextureGuestLayout GetGuestTextureLayout(
     std::memset(&layout, 0, sizeof(layout));
     return layout;
   }
+  // D3D's FindTextureSize aligns non-base 2D array levels to four slices.
+  uint32_t mip_array_size =
+      dimension == xenos::DataDimension::k2DOrStacked && layout.array_size > 1
+          ? xe::align(layout.array_size, xenos::kTextureTileDepth)
+          : layout.array_size;
 
   // For safety, clamp the maximum level.
   uint32_t max_level_for_dimensions =
@@ -282,8 +297,8 @@ TextureGuestLayout GetGuestTextureLayout(
 
   // The loop counter can mean two things depending on whether the packed mip
   // tail is stored as mip 0, because in this case, it would be ambiguous since
-  // both the base and the mips would be on "level 0", but stored separately and
-  // possibly with a different layout.
+  // both the base and the mips would be on "level 0", but use separate layout
+  // entries for the base pitch and the mip strides.
   uint32_t loop_level_last;
   if (layout.packed_level == 0) {
     // Packed mip tail is the level 0 - may need to load mip tails for the base,
@@ -312,31 +327,33 @@ TextureGuestLayout GetGuestTextureLayout(
     // For stride calculation purposes, mip dimensions are always aligned to
     // 32x32x4 blocks (or x1 for the missing dimensions), including for linear
     // textures.
-    // Linear texture rows are 256-byte-aligned.
+    // Linear texture row blocks are aligned to max(256 / block size, 32).
     uint32_t row_pitch_texels_unaligned;
     uint32_t z_slice_stride_texel_rows_unaligned;
     if (is_base) {
       row_pitch_texels_unaligned = base_pitch_texels_div_32 << 5;
-      z_slice_stride_texel_rows_unaligned = height_texels;
+      // Level 0 packed tails use power-of-two dimensions like the other mips.
+      z_slice_stride_texel_rows_unaligned = layout.packed_level == 0
+                                                ? xe::next_pow2(height_texels)
+                                                : height_texels;
     } else {
       row_pitch_texels_unaligned =
           std::max(xe::next_pow2(width_texels) >> level, uint32_t(1));
       z_slice_stride_texel_rows_unaligned =
           std::max(xe::next_pow2(height_texels) >> level, uint32_t(1));
     }
+    uint32_t row_pitch_blocks_alignment = xenos::kTextureTileWidthHeight;
+    if (!is_tiled && !is_base) {
+      row_pitch_blocks_alignment =
+          std::max(xenos::kTextureLinearRowAlignmentBytes / bytes_per_block,
+                   xenos::kTextureTileWidthHeight);
+    }
     uint32_t row_pitch_blocks_tile_aligned = xe::align(
         xe::align(row_pitch_texels_unaligned, format_info->block_width) /
             format_info->block_width,
-        xenos::kTextureTileWidthHeight);
+        row_pitch_blocks_alignment);
     level_layout.row_pitch_bytes =
         row_pitch_blocks_tile_aligned * bytes_per_block;
-    // Assuming the provided pitch is already 256-byte-aligned for linear, but
-    // considering the guest-provided pitch more important (no information about
-    // how the GPU actually handles unaligned rows).
-    if (!is_tiled && !is_base) {
-      level_layout.row_pitch_bytes = xe::align(
-          level_layout.row_pitch_bytes, xenos::kTextureLinearRowAlignmentBytes);
-    }
     level_layout.z_slice_stride_block_rows =
         dimension != xenos::DataDimension::k1D
             ? xe::align(xe::align(z_slice_stride_texel_rows_unaligned,
@@ -349,7 +366,10 @@ TextureGuestLayout GetGuestTextureLayout(
     uint32_t z_stride_bytes = level_layout.array_slice_stride_bytes;
     if (dimension == xenos::DataDimension::k3D) {
       level_layout.array_slice_stride_bytes *=
-          xe::align(depth_or_array_size, xenos::kTextureTileDepth);
+          xe::align(is_base && layout.packed_level != 0
+                        ? depth
+                        : std::max(xe::next_pow2(depth) >> level, uint32_t(1)),
+                    xenos::kTextureTileDepth);
     }
     level_layout.array_slice_stride_bytes =
         xe::align(level_layout.array_slice_stride_bytes,
@@ -444,7 +464,7 @@ TextureGuestLayout GetGuestTextureLayout(
           std::max(layout.mips_total_extent_bytes,
                    mip_offset_bytes + level_layout.level_data_extent_bytes);
       mip_offset_bytes +=
-          level_layout.array_slice_stride_bytes * layout.array_size;
+          level_layout.array_slice_stride_bytes * mip_array_size;
     }
   }
 

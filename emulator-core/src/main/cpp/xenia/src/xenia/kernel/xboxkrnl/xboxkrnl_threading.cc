@@ -92,26 +92,15 @@ object_ref<T> LookupNamedObject(KernelState* kernel_state,
   return nullptr;
 }
 
-enum CreateThreadFlags : uint32_t {
-  ThreadInitiallySuspended = 0x00000001,
-  SystemThread = 0x00000002,
-  PriorityClass1 = 0x00000020,
-  PriorityClass2 = 0x00000040,
-  ReturnKThreadPtr = 0x00000080,
-  AffinityCpu0 = 0x01000000,
-  AffinityCpu1 = 0x02000000,
-  AffinityCpu2 = 0x04000000,
-  AffinityCpu3 = 0x08000000,
-  AffinityCpu4 = 0x10000000,
-  AffinityCpu5 = 0x20000000,
-};
-
 inline const std::map<uint32_t, std::string> ex_thread_flag_map = {
     {ThreadInitiallySuspended, "Thread Initially Suspended"},
     {SystemThread, "Guest Created System Thread"},
+    {TLSStatic, "TLS Static"},
     {PriorityClass1, "Thread Priority Class 1"},
     {PriorityClass2, "Thread Priority Class 2"},
     {ReturnKThreadPtr, "Return Kthread Ptr"},
+    {TitleExecutionThread, "Title Execution Thread"},
+    {Hidden, "Hide From Debug List"},
     {AffinityCpu0, "Thread Starts At Cpu 1"},
     {AffinityCpu1, "Thread Starts At Cpu 2"},
     {AffinityCpu2, "Thread Starts At Cpu 3"},
@@ -1543,10 +1532,9 @@ static bool ProcessApcList(PPCContext* ctx, X_KTHREAD* current_thread,
   ctx->r[1] = old_stack_pointer - 32;
 
   while (!apc_queue.empty(ctx)) {
-    uint32_t apc_ptr = apc_queue.flink_ptr;
-
     XAPC* apc = apc_queue.ListEntryObject(
-        ctx->TranslateVirtual<X_LIST_ENTRY*>(apc_ptr));
+        ctx->TranslateVirtual<X_LIST_ENTRY*>(apc_queue.flink_ptr));
+    uint32_t apc_ptr = ctx->HostToGuestVirtual(apc);
 
     uint8_t* scratch_ptr = ctx->TranslateVirtual(scratch_address);
     xe::store_and_swap<uint32_t>(scratch_ptr + 0, apc->normal_routine);
@@ -1710,6 +1698,11 @@ void KeInitializeApc_entry(pointer_t<XAPC> apc, lpvoid_t thread_ptr,
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeApc, kThreading, kImplemented);
 
+// A host thread, such as an I/O worker or a timer callback, queues and removes
+// APCs with the target's context (see XThread::ApcQueueContext). It must leave
+// the target's IRQL alone, as the target may change it at the same time.
+static bool CallerIsHostThread() { return !cpu::ThreadState::Get(); }
+
 uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
                             uint32_t priority_increment,
                             cpu::ppc::PPCContext* context) {
@@ -1718,7 +1711,9 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
     return 0;
   }
   auto target_thread = context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr);
-  auto old_irql = xeKeKfAcquireSpinLock(context, &target_thread->apc_lock);
+  const bool change_irql = !CallerIsHostThread();
+  auto old_irql =
+      xeKeKfAcquireSpinLock(context, &target_thread->apc_lock, change_irql);
   uint32_t result;
   if (!target_thread->may_queue_apcs || apc->enqueued) {
     result = 0;
@@ -1754,14 +1749,27 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
     */
     result = 1;
   }
-  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql);
+  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql,
+                        change_irql);
   return result;
 }
 
 dword_result_t KeInsertQueueApc_entry(pointer_t<XAPC> apc, lpvoid_t arg1,
                                       lpvoid_t arg2, dword_t priority_increment,
                                       const ppc_context_t& context) {
-  return xeKeInsertQueueApc(apc, arg1, arg2, priority_increment, context);
+  auto kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  const bool kernel_apc_to_self =
+      apc->apc_mode == 0 &&
+      context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr) ==
+          context->TranslateVirtual(kpcr->prcb_data.current_thread);
+  uint32_t result =
+      xeKeInsertQueueApc(apc, arg1, arg2, priority_increment, context);
+  // Lowering IRQL as the APC lock is released runs a kernel APC queued to this
+  // thread.
+  if (result && kernel_apc_to_self) {
+    xeProcessKernelApcs(context);
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInsertQueueApc, kThreading, kImplemented);
 
@@ -1774,7 +1782,9 @@ dword_result_t KeRemoveQueueApc_entry(pointer_t<XAPC> apc,
     return 0;
   }
   auto target_thread = context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr);
-  auto old_irql = xeKeKfAcquireSpinLock(context, &target_thread->apc_lock);
+  const bool change_irql = !CallerIsHostThread();
+  auto old_irql =
+      xeKeKfAcquireSpinLock(context, &target_thread->apc_lock, change_irql);
 
   if (apc->enqueued) {
     result = true;
@@ -1782,7 +1792,8 @@ dword_result_t KeRemoveQueueApc_entry(pointer_t<XAPC> apc,
     util::XeRemoveEntryList(&apc->list_entry, context);
     // todo: this is incomplete, there is more logic here in actual kernel
   }
-  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql);
+  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql,
+                        change_irql);
 
   return result ? 1 : 0;
 }

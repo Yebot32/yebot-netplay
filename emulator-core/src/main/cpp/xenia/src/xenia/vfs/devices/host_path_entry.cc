@@ -9,6 +9,8 @@
 
 #include "xenia/vfs/devices/host_path_entry.h"
 
+#include <algorithm>
+
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
@@ -28,6 +30,22 @@ HostPathEntry::HostPathEntry(Device* device, Entry* parent,
     : Entry(device, parent, path), host_path_(host_path) {}
 
 HostPathEntry::~HostPathEntry() = default;
+
+bool HostPathEntry::has_open_files() const {
+  auto global_lock = global_critical_region_.Acquire();
+  // Deleting a directory frees its children, so their handles count too.
+  return open_files_.load() != 0 ||
+         std::ranges::any_of(children_, [](const auto& child) {
+           return child->has_open_files();
+         });
+}
+
+void HostPathEntry::ReleaseFile() {
+  auto global_lock = global_critical_region_.Acquire();
+  if (open_files_.fetch_sub(1) == 1 && delete_on_close() && parent()) {
+    Delete();
+  }
+}
 
 HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
                                      const std::filesystem::path& full_path,
@@ -140,14 +158,17 @@ void HostPathEntry::RenameEntryInternal(
 }
 
 void HostPathEntry::update() {
-  if (reported_size_fixed_) {
-    return;
-  }
   auto file_info = xe::filesystem::GetInfo(host_path_);
   if (!file_info) {
     return;
   }
-  if (file_info->type == xe::filesystem::FileInfo::Type::kFile) {
+  // Creation time never changes, and posix reports st_ctime here, which
+  // moves on every write.
+  access_timestamp_ = file_info->access_timestamp;
+  write_timestamp_ = file_info->write_timestamp;
+  // A synthesized size, such as a collapsed package container, must stand.
+  if (file_info->type == xe::filesystem::FileInfo::Type::kFile &&
+      !reported_size_fixed_) {
     size_ = file_info->total_size;
     allocation_size_ =
         xe::round_up(file_info->total_size, device()->bytes_per_sector());

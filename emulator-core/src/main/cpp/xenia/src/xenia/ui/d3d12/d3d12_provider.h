@@ -119,6 +119,12 @@ class D3D12Provider : public GraphicsProvider {
     return rasterizer_ordered_views_supported_;
   }
   bool AreBarycentricsSupported() const { return barycentrics_supported_; }
+  bool IsAlphaBlendFactorSupported() const {
+    return alpha_blend_factor_supported_;
+  }
+  bool IsDynamicDepthBiasSupported() const {
+    return dynamic_depth_bias_supported_;
+  }
   D3D12_RESOURCE_BINDING_TIER GetResourceBindingTier() const {
     return resource_binding_tier_;
   }
@@ -145,28 +151,10 @@ class D3D12Provider : public GraphicsProvider {
     return pfn_d3d12_serialize_root_signature_(desc, version, blob_out,
                                                error_blob_out);
   }
-  HRESULT Disassemble(const void* src_data, size_t src_data_size, UINT flags,
-                      const char* comments, ID3DBlob** disassembly_out) const {
-    if (!pfn_d3d_disassemble_) {
-      return E_NOINTERFACE;
-    }
-    return pfn_d3d_disassemble_(src_data, src_data_size, flags, comments,
-                                disassembly_out);
-  }
-  HRESULT DxbcConverterCreateInstance(const CLSID& rclsid, const IID& riid,
-                                      void** ppv) const {
-    if (!pfn_dxilconv_dxc_create_instance_) {
-      return E_NOINTERFACE;
-    }
-    return pfn_dxilconv_dxc_create_instance_(rclsid, riid, ppv);
-  }
-  HRESULT DxcCreateInstance(const CLSID& rclsid, const IID& riid,
-                            void** ppv) const {
-    if (!pfn_dxcompiler_dxc_create_instance_) {
-      return E_NOINTERFACE;
-    }
-    return pfn_dxcompiler_dxc_create_instance_(rclsid, riid, ppv);
-  }
+
+  // Logs all pending D3D12 debug messages to xenia's log.
+  // Call this after operations that fail to get detailed error info.
+  void LogD3D12DebugMessages() const;
 
  private:
   D3D12Provider() = default;
@@ -189,18 +177,8 @@ class D3D12Provider : public GraphicsProvider {
   PFN_D3D12_CREATE_DEVICE pfn_d3d12_create_device_;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE pfn_d3d12_serialize_root_signature_;
 
-  HMODULE library_d3dcompiler_ = nullptr;
-  pD3DDisassemble pfn_d3d_disassemble_ = nullptr;
-
-  HMODULE library_dxilconv_ = nullptr;
-  DxcCreateInstanceProc pfn_dxilconv_dxc_create_instance_ = nullptr;
-
-  HMODULE library_dxcompiler_ = nullptr;
-  DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
-
-  // Pre-loaded by full path so dxcompiler.dll's own plain-name load of dxil.dll
-  // resolves to the copy in the D3D12 folder. May be nullptr (system-wide
-  // dxil.dll, if any, still resolves on dxcompiler's own).
+  // The DXIL validator that signs the shaders Mesa emits, loaded by full path
+  // so the copy in the D3D12 folder wins. May be nullptr.
   HMODULE library_dxil_ = nullptr;
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
@@ -222,6 +200,8 @@ class D3D12Provider : public GraphicsProvider {
   bool ps_specified_stencil_reference_supported_;
   bool rasterizer_ordered_views_supported_;
   bool barycentrics_supported_;
+  bool alpha_blend_factor_supported_;
+  bool dynamic_depth_bias_supported_;
   bool unaligned_block_textures_supported_;
   uint16_t highest_shader_model_;
 };

@@ -87,12 +87,23 @@ void ImGuiDrawer::AddDialog(ImGuiDialog* dialog) {
       dialogs_.cend()) {
     return;
   }
+  ResetFrameTimeIfIdle();
   if (dialogs_.empty() && !IsDrawingDialogs()) {
     // First dialog added. !IsDrawingDialogs() is also checked because in a
     // situation of removing the only dialog, then adding a dialog, from within
     // a dialog's Draw function, re-registering the ImGuiDrawer may result in
     // ImGui being drawn multiple times in the current frame.
     window_->AddInputListener(this, z_order_);
+    // No events arrive while detached, so seed the pointer position
+    int32_t mouse_x, mouse_y;
+    if (window_->GetMousePosition(mouse_x, mouse_y)) {
+      UpdateMousePosition(float(mouse_x), float(mouse_y));
+    }
+    if (!cursor_visibility_overridden_) {
+      cursor_visibility_before_dialogs_ = window_->GetCursorVisibility();
+      cursor_visibility_overridden_ = true;
+      window_->SetCursorVisibility(Window::CursorVisibility::kVisible);
+    }
     if (presenter_) {
       presenter_->AddUIDrawerFromUIThread(this, z_order_);
     }
@@ -124,6 +135,7 @@ void ImGuiDrawer::AddNotification(ImGuiNotification* dialog) {
       notifications_.cend()) {
     return;
   }
+  ResetFrameTimeIfIdle();
   if (notifications_.empty()) {
     if (presenter_) {
       presenter_->AddUIDrawerFromUIThread(this, z_order_);
@@ -253,6 +265,7 @@ std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
       {ui::VirtualKey::kEnd, ImGuiKey_End},
       {ui::VirtualKey::kDelete, ImGuiKey_Delete},
       {ui::VirtualKey::kBack, ImGuiKey_Backspace},
+      {ui::VirtualKey::kSpace, ImGuiKey_Space},
       {ui::VirtualKey::kReturn, ImGuiKey_Enter},
       {ui::VirtualKey::kEscape, ImGuiKey_Escape},
       {ui::VirtualKey::kA, ImGuiKey_A},
@@ -772,11 +785,13 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
       }
     }
   }
-  // The guest already drives one repaint per frame while it produces them, so
-  // only self-drive when it isn't, to avoid presenting faster than the guest.
-  if (needs_continuous_repaint &&
-      !presenter_->GuestOutputDroveCurrentUIPaint()) {
-    presenter_->RequestUIPaintFromUIThread();
+  if (needs_continuous_repaint) {
+    if (presenter_->IsGuestOutputDrivingPaints()) {
+      // Ride the guest's paints, but look again in case it stops presenting
+      window_->RequestPaintAfter(Presenter::kGuestOutputStallTimeoutMillis);
+    } else {
+      presenter_->RequestUIPaintFromUIThread();
+    }
   }
 }
 
@@ -832,7 +847,14 @@ ImGuiIO& ImGuiDrawer::GetIO() {
   return ImGui::GetIO();
 }
 
-void ImGuiDrawer::OnKeyDown(KeyEvent& e) { OnKey(e, true); }
+void ImGuiDrawer::OnKeyDown(KeyEvent& e) {
+  OnKey(e, true);
+  // Text typed into a field stays away from the game's keyboard input.
+  // Releases still pass since the key may have gone down before the field.
+  if (GetIO().WantTextInput) {
+    e.set_handled(true);
+  }
+}
 
 void ImGuiDrawer::OnKeyUp(KeyEvent& e) { OnKey(e, false); }
 
@@ -959,6 +981,7 @@ void ImGuiDrawer::ClearInput() {
   io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
   std::memset(io.MouseDown, 0, sizeof(io.MouseDown));
   io.ClearInputKeys();
+  keys_down_.clear();
   touch_pointer_id_ = TouchEvent::kPointerIDNone;
   reset_mouse_position_after_next_frame_ = false;
 }
@@ -967,7 +990,14 @@ void ImGuiDrawer::OnKey(KeyEvent& e, bool is_down) {
   auto& io = GetIO();
   const VirtualKey virtual_key = e.virtual_key();
   if (auto imGuiKey = VirtualKeyToImGuiKey(virtual_key); imGuiKey) {
-    io.AddKeyEvent(*imGuiKey, is_down);
+    // Repeats of a key held since before the drawer attached aren't presses.
+    if (!is_down) {
+      keys_down_.erase(virtual_key);
+      io.AddKeyEvent(*imGuiKey, false);
+    } else if (!e.prev_state() || keys_down_.count(virtual_key)) {
+      keys_down_.insert(virtual_key);
+      io.AddKeyEvent(*imGuiKey, true);
+    }
   }
   switch (virtual_key) {
     case VirtualKey::kShift:
@@ -1010,6 +1040,13 @@ void ImGuiDrawer::SwitchToPhysicalMouseAndUpdateMousePosition(
   UpdateMousePosition(float(e.x()), float(e.y()));
 }
 
+void ImGuiDrawer::ResetFrameTimeIfIdle() {
+  // Draw isn't called while nothing is shown, so the idle gap would skew delta
+  if (dialogs_.empty() && notifications_.empty()) {
+    last_frame_time_ticks_ = Clock::QueryHostTickCount();
+  }
+}
+
 void ImGuiDrawer::DetachIfLastWindowRemoved() {
   // IsDrawingDialogs() is also checked because in a situation of removing the
   // only dialog, then adding a dialog, from within a dialog's Draw function,
@@ -1022,6 +1059,10 @@ void ImGuiDrawer::DetachIfLastWindowRemoved() {
     presenter_->RemoveUIDrawerFromUIThread(this);
   }
   window_->RemoveInputListener(this);
+  if (cursor_visibility_overridden_) {
+    cursor_visibility_overridden_ = false;
+    window_->SetCursorVisibility(cursor_visibility_before_dialogs_);
+  }
   // Clear all input since no input will be received anymore, and when the
   // drawer becomes active again, it'd have an outdated input state otherwise
   // which will be persistent until new events actualize individual input

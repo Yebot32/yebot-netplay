@@ -187,6 +187,9 @@ class XexModule : public xe::cpu::Module {
   const uint32_t base_address() const { return base_address_; }
   const bool is_dev_kit() const { return is_dev_kit_; }
 
+  // Section type of the image page containing `address`.
+  bool GetPageSectionType(uint32_t address, xex2_section_type* out_type) const;
+
   // Gets an optional header. Returns NULL if not found.
   // Special case: if key & 0xFF == 0x00, this function will return the value,
   // not a pointer! This assumes out_ptr points to uint32_t.

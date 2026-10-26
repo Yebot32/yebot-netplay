@@ -1,6 +1,11 @@
 add_library(xenia-gpu-metal STATIC
+  dxil_shader.cc
+  dxil_shader.h
+  ir_runtime_impl.cc
   metal_command_processor.cc
   metal_command_processor.h
+  metal_dxil_binder.cc
+  metal_dxil_binder.h
   metal_graphics_system.cc
   metal_graphics_system.h
   metal_heap_pool.cc
@@ -9,12 +14,18 @@ add_library(xenia-gpu-metal STATIC
   metal_primitive_processor.h
   metal_render_target_cache.cc
   metal_render_target_cache.h
-  metal_shader_cache.cc
-  metal_shader_cache.h
+  metal_shader_converter.cc
+  metal_shader_converter.h
   metal_shared_memory.cc
   metal_shared_memory.h
+  metal_tessellation_shaders.cc
+  metal_tessellation_shaders.h
   metal_texture_cache.cc
   metal_texture_cache.h
+  metal_transfer_spirv_cross.cc
+  metal_transfer_spirv_cross.h
+  metal_zpd_visibility_pool.cc
+  metal_zpd_visibility_pool.h
   msl_bindings.h
   msl_shader.cc
   msl_shader.h
@@ -28,23 +39,46 @@ target_link_libraries(xenia-gpu-metal PUBLIC
   xenia-gpu
   xenia-ui-metal
   spirv-cross
+  xenia-third-party-metal-shader-converter
   "-framework Foundation"
   "-framework Metal"
   "-framework MetalKit"
 )
 target_link_libraries(xenia-gpu-metal PRIVATE glslang-spirv)
-# The shader pipeline runs the host tool xenia-shader-cc (and slangc), which
-# must execute on the build machine even though the TARGET here is iOS. The
-# iOS CI therefore builds the host tool in a first, native pass and points
-# this configure at it via XE_FORCE_HOST_SHADER_CC + XE_HOST_SHADER_CC_PATH
-# (see third_party/CMakeLists.txt). The rules target iOS by env: the tool
-# reads XE_METAL_TARGET_SDK to emit -sdk iphoneos / -std=ios-metal2.3 AIR,
-# which the on-device loader accepts (macOS AIR is rejected there).
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-  set(XE_METAL_TARGET_SDK "iphoneos")
-  set(XE_METAL_MIN_VERSION "16.0")
-endif()
+# The tessellation path feeds the SPIR-V host vertex/hull shaders through Mesa,
+# so it includes their vulkan_spirv headers, which the Vulkan backend generates.
+# Depend on that generation so the headers exist on a clean build.
+foreach(_spirv_shaders_dep
+        xenia-gpu-vulkan-spirv-shaders xenia-gpu-vulkan-slang-spirv-shaders)
+  if(TARGET ${_spirv_shaders_dep})
+    add_dependencies(xenia-gpu-metal ${_spirv_shaders_dep})
+  endif()
+endforeach()
 xe_shader_rules_metal(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
 xe_shader_rules_slang(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                       TARGET msl)
 xe_target_defaults(xenia-gpu-metal)
+
+if(XENIA_BUILD_MISC)
+  # Metal trace dump
+  add_executable(xenia-gpu-metal-trace-dump
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_trace_dump_main.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
+  )
+  target_include_directories(xenia-gpu-metal-trace-dump PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/glslang
+  )
+  target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-gpu-metal xenia-hid xenia-hid-nop xenia-hid-portal
+    xenia-kernel xenia-patcher xenia-ui xenia-ui-metal xenia-vfs
+    aes_128 capstone fmt glslang-spirv imgui libavcodec libavutil mspack snappy xxhash
+  )
+  if(XE_TARGET_X86_64)
+    target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE xenia-cpu-backend-a64)
+  endif()
+  xe_target_defaults(xenia-gpu-metal-trace-dump)
+endif()

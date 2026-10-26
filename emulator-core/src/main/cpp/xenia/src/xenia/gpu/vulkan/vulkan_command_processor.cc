@@ -4177,8 +4177,8 @@ VulkanCommandProcessor::AcquireScratchGpuBuffer(
   scratch_buffer_ = new_scratch_buffer;
   scratch_buffer_size_ = size;
   // Not used yet, no need for a barrier.
-  scratch_buffer_last_stage_mask_ = initial_access_mask;
-  scratch_buffer_last_access_mask_ = initial_stage_mask;
+  scratch_buffer_last_stage_mask_ = initial_stage_mask;
+  scratch_buffer_last_access_mask_ = initial_access_mask;
   scratch_buffer_last_usage_submission_ = submission_current;
   scratch_buffer_used_ = true;
   return ScratchBufferAcquisition(*this, new_scratch_buffer, initial_stage_mask,
@@ -4940,7 +4940,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       host_render_targets_used, pixel_shader && pixel_shader->writes_depth());
   gviargs.SetupRegisterValues(regs);
 
-  draw_util::GetHostViewportInfo(&gviargs, viewport_info);
+  if (gviargs == previous_viewport_info_args_) {
+    viewport_info = previous_viewport_info_;
+  } else {
+    draw_util::GetHostViewportInfo(&gviargs, viewport_info);
+    previous_viewport_info_args_ = gviargs;
+    previous_viewport_info_ = viewport_info;
+  }
   // Update dynamic graphics pipeline state.
   UpdateDynamicState(viewport_info, primitive_polygonal,
                      normalized_depth_control, draw_resolution_scale_x,
@@ -5110,7 +5116,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 static_cast<uint32_t>(vfetch_constant.type));
             return false;
         }
-        vfetch_addresses[vfetch_current_queued] = vfetch_constant.address;
+        vfetch_addresses[vfetch_current_queued] =
+            vfetch_constant.address & 0x07FFFFFF;
         vfetch_sizes[vfetch_current_queued++] = vfetch_constant.size;
       }
     }
@@ -8310,6 +8317,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
     reg::RB_COLOR_INFO color_info = color_infos[i];
     // Exponent bias is in bits 20:25 of RB_COLOR_INFO.
     int32_t color_exp_bias = color_info.color_exp_bias;
+    float color_exp_bias_scale;
+    *reinterpret_cast<int32_t*>(&color_exp_bias_scale) =
+        UINT32_C(0x3F800000) + (color_exp_bias << 23);
     if (render_target_cache_->GetPath() ==
             RenderTargetCache::Path::kHostRenderTargets &&
         (color_info.color_format == xenos::ColorRenderTargetFormat::k_16_16 &&
@@ -8317,13 +8327,11 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
          color_info.color_format ==
                  xenos::ColorRenderTargetFormat::k_16_16_16_16 &&
              !render_target_cache_->IsFixedRGBA16TruncatedToMinus1To1())) {
-      // Remap from -32...32 to -1...1 by dividing the output values by 32,
-      // losing blending correctness, but getting the full range.
-      color_exp_bias -= 5;
+      // Remap to -1...1 by scaling the output values by 1024/32767, losing
+      // blending correctness, but getting the full range apart from -32,
+      // which SNORM folds into -32767/1024.
+      color_exp_bias_scale *= 1024.0f / 32767.0f;
     }
-    float color_exp_bias_scale;
-    *reinterpret_cast<int32_t*>(&color_exp_bias_scale) =
-        UINT32_C(0x3F800000) + (color_exp_bias << 23);
     dirty |= system_constants_.color_exp_bias[i] != color_exp_bias_scale;
     system_constants_.color_exp_bias[i] = color_exp_bias_scale;
   }

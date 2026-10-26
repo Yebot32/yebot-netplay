@@ -10,7 +10,9 @@
 #include "config.h"
 
 #include <algorithm>
+#include <optional>
 #include <sstream>
+#include <string_view>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
@@ -122,6 +124,31 @@ void PrintConfigToLog(const std::filesystem::path& file_path) {
   file.close();
 }
 
+// Loads an old value a same-name alias maps to one of the cvar's new type into
+// a game config. True if an alias applied.
+static bool LoadAliasedGameConfigValue(cvar::IConfigVar* config_var,
+                                       const toml::node& node) {
+  std::optional<std::string_view> value = node.value<std::string_view>();
+  if (!value) {
+    return false;
+  }
+  for (const auto& alias : xe::ui::GetCvarAliases()) {
+    if (alias.old_name != config_var->name() ||
+        alias.new_name != alias.old_name || alias.old_value != *value) {
+      continue;
+    }
+    if (dynamic_cast<cvar::ConfigVar<bool>*>(config_var)) {
+      toml::value new_value(alias.new_value == "true");
+      config_var->LoadGameConfigValue(&new_value);
+    } else {
+      toml::value new_value(alias.new_value);
+      config_var->LoadGameConfigValue(&new_value);
+    }
+    return true;
+  }
+  return false;
+}
+
 void MigrateLegacyCvars(const toml::table& config) {
   if (!cvar::ConfigVars) {
     return;
@@ -184,8 +211,20 @@ void MigrateLegacyCvars(const toml::table& config) {
             // If new_value is "*", copy the original value as-is
             std::string final_value =
                 (alias.new_value == "*") ? var_value : alias.new_value;
-            toml::value new_value(final_value);
-            config_var->LoadConfigValue(&new_value);
+            // A bool doesn't load from a string node.
+            if (dynamic_cast<cvar::ConfigVar<bool>*>(config_var)) {
+              toml::value new_value(final_value == "true");
+              config_var->LoadConfigValue(&new_value);
+            } else {
+              toml::value new_value(final_value);
+              config_var->LoadConfigValue(&new_value);
+            }
+            // Loading the old value under the same name, now of another type,
+            // failed before this migrated it.
+            if (alias.old_name == alias.new_name &&
+                cvar::config_type_mismatch_warnings) {
+              std::erase(*cvar::config_type_mismatch_warnings, alias.new_name);
+            }
           }
           break;
         }
@@ -342,7 +381,9 @@ uint32_t LoadGameConfigForFile(const std::filesystem::path& game_path) {
 
       const auto config_key_node = config.at_path(config_key);
       if (config_key_node) {
-        config_var->LoadGameConfigValue(config_key_node.node());
+        if (!LoadAliasedGameConfigValue(config_var, *config_key_node.node())) {
+          config_var->LoadGameConfigValue(config_key_node.node());
+        }
         override_count++;
 
         std::stringstream ss;

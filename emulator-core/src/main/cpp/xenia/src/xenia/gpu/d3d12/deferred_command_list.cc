@@ -29,7 +29,8 @@ void DeferredCommandList::Reset() { command_stream_.clear(); }
 
 void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
                                   ID3D12GraphicsCommandList1* command_list_1,
-                                  ID3D12GraphicsCommandList2* command_list_2) {
+                                  ID3D12GraphicsCommandList2* command_list_2,
+                                  ID3D12GraphicsCommandList9* command_list_9) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -176,6 +177,14 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
             reinterpret_cast<const D3D12_RESOURCE_BARRIER*>(
                 reinterpret_cast<const uint8_t*>(stream) +
                 xe::align(sizeof(UINT), alignof(D3D12_RESOURCE_BARRIER))));
+      } break;
+      case Command::kD3DRSSetDepthBias: {
+        if (command_list_9 != nullptr && current_pipeline_state != nullptr) {
+          auto& args =
+              *reinterpret_cast<const D3DRSSetDepthBiasArguments*>(stream);
+          command_list_9->RSSetDepthBias(args.depth_bias, args.depth_bias_clamp,
+                                         args.slope_scaled_depth_bias);
+        }
       } break;
       case Command::kRSSetScissorRect: {
         command_list->RSSetScissorRects(

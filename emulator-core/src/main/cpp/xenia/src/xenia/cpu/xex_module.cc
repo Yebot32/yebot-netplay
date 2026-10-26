@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/xex_module.h"
 
+#include <cstring>
+
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/base/byte_order.h"
@@ -205,7 +207,12 @@ int XexModule::ApplyPatch(XexModule* module) {
   xex2_opt_delta_patch_descriptor* patch_header = nullptr;
   GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR,
                reinterpret_cast<void**>(&patch_header));
-  assert_not_null(patch_header);
+  if (!patch_header) {
+    // is_patch() only checks the module flags, so a malformed patch file can
+    // still lack the descriptor.
+    XELOGE("XEX patch has no delta patch descriptor");
+    return 1;
+  }
 
   uint32_t size = module->xex_header()->header_size;
   if (patch_header->delta_headers_source_offset > size) {
@@ -254,9 +261,11 @@ int XexModule::ApplyPatch(XexModule* module) {
   // If headers_source_offset is set, copy [source_offset:source_size] to
   // target_offset
   if (patch_header->delta_headers_source_offset) {
-    memcpy(header_ptr + patch_header->delta_headers_target_offset,
-           header_ptr + patch_header->delta_headers_source_offset,
-           patch_header->delta_headers_source_size);
+    // Same buffer at both ends, so the ranges can overlap - see the note in
+    // lzxdelta_apply_patch.
+    memmove(header_ptr + patch_header->delta_headers_target_offset,
+            header_ptr + patch_header->delta_headers_source_offset,
+            patch_header->delta_headers_source_size);
   }
 
   // If new size is smaller than original, null out the difference
@@ -287,30 +296,32 @@ int XexModule::ApplyPatch(XexModule* module) {
   // Update security info context with latest security info data
   module->ReadSecurityInfo();
 
+  // image_size() uses the heap at base_address_, so move the base first.
+  xe::be<uint32_t>* base_addr_opt = nullptr;
+  if (module->GetOptHeader(XEX_HEADER_IMAGE_BASE_ADDRESS, &base_addr_opt)) {
+    module->base_address_ = *base_addr_opt;
+  }
+  const uint32_t new_base_address = module->base_address_;
+  const bool base_moved = new_base_address != original_base_address;
+
   uint32_t new_image_size = module->image_size();
 
   // Check if we need to alloc new memory for the patched xex
-  if (new_image_size > original_image_size) {
-    uint32_t size_delta = new_image_size - original_image_size;
-    uint32_t addr_new_mem = module->base_address_ + original_image_size;
-
-    // Before we allocate new range we must check if patch haven't modified
-    // base_address.
-    uint32_t new_base_address = module->base_address();
-    xe::be<uint32_t>* base_addr_opt = nullptr;
-    if (module->GetOptHeader(XEX_HEADER_IMAGE_BASE_ADDRESS, &base_addr_opt)) {
-      new_base_address = *base_addr_opt;
-    }
-
-    if (original_base_address != new_base_address) {
+  if (base_moved || new_image_size > original_image_size) {
+    uint32_t addr_new_mem;
+    uint32_t size_delta;
+    if (base_moved) {
       XELOGW(
           "Patch for module: {} changed base_address from {:08X} to {:08X}, "
           "need to reallocate xex "
           "data!",
-          module->name(), module->base_address_, new_base_address);
-      module->base_address_ = new_base_address;
+          module->name(), original_base_address, new_base_address);
       addr_new_mem = new_base_address;
-      size_delta = new_image_size;
+      // Room for the old image, trimmed below if the patched one is smaller.
+      size_delta = std::max(original_image_size, new_image_size);
+    } else {
+      addr_new_mem = new_base_address + original_image_size;
+      size_delta = new_image_size - original_image_size;
     }
 
     bool alloc_result =
@@ -328,11 +339,13 @@ int XexModule::ApplyPatch(XexModule* module) {
       return 6;
     }
 
-    // For base_address change we need to copy data from previous allocation to
-    // new one
-    if (original_base_address != new_base_address) {
+    // Move the image to its new base and free the old allocation.
+    if (base_moved) {
       kernel_state_->memory()->Copy(new_base_address, original_base_address,
                                     original_image_size);
+      memory()
+          ->LookupHeap(original_base_address)
+          ->Release(original_base_address);
     }
   }
 
@@ -395,9 +408,11 @@ int XexModule::ApplyPatch(XexModule* module) {
   // If image_source_offset is set, copy [source_offset:source_size] to
   // target_offset
   if (patch_header->delta_image_source_offset) {
-    memcpy(base_exe + patch_header->delta_image_target_offset,
-           base_exe + patch_header->delta_image_source_offset,
-           patch_header->delta_image_source_size);
+    // Same buffer at both ends, so the ranges can overlap - see the note in
+    // lzxdelta_apply_patch.
+    memmove(base_exe + patch_header->delta_image_target_offset,
+            base_exe + patch_header->delta_image_source_offset,
+            patch_header->delta_image_source_size);
   }
 
   // TODO: should we use new_image_size here instead?
@@ -630,12 +645,21 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
     const uint32_t data_size = comp_info.blocks[n].data_size;
     const uint32_t zero_size = comp_info.blocks[n].zero_size;
 
+    // Block sizes come from the file. Decryption works in 16-byte blocks.
+    const size_t copy_size =
+        opt_file_format_info()->encryption_type == XEX_ENCRYPTION_NORMAL
+            ? xe::align<size_t>(data_size, 16)
+            : data_size;
+    const size_t source_offset = size_t(p - source_buffer);
+    const size_t dest_offset = size_t(d - buffer);
+    if (copy_size > exe_length - source_offset || dest_offset > total_size ||
+        copy_size > total_size - dest_offset) {
+      XELOGE("XEX basic compression block {} is out of bounds", n);
+      return 1;
+    }
+
     switch (opt_file_format_info()->encryption_type) {
       case XEX_ENCRYPTION_NONE:
-        if (data_size > uncompressed_size - (d - buffer)) {
-          // Overflow.
-          return 1;
-        }
         memcpy(d, p, data_size);
         break;
       case XEX_ENCRYPTION_NORMAL: {
@@ -1320,6 +1344,30 @@ bool XexModule::ContainsAddress(uint32_t address) {
   return address >= low_address_ && address < high_address_;
 }
 
+bool XexModule::GetPageSectionType(uint32_t address,
+                                   xex2_section_type* out_type) const {
+  if (!loaded_ || !base_address_ || address < base_address_ ||
+      address - base_address_ >= xex_security_info()->image_size) {
+    return false;
+  }
+  auto heap = memory()->LookupHeap(base_address_);
+  if (!heap) {
+    return false;
+  }
+  const uint32_t page = (address - base_address_) / heap->page_size();
+  auto sec_header = xex_security_info();
+  for (uint32_t i = 0, end = 0; i < sec_header->page_descriptor_count; i++) {
+    xex2_page_descriptor desc;
+    desc.value = xe::byte_swap(sec_header->page_descriptors[i].value);
+    end += desc.page_count;
+    if (page < end) {
+      *out_type = desc.info;
+      return true;
+    }
+  }
+  return false;
+}
+
 std::unique_ptr<Function> XexModule::CreateFunction(uint32_t address) {
   return std::unique_ptr<Function>(
       processor_->backend()->CreateGuestFunction(this, address));
@@ -1456,12 +1504,8 @@ std::vector<uint32_t> XexModule::PreanalyzeCode() {
     }
   }
   uint32_t high_8_aligned = highest_exec_addr & ~(8U - 1);
-  uint32_t n_possible_8byte_addresses = (high_8_aligned - low_8_aligned) / 8;
-  uint32_t* funcstart_candidate_stack =
-      new uint32_t[n_possible_8byte_addresses];
-  uint32_t* funcstart_candstack2 = new uint32_t[n_possible_8byte_addresses];
-
-  uint32_t stack_pos = 0;
+  std::vector<uint32_t> funcstarts;
+  funcstarts.reserve((high_8_aligned - low_8_aligned) / 8);
   {
     // all functions seem to start on 8 byte boundaries, except for obvious ones
     // like the save/rest funcs
@@ -1483,8 +1527,8 @@ std::vector<uint32_t> XexModule::PreanalyzeCode() {
     uint32_t mfspr_r12_lr32 =
         *reinterpret_cast<const uint32_t*>(&mfspr_r12_lr[0]);
 
-    auto add_new_func = [funcstart_candidate_stack, &stack_pos](uint32_t addr) {
-      funcstart_candidate_stack[stack_pos++] = addr;
+    auto add_new_func = [&funcstarts](uint32_t addr) {
+      funcstarts.push_back(addr);
     };
     /*
                 First pass: detect save of the link register at an eight byte
@@ -1538,6 +1582,95 @@ std::vector<uint32_t> XexModule::PreanalyzeCode() {
       }
     }
 
+    // Third pass: functions whose address is formed with lis + addi/ori, such
+    // as callbacks stored into a table. A leaf that is never the target of a bl
+    // has no .pdata entry and can follow the previous blr without padding, so
+    // none of the passes above find it and it compiles on first call.
+    auto in_code_section = [this](uint32_t address) {
+      for (auto& section : pe_sections_) {
+        if ((section.flags & kXEPESectionContainsCode) &&
+            address >= section.address &&
+            address - section.address < section.size) {
+          return true;
+        }
+      }
+      return false;
+    };
+    auto read = [this](uint32_t address) -> uint32_t {
+      return *memory()->TranslateVirtualBE<uint32_t>(address);
+    };
+    auto is_address_taken_function = [&](uint32_t address) {
+      if ((address & 3) || !in_code_section(address) ||
+          !in_code_section(address - 4)) {
+        return false;
+      }
+      uint32_t first = read(address);
+      // A table of code addresses (a jump table) rather than code.
+      if (!first || in_code_section(first)) {
+        return false;
+      }
+      uint32_t previous = read(address - 4);
+      bool previous_is_b =
+          (previous >> 26) == 18 && !ppc::PPCOpcodeBits{previous}.I.LK;
+      return !previous || previous == 0x4E800020 || previous_is_b;
+    };
+    // How far an addi/ori may follow the lis its value started from.
+    constexpr uint32_t kConstantWindowBytes = 64;
+    for (auto& section : pe_sections_) {
+      if (!(section.flags & kXEPESectionContainsCode)) {
+        continue;
+      }
+      std::array<uint32_t, 32> registers = {};
+      std::array<uint32_t, 32> lis_address = {};
+      auto clear = [&](uint32_t reg) { lis_address[reg] = 0; };
+      uint32_t section_end = section.address + (section.size & ~3u);
+      for (uint32_t address = section.address; address < section_end;
+           address += 4) {
+        uint32_t code = read(address);
+        ppc::PPCOpcodeBits bits{code};
+        uint32_t opcode = code >> 26;
+        if (opcode == 15 && !bits.D.RA) {
+          registers[bits.D.RT] = static_cast<uint32_t>(bits.D.DS) << 16;
+          lis_address[bits.D.RT] = address;
+          continue;
+        }
+        uint32_t source = 32, dest = 32, value = 0;
+        if (opcode == 14 && bits.D.RA) {
+          source = bits.D.RA;
+          dest = bits.D.RT;
+          value = registers[source] +
+                  static_cast<uint32_t>(ppc::XEEXTS16(bits.D.DS));
+        } else if (opcode == 24) {
+          source = bits.D.RT;
+          dest = bits.D.RA;
+          value = registers[source] | bits.D.DS;
+        }
+        if (source != 32 && lis_address[source] &&
+            address - lis_address[source] <= kConstantWindowBytes) {
+          registers[dest] = value;
+          lis_address[dest] = lis_address[source];
+          if (is_address_taken_function(value)) {
+            add_new_func(value);
+          }
+          continue;
+        }
+        // Anything else that may write a register ends its constant. Clearing
+        // too much only loses a candidate; a stale high half invents one.
+        bool is_branch = opcode == 16 || opcode == 18 || opcode == 19;
+        if (is_branch && (code & 1)) {
+          // A call clobbers the volatile registers.
+          clear(0);
+          for (uint32_t reg = 3; reg <= 12; ++reg) {
+            clear(reg);
+          }
+        } else if (!is_branch && opcode != 10 && opcode != 11) {
+          // Update forms and logical ops write RA, most others RT.
+          clear(bits.D.RT);
+          clear(bits.D.RA);
+        }
+      }
+    }
+
     auto pdata = this->GetPESection(".pdata");
 
     if (pdata) {
@@ -1560,34 +1693,10 @@ std::vector<uint32_t> XexModule::PreanalyzeCode() {
 
   // Sort the list of function starts and then ensure that all addresses are
   // unique
-  uint32_t n_known_funcaddrs = 0;
-  {
-    // make addresses unique
-
-    std::sort(funcstart_candidate_stack, funcstart_candidate_stack + stack_pos);
-
-    uint32_t read_pos = 0;
-    uint32_t write_pos = 0;
-    uint32_t previous_addr = ~0u;
-    while (read_pos < stack_pos) {
-      uint32_t current_addr = funcstart_candidate_stack[read_pos++];
-
-      if (current_addr != previous_addr) {
-        previous_addr = current_addr;
-        funcstart_candstack2[write_pos++] = current_addr;
-      }
-    }
-    n_known_funcaddrs = write_pos;
-  }
-
-  delete[] funcstart_candidate_stack;
-
-  std::vector<uint32_t> result;
-  result.resize(n_known_funcaddrs);
-  memcpy(&result[0], funcstart_candstack2,
-         sizeof(uint32_t) * n_known_funcaddrs);
-  delete[] funcstart_candstack2;
-  return result;
+  std::sort(funcstarts.begin(), funcstarts.end());
+  funcstarts.erase(std::unique(funcstarts.begin(), funcstarts.end()),
+                   funcstarts.end());
+  return funcstarts;
 }
 bool XexModule::FindSaveRest() {
   // Special stack save/restore functions.

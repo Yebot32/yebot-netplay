@@ -330,11 +330,41 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled,
         }
       }
     }
+    // What the shared memory buffer holds here isn't any earlier resolve's
+    // output anymore. A scaled resolve mirrored there is recorded again after.
+    for (auto it = scaled_resolve_extents_.begin();
+         it != scaled_resolve_extents_.end() && it->first <= page_last;) {
+      if (it->second >= page_first) {
+        it = scaled_resolve_extents_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   // Invalidate textures. Toggling individual textures between scaled and
   // unscaled also relies on invalidation through shared memory.
   shared_memory().RangeWrittenByGpu(start_unscaled, length_unscaled);
+}
+
+void TextureCache::MarkScaledResolveMirrored(uint32_t start_unscaled,
+                                             uint32_t length_unscaled) {
+  if (!IsDrawResolutionScaled() || !length_unscaled) {
+    return;
+  }
+  start_unscaled &= 0x1FFFFFFF;
+  length_unscaled = std::min(length_unscaled, 0x20000000 - start_unscaled);
+  uint32_t page_first = start_unscaled >> 12;
+  uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
+  auto global_lock = global_critical_region_.Acquire();
+  // Past the limit, a CPU write unmarks only the pages it writes.
+  if (scaled_resolve_extents_.size() >= kMaxScaledResolveExtents) {
+    scaled_resolve_extents_.clear();
+  }
+  // Resolves at one base with different extents, like a downsampling chain,
+  // keep the largest.
+  auto extent = scaled_resolve_extents_.try_emplace(page_first, page_last);
+  extent.first->second = std::max(extent.first->second, page_last);
 }
 
 uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle,
@@ -372,6 +402,15 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   Texture* textures_to_load[64];  // max bits = 32, can be unsigned + signed
                                   // means max array size = 64
   uint32_t num_textures_to_load = 0;
+  // Textures bound to multiple fetch constants are only loaded once.
+  auto queue_texture_to_load = [&](Texture* texture) {
+    for (uint32_t i = 0; i < num_textures_to_load; ++i) {
+      if (textures_to_load[i] == texture) {
+        return;
+      }
+    }
+    textures_to_load[num_textures_to_load++] = texture;
+  };
   while (xe::bit_scan_forward(textures_remaining, &index)) {
     uint32_t index_bit = UINT32_C(1) << index;
     textures_remaining = xe::clear_lowest_bit(textures_remaining);
@@ -460,10 +499,10 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
       binding.texture_signed = nullptr;
     }
     if (load_unsigned_data && binding.texture != nullptr) {
-      textures_to_load[num_textures_to_load++] = binding.texture;
+      queue_texture_to_load(binding.texture);
     }
     if (load_signed_data && binding.texture_signed != nullptr) {
-      textures_to_load[num_textures_to_load++] = binding.texture_signed;
+      queue_texture_to_load(binding.texture_signed);
     }
   }
 
@@ -595,11 +634,17 @@ TextureCache::Texture::Texture(TextureCache& texture_cache,
 }
 
 TextureCache::Texture::~Texture() {
-  if (mips_watch_handle_) {
-    texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
-  }
-  if (base_watch_handle_) {
-    texture_cache().shared_memory().UnwatchMemoryRange(base_watch_handle_);
+  {
+    // A watch fired by a guest thread unlinks its range and clears the handle
+    // under the global lock, so check the handles under it too, or a stale
+    // range would be unlinked twice, corrupting the watch free lists.
+    auto global_lock = xe::global_critical_region::Acquire();
+    if (mips_watch_handle_) {
+      texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
+    }
+    if (base_watch_handle_) {
+      texture_cache().shared_memory().UnwatchMemoryRange(base_watch_handle_);
+    }
   }
 
   // Only remove from usage list if we were added to it (track_usage=true).
@@ -1092,8 +1137,12 @@ void TextureCache::BindingInfoFromFetchConstant(
   texture_util::GetSubresourcesFromFetchConstant(
       fetch, &width_minus_1, &height_minus_1, &depth_or_array_size_minus_1,
       &base_page, &mip_page, nullptr, &mip_max_level);
-  if (base_page == 0 && mip_page == 0) {
-    // No texture data at all.
+  if (base_page == 0 && mip_page == 0 &&
+      (fetch.swizzle & 0b110110110110) != 0b100100100100) {
+    // No texture data at all. Any header taking every swizzle component from
+    // literal 0s or 1s may still be valid. 4D530919 binds one as the dummy
+    // alpha plane of Bink movies. Such examples get a texture with their
+    // dimensions for LOD queries. Zero extents skip the upload and watches.
     return;
   }
   if (fetch.dimension == xenos::DataDimension::k1D) {
@@ -1257,8 +1306,28 @@ void TextureCache::ScaledResolveGlobalWatchCallback(
   }
   // Mark scaled resolve ranges as non-scaled. Textures themselves will be
   // invalidated by their shared memory watches.
-  uint32_t resolve_page_first = address_first >> 12;
-  uint32_t resolve_page_last = address_last >> 12;
+  uint32_t page_first = address_first >> 12;
+  uint32_t page_last = address_last >> 12;
+  if (!UnmarkScaledResolvePages(page_first, page_last)) {
+    return;
+  }
+  // The rest of any resolve the write lands in too. A texture over it would
+  // otherwise still load from the scaled data, as a range counts as scaled if
+  // any page of it is, and miss what the CPU wrote.
+  for (auto it = scaled_resolve_extents_.begin();
+       it != scaled_resolve_extents_.end() && it->first <= page_last;) {
+    if (it->second < page_first) {
+      ++it;
+      continue;
+    }
+    UnmarkScaledResolvePages(it->first, it->second);
+    it = scaled_resolve_extents_.erase(it);
+  }
+}
+
+bool TextureCache::UnmarkScaledResolvePages(uint32_t resolve_page_first,
+                                            uint32_t resolve_page_last) {
+  bool unmarked = false;
   uint32_t resolve_block_first = resolve_page_first >> 5;
   uint32_t resolve_block_last = resolve_page_last >> 5;
   uint32_t resolve_l2_block_first = resolve_block_first >> 6;
@@ -1286,6 +1355,9 @@ void TextureCache::ScaledResolveGlobalWatchCallback(
         resolve_keep_bits |=
             ~((UINT32_C(1) << ((resolve_page_last & 31) + 1)) - 1);
       }
+      if (scaled_resolve_pages_[resolve_block_index] & ~resolve_keep_bits) {
+        unmarked = true;
+      }
       scaled_resolve_pages_[resolve_block_index] &= resolve_keep_bits;
       if (scaled_resolve_pages_[resolve_block_index] == 0) {
         scaled_resolve_pages_l2_[i] &=
@@ -1293,6 +1365,7 @@ void TextureCache::ScaledResolveGlobalWatchCallback(
       }
     }
   }
+  return unmarked;
 }
 
 }  // namespace gpu

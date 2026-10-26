@@ -76,6 +76,8 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
   } else {
     // Get the base address in dwords from the bits 2:31 of the first fetch
     // constant word.
+    // Drop the upper bits so writeback & XPS addresses alias their
+    // physical backing in shared memory.
     id_vector_temp_.clear();
     // The only element of the fetch constant buffer.
     id_vector_temp_.push_back(const_int_0_);
@@ -95,9 +97,12 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     // may be conditional, so fetch constants may also be used conditionally.
     address = builder_->createUnaryOp(
         spv::OpBitcast, type_int_,
-        builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
-                              fetch_constant_word_0,
-                              builder_->makeUintConstant(2)));
+        builder_->createBinOp(
+            spv::OpBitwiseAnd, type_uint_,
+            builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                  fetch_constant_word_0,
+                                  builder_->makeUintConstant(2)),
+            builder_->makeUintConstant(0x07FFFFFF)));
     // address is the base now. The exclusive end is base + size (size in words
     // in bits 2:25 of the second word). Store it for the subsequent
     // vfetch_mini, which reuses this fetch constant.
@@ -317,18 +322,21 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
             builder_->createUnaryOp(spv::OpConvertUToF, result_type, words);
       }
       if (!instr.attributes.is_integer) {
+        spv::Op scale_mul_op = used_format_component_count > 1
+                                   ? spv::OpVectorTimesScalar
+                                   : spv::OpFMul;
         if (instr.attributes.is_signed) {
           switch (instr.attributes.signed_rf_mode) {
             case xenos::SignedRepeatingFractionMode::kZeroClampMinusOne:
               result = builder_->createNoContractionBinOp(
-                  spv::OpVectorTimesScalar, result_type, result,
+                  scale_mul_op, result_type, result,
                   builder_->makeFloatConstant(1.0f / 2147483647.0f));
               // No need to clamp to -1 if signed - 1/(2^31-1) is rounded to
               // 1/(2^31) as float32.
               break;
             case xenos::SignedRepeatingFractionMode::kNoZero: {
               result = builder_->createNoContractionBinOp(
-                  spv::OpVectorTimesScalar, result_type, result,
+                  scale_mul_op, result_type, result,
                   builder_->makeFloatConstant(1.0f / 2147483647.5f));
               spv::Id const_no_zero =
                   builder_->makeFloatConstant(0.5f / 2147483647.5f);
@@ -348,7 +356,7 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
           }
         } else {
           result = builder_->createNoContractionBinOp(
-              spv::OpVectorTimesScalar, result_type, result,
+              scale_mul_op, result_type, result,
               builder_->makeFloatConstant(1.0f / 4294967295.0f));
         }
       }
@@ -510,8 +518,11 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
   if (result != spv::NoResult) {
     // Apply the exponent bias.
     if (instr.attributes.exp_adjust) {
+      spv::Id adjusted_type = builder_->getTypeId(result);
       result = builder_->createNoContractionBinOp(
-          spv::OpVectorTimesScalar, builder_->getTypeId(result), result,
+          builder_->isVectorType(adjusted_type) ? spv::OpVectorTimesScalar
+                                                : spv::OpFMul,
+          adjusted_type, result,
           builder_->makeFloatConstant(
               std::ldexp(1.0f, instr.attributes.exp_adjust)));
     }
@@ -1780,12 +1791,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
               builder_->makeFloatConstant(instr.attributes.lod_bias));
         }
 
-        // Cube auto-LOD without register gradients uses implicit LOD + bias to
-        // work around wrong-mip explicit cube gradients on Vulkan. Other dims
-        // keep explicit gradients, matching the DXBC ground-truth path.
-        bool use_lod_bias = use_computed_lod &&
-                            !instr.attributes.use_register_gradients &&
-                            instr.dimension == xenos::FetchOpDimension::kCube;
+        // Cube and 3D auto-LOD without register gradients use implicit LOD +
+        // bias. Explicit cube gradients pick the wrong mip on Vulkan, and
+        // explicit 3D gradients of a coordinate that is constant across the
+        // quad make NVIDIA return a different texel in one lane of the quad.
+        // 1D and 2D keep explicit gradients.
+        bool use_lod_bias =
+            use_computed_lod && !instr.attributes.use_register_gradients &&
+            (instr.dimension == xenos::FetchOpDimension::kCube ||
+             instr.dimension == xenos::FetchOpDimension::k3DOrStacked);
 
         // Calculate the gradients for sampling the texture if needed.
         // 2D vectors for k1D (because 1D images are emulated as 2D arrays),
@@ -2017,7 +2031,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           spv::Id sample_result_unsigned_3d, sample_result_signed_3d;
           {
             // 3D.
-            if (use_computed_lod) {
+            if (use_computed_lod && !use_lod_bias) {
               texture_parameters.gradX = gradients_h;
               texture_parameters.gradY = gradients_v;
             }
@@ -2036,7 +2050,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           spv::Id sample_result_unsigned_stacked, sample_result_signed_stacked;
           {
             // 2D stacked.
-            if (use_computed_lod) {
+            if (use_computed_lod && !use_lod_bias) {
               // Extract 2D gradients for stacked textures which are 2D arrays.
               uint_vector_temp_.clear();
               uint_vector_temp_.push_back(0);
@@ -2060,7 +2074,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             bool vol_min_filter_is_linear = instr.attributes.vol_min_filter ==
                                             xenos::TextureFilter::kLinear;
             spv::Id vol_filter_is_linear = spv::NoResult;
-            if (use_computed_lod &&
+            if (use_computed_lod && !use_lod_bias &&
                 (vol_mag_filter_is_fetch_const ||
                  vol_min_filter_is_fetch_const ||
                  vol_mag_filter_is_linear != vol_min_filter_is_linear)) {

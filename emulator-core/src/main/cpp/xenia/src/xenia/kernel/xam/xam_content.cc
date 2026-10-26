@@ -14,6 +14,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
 #include "xenia/base/threading.h"
+#include "xenia/base/utf8.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/smc.h"
@@ -125,21 +126,26 @@ dword_result_t xeXamContentResolve(
         root_device_path = "\\Device\\Harddisk0\\Partition1\\Content\\";
       } else if (content_data.device_id ==
                  static_cast<uint32_t>(DummyDeviceId::ODD)) {
-        // Or GAME, but D: usually means DVD drive meanwhile GAME always
-        // pinpoints to game, even if it is running from HDD
-        root_device_path = "D:\\content\\";
+        root_device_path = kernel_state()->title_mount_path_ + "\\content\\";
       } else {
         return X_ERROR_INVALID_PARAMETER;
       }
     }
 
-    const std::string relative_path = fmt::format(
-        "{:016X}\\{:08X}\\{:08X}\\{}", xuid, kernel_state()->title_id(),
-        static_cast<uint32_t>(content_data.content_type.get()),
-        content_data.file_name());
+    const std::string relative_dir =
+        fmt::format("{:016X}\\{:08X}\\{:08X}", xuid, kernel_state()->title_id(),
+                    static_cast<uint32_t>(content_data.content_type.get()));
+    const std::string content_dir = root_device_path + relative_dir;
 
-    string_util::copy_truncating(path_ptr, root_device_path + relative_path,
-                                 path_size);
+    // The caller creates the package file itself, so the directory must exist.
+    if (create_directory && !kernel_state()->file_system()->CreatePath(
+                                content_dir, vfs::kFileAttributeDirectory)) {
+      XELOGW("XamContentResolve: Cannot create content directory {}",
+             content_dir);
+    }
+
+    string_util::copy_truncating(
+        path_ptr, content_dir + "\\" + content_data.file_name(), path_size);
 
     // Check if it exists and try to mount that package
     // Result of buffer_ptr is sent to RtlInitAnsiString.
@@ -289,6 +295,64 @@ DECLARE_XAM_EXPORT1(XamContentCreateEnumerator, kContent, kImplemented);
 
 enum class kDispositionState : uint32_t { Unknown = 0, Create = 1, Open = 2 };
 
+// xam refuses root names with these characters after an optional
+// \??\ or \System??\ prefix in any case.
+static bool ValidRootName(std::string_view name) {
+  if (name.empty()) {
+    return false;
+  }
+  for (std::string_view prefix : {"\\??\\", "\\System??\\"}) {
+    if (xe::utf8::starts_with_case(name, prefix)) {
+      name.remove_prefix(prefix.size());
+      break;
+    }
+  }
+  return name.find_first_of(":;<=>?@!\"#$%&'()*+,-./[\\]") ==
+         std::string_view::npos;
+}
+
+// xam takes an ASCII file name but lets its first byte have the top bit set.
+static bool ValidFileName(const XCONTENT_DATA& content_data) {
+  const auto& name = content_data.file_name_raw;
+  if (!name[0]) {
+    return false;
+  }
+  for (size_t i = (uint8_t(name[0]) & 0x80) ? 1 : 0;
+       i < xe::countof(name) && name[i]; ++i) {
+    if (uint8_t(name[i]) & 0x80) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Content requests look the user up as they run and use the user's XUID for the
+// four user indices and XUID 0 for any other.
+static X_RESULT ContentXuid(uint32_t user_index, uint64_t& xuid) {
+  if (user_index >= XUserMaxUserCount) {
+    return X_ERROR_SUCCESS;
+  }
+  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
+  if (!user) {
+    return X_ERROR_NO_SUCH_USER;
+  }
+  xuid = user->xuid();
+  return X_ERROR_SUCCESS;
+}
+
+// A request with an overlapped completes it with ERROR_FUNCTION_FAILED and its
+// error as an HRESULT, or with success.
+static X_RESULT CompleteRequest(pointer_t<XAM_OVERLAPPED> overlapped_ptr,
+                                X_RESULT result) {
+  if (!overlapped_ptr) {
+    return result;
+  }
+  kernel_state()->CompleteOverlappedImmediateEx(
+      overlapped_ptr, result ? X_ERROR_FUNCTION_FAILED : X_ERROR_SUCCESS,
+      X_HRESULT_FROM_WIN32(result), 0);
+  return X_ERROR_IO_PENDING;
+}
+
 dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
                                   lpvoid_t content_data_ptr,
                                   dword_t content_data_size, dword_t flags,
@@ -296,29 +360,18 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
                                   lpdword_t license_mask_ptr,
                                   dword_t cache_size, qword_t content_size,
                                   pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  uint64_t xuid = 0;
-  if (user_index != XUserIndexNone && user_index != XUserIndexAny) {
-    const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
-
-    if (!user) {
-      return X_ERROR_NO_SUCH_USER;
-    }
-
-    xuid = user->xuid();
+  if (cache_size > 0xEF000) {
+    return X_ERROR_INVALID_PARAMETER;
   }
-
-  if (!root_name || *root_name == '\0') {
+  if (!root_name || !ValidRootName(root_name.value())) {
     return X_ERROR_INVALID_NAME;
   }
-
-  // Check if we have something under provided symlink.
-  std::string symlink_path = root_name.value();
-  if (!symlink_path.ends_with(':')) {
-    symlink_path += ':';
+  // xam clears them before looking anything up.
+  if (disposition_ptr) {
+    *disposition_ptr = 0;
   }
-
-  if (kernel_state()->file_system()->IsSymbolicLinkRegistered(symlink_path)) {
-    return X_ERROR_INVALID_PARAMETER;
+  if (license_mask_ptr) {
+    *license_mask_ptr = 0;
   }
 
   XCONTENT_AGGREGATE_DATA content_data;
@@ -331,79 +384,101 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
     return X_ERROR_INVALID_PARAMETER;
   }
 
-  if (content_data.content_type == XContentType::kMarketplaceContent) {
-    xuid = 0;
-  }
-
   auto content_manager = kernel_state()->content_manager();
 
-  if (overlapped_ptr && disposition_ptr) {
-    *disposition_ptr = 0;
-  }
-
-  auto run = [content_manager, xuid, root_name = root_name.value(), flags,
+  auto run = [content_manager, user_index, root_name = root_name.value(), flags,
               content_data, disposition_ptr, license_mask_ptr, overlapped_ptr](
                  uint32_t& extended_error, uint32_t& length) -> X_RESULT {
-    X_RESULT result = X_ERROR_INVALID_PARAMETER;
+    uint64_t xuid = 0;
+    X_RESULT result = ContentXuid(user_index, xuid);
+    if (content_data.content_type == XContentType::kMarketplaceContent) {
+      xuid = 0;
+    }
+    // The root is mounted after the content is chosen so a create on a root in
+    // use fails with ERROR_DUP_NAME and an open with ERROR_ALREADY_EXISTS.
+    const bool root_in_use =
+        kernel_state()->file_system()->IsSymbolicLinkRegistered(root_name +
+                                                                ':');
+
     kDispositionState disposition = kDispositionState::Unknown;
-    switch (flags & 0xF) {
-      case vfs::XContentFlag::kCreateNew:
-        // Fail if exists.
-        if (content_manager->ContentExists(xuid, content_data)) {
-          result = X_ERROR_ALREADY_EXISTS;
-        } else {
-          disposition = kDispositionState::Create;
-        }
-        break;
-      case vfs::XContentFlag::kCreateAlways:
-        // Overwrite existing, if any.
-        if (content_manager->ContentExists(xuid, content_data)) {
-          content_manager->DeleteContent(xuid, content_data);
-        }
-        disposition = kDispositionState::Create;
-        break;
-      case vfs::XContentFlag::kOpenExisting:
-        // Open only if exists.
-        if (!content_manager->ContentExists(xuid, content_data)) {
-          result = X_ERROR_PATH_NOT_FOUND;
-        } else {
-          disposition = kDispositionState::Open;
-        }
-        break;
-      case vfs::XContentFlag::kOpenAlways:
-        // Create if needed.
-        if (!content_manager->ContentExists(xuid, content_data)) {
-          disposition = kDispositionState::Create;
-        } else {
-          disposition = kDispositionState::Open;
-        }
-        break;
-      case vfs::XContentFlag::kTruncateExisting:
-        // Fail if doesn't exist, if does exist delete and recreate.
-        if (!content_manager->ContentExists(xuid, content_data)) {
-          result = X_ERROR_PATH_NOT_FOUND;
-        } else {
-          content_manager->DeleteContent(xuid, content_data);
-          disposition = kDispositionState::Create;
-        }
-        break;
-      default:
-        assert_unhandled_case(flags & 0xF);
-        break;
+    if (!result) {
+      switch (flags & 0xF) {
+        case vfs::XContentFlag::kCreateNew:
+          // Fail if exists.
+          if (content_manager->ContentExists(xuid, content_data)) {
+            result = X_ERROR_ALREADY_EXISTS;
+          } else {
+            disposition = kDispositionState::Create;
+          }
+          break;
+        case vfs::XContentFlag::kCreateAlways:
+          // Overwrite existing unless the root is in use, failing if the
+          // delete does.
+          if (!root_in_use &&
+              content_manager->ContentExists(xuid, content_data)) {
+            result = content_manager->DeleteContent(xuid, content_data);
+          }
+          if (!result) {
+            disposition = kDispositionState::Create;
+          }
+          break;
+        case vfs::XContentFlag::kOpenExisting:
+          // Open only if exists.
+          if (!content_manager->ContentExists(xuid, content_data)) {
+            result = X_ERROR_PATH_NOT_FOUND;
+          } else {
+            disposition = kDispositionState::Open;
+          }
+          break;
+        case vfs::XContentFlag::kOpenAlways:
+          // Create if needed.
+          if (!content_manager->ContentExists(xuid, content_data)) {
+            disposition = kDispositionState::Create;
+          } else {
+            disposition = kDispositionState::Open;
+          }
+          break;
+        case vfs::XContentFlag::kTruncateExisting:
+          // Fail if doesn't exist, if does exist delete and recreate.
+          if (!content_manager->ContentExists(xuid, content_data)) {
+            result = X_ERROR_PATH_NOT_FOUND;
+          } else if (root_in_use) {
+            // It's opened before it's emptied.
+            result = X_ERROR_ALREADY_EXISTS;
+          } else {
+            content_manager->DeleteContent(xuid, content_data);
+            disposition = kDispositionState::Create;
+          }
+          break;
+        default:
+          assert_unhandled_case(flags & 0xF);
+          result = X_ERROR_INVALID_PARAMETER;
+          break;
+      }
+    }
+    if (root_in_use && disposition != kDispositionState::Unknown) {
+      result = disposition == kDispositionState::Create
+                   ? X_ERROR_DUP_NAME
+                   : X_ERROR_ALREADY_EXISTS;
+      disposition = kDispositionState::Unknown;
     }
 
     uint32_t content_license = 0;
     if (disposition == kDispositionState::Create) {
       result = content_manager->CreateContent(root_name, xuid, content_data);
-      if (XSUCCEEDED(result)) {
+      if (!result) {
         content_manager->WriteContentHeaderFile(xuid, content_data);
       }
     } else if (disposition == kDispositionState::Open) {
       result = content_manager->OpenContent(root_name, xuid, content_data,
                                             content_license);
     }
+    // A request that failed reports no disposition.
+    if (result) {
+      disposition = kDispositionState::Unknown;
+    }
 
-    if (license_mask_ptr && XSUCCEEDED(result)) {
+    if (license_mask_ptr && !result) {
       *license_mask_ptr = content_license;
     }
 
@@ -434,9 +509,8 @@ dword_result_t XamContentCreateEx_entry(
     dword_t flags, lpdword_t disposition_ptr, lpdword_t license_mask_ptr,
     dword_t cache_size, qword_t content_size,
     pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  auto content_data = *content_data_ptr.as<XCONTENT_DATA*>();
-  if (content_data.file_name_raw[0] == '\0') {
-    return X_ERROR_INVALID_NAME;
+  if (!ValidFileName(*content_data_ptr.as<XCONTENT_DATA*>())) {
+    return X_ERROR_INVALID_PARAMETER;
   }
   return xeXamContentCreate(user_index, root_name, content_data_ptr,
                             sizeof(XCONTENT_DATA), flags, disposition_ptr,
@@ -459,9 +533,8 @@ dword_result_t XamContentCreateInternal_entry(
     lpstring_t root_name, lpvoid_t content_data_ptr, dword_t flags,
     lpdword_t disposition_ptr, lpdword_t license_mask_ptr, dword_t cache_size,
     qword_t content_size, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  auto content_data_internal = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
-  if (content_data_internal.file_name_raw[0] == '\0') {
-    return X_ERROR_INVALID_NAME;
+  if (!ValidFileName(*content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>())) {
+    return X_ERROR_INVALID_PARAMETER;
   }
   return xeXamContentCreate(XUserIndexNone, root_name, content_data_ptr,
                             sizeof(XCONTENT_AGGREGATE_DATA), flags,
@@ -494,15 +567,9 @@ DECLARE_XAM_EXPORT1(XamContentFlush, kContent, kStub);
 dword_result_t XamContentClose_entry(lpstring_t root_name,
                                      pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
   // Closes a previously opened root from XamContentCreate*.
-  auto result =
-      kernel_state()->content_manager()->CloseContent(root_name.value());
-
-  if (overlapped_ptr) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
-    return X_ERROR_IO_PENDING;
-  } else {
-    return result;
-  }
+  return CompleteRequest(
+      overlapped_ptr,
+      kernel_state()->content_manager()->CloseContent(root_name.value()));
 }
 DECLARE_XAM_EXPORT1(XamContentClose, kContent, kImplemented);
 
@@ -512,44 +579,32 @@ dword_result_t XamContentGetCreator_entry(
   if (!is_creator_ptr) {
     return X_ERROR_INVALID_PARAMETER;
   }
-
-  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
-
-  if (!user) {
-    return X_ERROR_NO_SUCH_USER;
-  }
+  // xam clears it before anything can fail.
+  *is_creator_ptr = 0;
 
   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
 
-  auto run = [content_data, xuid = user->xuid(), user_index, is_creator_ptr,
-              creator_xuid_ptr, overlapped_ptr](uint32_t& extended_error,
-                                                uint32_t& length) -> X_RESULT {
-    X_RESULT result = X_ERROR_SUCCESS;
-
-    bool content_exists =
-        kernel_state()->content_manager()->ContentExists(xuid, content_data);
-
-    if (content_exists) {
-      if (content_data.content_type == XContentType::kSavedGame) {
+  auto run = [content_data, user_index, is_creator_ptr, creator_xuid_ptr,
+              overlapped_ptr](uint32_t& extended_error,
+                              uint32_t& length) -> X_RESULT {
+    uint64_t xuid = 0;
+    X_RESULT result = ContentXuid(user_index, xuid);
+    if (!result) {
+      uint64_t creator = 0;
+      if (kernel_state()->content_manager()->ContentExists(xuid,
+                                                           content_data)) {
         // User always creates saves.
-        *is_creator_ptr = 1;
+        if (content_data.content_type == XContentType::kSavedGame) {
+          creator = xuid;
+        }
         if (creator_xuid_ptr) {
-          if (kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
-            const auto& user_profile =
-                kernel_state()->xam_state()->GetUserProfile(user_index);
-            *creator_xuid_ptr = user_profile->xuid();
-          } else {
-            result = X_ERROR_NO_SUCH_USER;
-          }
+          *creator_xuid_ptr = creator;
         }
       } else {
-        *is_creator_ptr = 0;
-        if (creator_xuid_ptr) {
-          *creator_xuid_ptr = 0;
-        }
+        result = X_ERROR_PATH_NOT_FOUND;
       }
-    } else {
-      result = X_ERROR_PATH_NOT_FOUND;
+      // xam compares even when the content is missing.
+      *is_creator_ptr = creator == xuid;
     }
 
     extended_error = X_HRESULT_FROM_WIN32(result);
@@ -575,100 +630,64 @@ DECLARE_XAM_EXPORT1(XamContentGetCreator, kContent, kImplemented);
 dword_result_t XamContentGetThumbnail_entry(
     dword_t user_index, lpvoid_t content_data_ptr, lpvoid_t buffer_ptr,
     lpdword_t buffer_size_ptr, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
-
-  if (!user) {
-    return X_ERROR_NO_SUCH_USER;
-  }
-
   assert_not_null(buffer_size_ptr);
-  uint32_t buffer_size = *buffer_size_ptr;
   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
 
-  // Get thumbnail (if it exists).
+  uint64_t xuid = 0;
+  X_RESULT result = ContentXuid(user_index, xuid);
   std::vector<uint8_t> buffer;
-  auto result = kernel_state()->content_manager()->GetContentThumbnail(
-      user->xuid(), content_data, &buffer);
-
-  *buffer_size_ptr = uint32_t(buffer.size());
-
-  if (XSUCCEEDED(result)) {
-    // Write data, if we were given a pointer.
-    // This may have just been a size query.
-    if (buffer_ptr) {
-      if (buffer_size < buffer.size()) {
-        // Dest buffer too small.
-        result = X_ERROR_INSUFFICIENT_BUFFER;
-      } else {
-        // Copy data.
-        std::memcpy((uint8_t*)buffer_ptr, buffer.data(), buffer.size());
-      }
+  if (!result) {
+    result = kernel_state()->content_manager()->GetContentThumbnail(
+        xuid, content_data, &buffer);
+  }
+  if (!result) {
+    const uint32_t buffer_size = *buffer_size_ptr;
+    if (!buffer_ptr) {
+      // Only a query for the size gets it back.
+      *buffer_size_ptr = uint32_t(buffer.size());
+    } else if (buffer_size < buffer.size()) {
+      result = X_ERROR_INSUFFICIENT_BUFFER;
+    } else {
+      std::memcpy((uint8_t*)buffer_ptr, buffer.data(), buffer.size());
     }
   }
-
-  if (overlapped_ptr) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
-    return X_ERROR_IO_PENDING;
-  } else {
-    return result;
-  }
+  return CompleteRequest(overlapped_ptr, result);
 }
 DECLARE_XAM_EXPORT1(XamContentGetThumbnail, kContent, kImplemented);
 
 dword_result_t XamContentSetThumbnail_entry(
     dword_t user_index, lpvoid_t content_data_ptr, lpvoid_t buffer_ptr,
     dword_t buffer_size, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
-
-  if (!user) {
-    return X_ERROR_NO_SUCH_USER;
-  }
-
   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
 
-  // Buffer is PNG data.
-  auto buffer = std::vector<uint8_t>((uint8_t*)buffer_ptr,
-                                     (uint8_t*)buffer_ptr + buffer_size);
-  auto result = kernel_state()->content_manager()->SetContentThumbnail(
-      user->xuid(), content_data, std::move(buffer));
-
-  if (overlapped_ptr) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
-    return X_ERROR_IO_PENDING;
-  } else {
-    return result;
+  uint64_t xuid = 0;
+  X_RESULT result = ContentXuid(user_index, xuid);
+  if (!result) {
+    // Buffer is PNG data.
+    auto buffer = std::vector<uint8_t>((uint8_t*)buffer_ptr,
+                                       (uint8_t*)buffer_ptr + buffer_size);
+    result = kernel_state()->content_manager()->SetContentThumbnail(
+        xuid, content_data, std::move(buffer));
   }
+  return CompleteRequest(overlapped_ptr, result);
 }
 DECLARE_XAM_EXPORT1(XamContentSetThumbnail, kContent, kImplemented);
 
 dword_result_t xeXamContentDelete(dword_t user_index, lpvoid_t content_data_ptr,
                                   dword_t content_data_size,
                                   pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  uint64_t xuid = 0;
   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
   if (content_data_size == sizeof(XCONTENT_AGGREGATE_DATA)) {
     content_data = *content_data_ptr.as<XCONTENT_AGGREGATE_DATA*>();
   }
 
-  if (user_index != XUserIndexNone) {
-    const auto& user = kernel_state()->xam_state()->GetUserProfile(user_index);
-
-    if (!user) {
-      return X_ERROR_NO_SUCH_USER;
-    }
-
-    xuid = user->xuid();
+  uint64_t xuid = 0;
+  X_RESULT result = ContentXuid(user_index, xuid);
+  if (!result) {
+    result =
+        kernel_state()->content_manager()->DeleteContent(xuid, content_data);
   }
-
-  auto result =
-      kernel_state()->content_manager()->DeleteContent(xuid, content_data);
-
-  if (overlapped_ptr) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
-    return X_ERROR_IO_PENDING;
-  } else {
-    return result;
-  }
+  return CompleteRequest(overlapped_ptr, result);
 }
 
 dword_result_t XamContentDelete_entry(
@@ -1026,7 +1045,8 @@ dword_result_t XamContentLaunchImageInternal_entry(lpvoid_t content_data_ptr,
   // This should be done via content_manager, however as it isn't capable of
   // such action we need to improvise.
   const std::string package_path =
-      fmt::format("GAME:/Content/0000000000000000/{:08X}/{:08X}/{}", title_id,
+      fmt::format("{}/Content/0000000000000000/{:08X}/{:08X}/{}",
+                  kernel_state()->title_mount_path_, title_id,
                   static_cast<uint32_t>(content_data.content_type.get()),
                   content_data.file_name());
 

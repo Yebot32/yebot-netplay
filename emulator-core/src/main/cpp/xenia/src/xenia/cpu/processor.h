@@ -113,6 +113,9 @@ class Processor {
   Function* QueryFunction(uint32_t address);
   std::vector<Function*> FindFunctionsWithAddress(uint32_t address);
   void RemoveFunctionByAddress(uint32_t address);
+  // Forgets code compiled from [address, address + length), so the next call
+  // into it compiles what the guest has since written there.
+  void InvalidateCodeRange(uint32_t address, uint32_t length);
 
   Function* LookupFunction(uint32_t address);
   Module* LookupModule(uint32_t address);

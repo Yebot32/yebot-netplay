@@ -36,7 +36,7 @@
 #include "third_party/crypto/TinySHA1.hpp"
 
 DEFINE_bool(apply_title_update, true, "Apply title updates.", "Kernel");
-DEFINE_bool(allow_incompatible_title_update, true,
+DEFINE_bool(allow_incompatible_title_update, false,
             "Allow title updates with mismatched signatures to be applied.",
             "Kernel");
 
@@ -717,11 +717,23 @@ X_RESULT KernelState::ApplyTitleUpdate(
       XELOGW(
           "Skipping incompatible title update for {} due to signature mismatch",
           title_module->name());
+      if (!GetExecutableModule()) {
+        emulator_->display_window()->app_context().CallInUIThread([&]() {
+          new xe::ui::HostNotificationWindow(
+              emulator_->imgui_drawer(), "Warning!",
+              "Title Update signature doesn't match. Skipping its application!",
+              0);
+        });
+      }
       return X_STATUS_SUCCESS;
     }
 
     // First module that is loaded is always main executable. That way we can
     // prevent random message spam in case of loading/unloading.
+    XELOGW(
+        "Applying incompatible title update for {} due to enabled "
+        "allow_incompatible_title_update config option!",
+        title_module->name());
     if (!GetExecutableModule()) {
       emulator_->display_window()->app_context().CallInUIThread([&]() {
         new xe::ui::HostNotificationWindow(
@@ -758,8 +770,8 @@ const object_ref<UserModule> KernelState::LoadTitleUpdate(
   X_RESULT open_status = content_manager()->OpenContent(
       "UPDATE", 0, *title_update, content_license, disc_number);
 
-  std::string mount_path = "";
-  if (!file_system()->FindSymbolicLink(kDefaultGameSymbolicLink, mount_path)) {
+  const std::string& mount_path = title_mount_path_;
+  if (mount_path.empty()) {
     return nullptr;
   }
 
@@ -788,6 +800,8 @@ const object_ref<UserModule> KernelState::LoadTitleUpdate(
   auto patch_module = object_ref<UserModule>(new UserModule(this));
 
   X_RESULT result = patch_module->LoadFromFile(patch_path);
+  // Nothing looks the patch up by handle so the last reference frees it.
+  patch_module->ReleaseHandle();
   if (result != X_STATUS_SUCCESS) {
     XELOGE("Failed to load XEX patch, code: {}", result);
     return nullptr;
@@ -803,7 +817,10 @@ bool KernelState::IsPatchSignatureProper(
   patch_module->GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR,
                              reinterpret_cast<void**>(&patch_header));
 
-  assert_not_null(patch_header);
+  if (!patch_header) {
+    XELOGE("XEX patch has no delta patch descriptor");
+    return false;
+  }
 
   // Compare hash inside delta descriptor to base XEX signature
   uint8_t digest[0x14];
@@ -1012,6 +1029,15 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
                                   0x001510F1L);
     listener->EnqueueNotification(kXNotificationLiveLinkStateChanged, 0);
   }
+
+  if (!has_notified_xmp_startup_ && listener->mask() & kXNotifyXmp) {
+    has_notified_xmp_startup_ = true;
+    // Playback state is idle until the media player broadcasts a transition
+    // of its own, so only the controller is worth priming.
+    listener->EnqueueNotification(
+        kXNotificationXmpPlaybackControllerChanged,
+        emulator()->audio_media_player()->IsTitleInPlaybackControl());
+  }
 }
 
 void KernelState::UnregisterNotifyListener(XNotifyListener* listener) {
@@ -1033,12 +1059,13 @@ void KernelState::BroadcastNotification(XNotificationID id, uint32_t data) {
 }
 
 void KernelState::CompleteOverlapped(uint32_t overlapped_ptr, X_RESULT result) {
-  CompleteOverlappedEx(overlapped_ptr, result, result, 0);
+  CompleteOverlappedEx(overlapped_ptr, result, result, 0,
+                       XThread::GetCurrentThreadHandle());
 }
 
 void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
-                                       uint32_t extended_error,
-                                       uint32_t length) {
+                                       uint32_t extended_error, uint32_t length,
+                                       X_HANDLE thread_handle) {
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, result);
   XOverlappedSetExtendedError(ptr, extended_error);
@@ -1052,7 +1079,6 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
     }
   }
   if (XOverlappedGetCompletionRoutine(ptr)) {
-    X_HANDLE thread_handle = XOverlappedGetContext(ptr);
     auto thread = object_table()->LookupObject<XThread>(thread_handle);
     if (thread) {
       // Queue APC on the thread that requested the overlapped operation.
@@ -1075,9 +1101,8 @@ void KernelState::CompleteOverlappedImmediateEx(uint32_t overlapped_ptr,
                                                 X_RESULT result,
                                                 uint32_t extended_error,
                                                 uint32_t length) {
-  auto ptr = memory()->TranslateVirtual(overlapped_ptr);
-  XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
-  CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
+  CompleteOverlappedEx(overlapped_ptr, result, extended_error, length,
+                       XThread::GetCurrentThreadHandle());
 }
 
 void KernelState::CompleteOverlappedDeferred(
@@ -1123,7 +1148,7 @@ void KernelState::CompleteOverlappedDeferredEx(
     std::function<void()> post_callback) {
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
-  XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
+  const X_HANDLE thread_handle = XThread::GetCurrentThreadHandle();
   X_HANDLE event_handle = XOverlappedGetEvent(ptr);
   if (event_handle) {
     auto ev = object_table()->LookupObject<XObject>(event_handle);
@@ -1135,7 +1160,7 @@ void KernelState::CompleteOverlappedDeferredEx(
   }
   auto global_lock = global_critical_region_.Acquire();
   dispatch_queue_.push_back([this, completion_callback, overlapped_ptr,
-                             pre_callback, post_callback]() {
+                             thread_handle, pre_callback, post_callback]() {
     if (pre_callback) {
       pre_callback();
     }
@@ -1143,7 +1168,8 @@ void KernelState::CompleteOverlappedDeferredEx(
     xe::threading::Sleep(kDeferredOverlappedDelayMillis);
     uint32_t extended_error, length;
     auto result = completion_callback(extended_error, length);
-    CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
+    CompleteOverlappedEx(overlapped_ptr, result, extended_error, length,
+                         thread_handle);
     if (post_callback) {
       post_callback();
     }

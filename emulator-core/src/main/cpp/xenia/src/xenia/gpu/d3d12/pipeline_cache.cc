@@ -29,27 +29,18 @@
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
-#include "xenia/gpu/d3d12/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
-#include "xenia/gpu/pipeline_util.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/spirv_builtin_geometry_shader.h"
 #include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/gpu/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
 #include "third_party/fmt/include/fmt/xchar.h"
 
-DEFINE_bool(d3d12_dxbc_disasm, false,
-            "Disassemble DXBC shaders after generation.", "D3D12");
-DEFINE_bool(
-    d3d12_dxbc_disasm_dxilconv, false,
-    "Disassemble DXBC shaders after conversion to DXIL, if DXIL shaders are "
-    "supported by the OS, and DirectX Shader Compiler DLLs available at "
-    "https://github.com/microsoft/DirectXShaderCompiler/releases are present.",
-    "D3D12");
 DEFINE_int32(
     d3d12_pipeline_creation_threads, -1,
     "Number of threads used for graphics pipeline creation. -1 to calculate "
@@ -106,30 +97,43 @@ namespace shaders_spirv {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/tessellation_indexed_vs.h"
 }  // namespace shaders_spirv
 
+namespace {
+// Converts one of the translator's synthetic depth-only pixel shaders to Mesa
+// (spirv_to_dxil) DXIL, empty on failure.
+std::vector<uint8_t> TranslateDepthOnlyPixelShader(
+    const std::vector<uint8_t>& spirv) {
+  if (spirv.empty()) {
+    return {};
+  }
+  return SpirvToDxilCompiler::Translate(
+      reinterpret_cast<const uint32_t*>(spirv.data()),
+      spirv.size() / sizeof(uint32_t), SpirvToDxilCompiler::Stage::kPixel,
+      /*lower_to_bindless=*/true);
+}
+}  // namespace
+
 PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
                              const RegisterFile& register_file,
                              const D3D12RenderTargetCache& render_target_cache,
-                             bool bindless_resources_used)
+                             bool bindless_resources_used,
+                             bool zpd_hybrid_supported, bool depth_bias_dynamic)
     : command_processor_(command_processor),
       register_file_(register_file),
       render_target_cache_(render_target_cache),
       bindless_resources_used_(bindless_resources_used),
+      zpd_hybrid_supported_(zpd_hybrid_supported),
+      depth_bias_dynamic_(depth_bias_dynamic),
       guest_shader_cache_(*this, register_file, render_target_cache) {}
 
 PipelineCache::~PipelineCache() { Shutdown(); }
 
 bool PipelineCache::Initialize() {
-  const ui::d3d12::D3D12Provider& provider =
-      command_processor_.GetD3D12Provider();
-
-  // DXIL shader compilation is mandatory: guest and system shaders are all
-  // DXIL, so the D3D12 backend can't run without DXC.
-  dxc_shader_compiler_ = std::make_unique<DxcCompiler>(provider);
-  if (!dxc_shader_compiler_->Initialize()) {
+  // Every shader Mesa emits must be signed before D3D12 will accept it, so the
+  // backend can't run without the DXIL.dll validator.
+  if (!SpirvToDxilCompiler::IsSignerAvailable()) {
     XELOGE(
-        "Failed to initialize the DXC shader compiler. Place a recent "
-        "dxcompiler.dll next to the executable.");
-    dxc_shader_compiler_.reset();
+        "Failed to load the DXIL validator. Place a recent dxil.dll in the "
+        "D3D12 folder next to the executable.");
     return false;
   }
   // SPIR-V translator for the spirv_to_dxil guest path, FSI-aware (matches the
@@ -138,25 +142,64 @@ bool PipelineCache::Initialize() {
     return false;
   }
 
+  // D3D drops pixel-shader-less draws that write no depth or stencil, which
+  // breaks occlusion queries, so those get an empty pixel shader instead.
+  mesa_depth_only_pixel_shader_ = TranslateDepthOnlyPixelShader(
+      guest_shader_cache_.translator().CreateDepthOnlyFragmentShader());
+  if (mesa_depth_only_pixel_shader_.empty()) {
+    // Without it such draws fall back to no pixel shader, which D3D may drop.
+    XELOGW(
+        "spirv_to_dxil: failed to generate the Mesa depth-only pixel shader");
+  }
+
+  // Hybrid occlusion queries count pre-test coverage in the pixel shader, so a
+  // depth-only draw inside one needs the counting variant.
+  if (zpd_hybrid_supported_ &&
+      render_target_cache_.GetPath() !=
+          RenderTargetCache::Path::kPixelShaderInterlock) {
+    using DepthStencilMode =
+        SpirvShaderTranslator::Modification::DepthStencilMode;
+    SpirvShaderTranslator& translator = guest_shader_cache_.translator();
+    zpd_total_depth_only_pixel_shader_ =
+        TranslateDepthOnlyPixelShader(translator.CreateDepthOnlyFragmentShader(
+            DepthStencilMode::kNoModifiers, true));
+    if (render_target_cache_.depth_float24_convert_in_pixel_shader()) {
+      zpd_total_float24_truncate_pixel_shader_ = TranslateDepthOnlyPixelShader(
+          translator.CreateDepthOnlyFragmentShader(
+              DepthStencilMode::kFloat24Truncating, true));
+      zpd_total_float24_round_pixel_shader_ = TranslateDepthOnlyPixelShader(
+          translator.CreateDepthOnlyFragmentShader(
+              DepthStencilMode::kFloat24Rounding, true));
+    }
+    if (zpd_total_depth_only_pixel_shader_.empty()) {
+      XELOGE(
+          "spirv_to_dxil: failed to generate a ZPD Total depth-only pixel "
+          "shader; hybrid occlusion queries will not count coverage");
+    }
+  }
+
   // Under ROV, pixel-shader-less depth-only draws need a real shader that runs
   // the in-shader EDRAM depth/stencil + ZPD path (the precompiled
   // placeholder_ps is a no-op). Generate the Mesa (spirv_to_dxil) DXIL for it
   // once here.
   if (render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock) {
-    std::vector<uint8_t> depth_only_spirv =
-        guest_shader_cache_.translator().CreateDepthOnlyFragmentShader();
-    if (!depth_only_spirv.empty()) {
-      mesa_depth_only_rov_pixel_shader_ = SpirvToDxilCompiler::Translate(
-          reinterpret_cast<const uint32_t*>(depth_only_spirv.data()),
-          depth_only_spirv.size() / sizeof(uint32_t),
-          SpirvToDxilCompiler::Stage::kPixel, /*lower_to_bindless=*/true);
-    }
-    if (mesa_depth_only_rov_pixel_shader_.empty()) {
-      XELOGE(
-          "spirv_to_dxil: failed to generate the Mesa ROV depth-only pixel "
-          "shader; the guest shader path cannot render depth-only ROV draws");
-      return false;
+    for (size_t i = 0; i < xe::countof(mesa_depth_only_rov_pixel_shaders_);
+         ++i) {
+      mesa_depth_only_rov_pixel_shaders_[i] = TranslateDepthOnlyPixelShader(
+          guest_shader_cache_.translator().CreateDepthOnlyFragmentShader(
+              xenos::MsaaSamples(i)));
+      if (mesa_depth_only_rov_pixel_shaders_[i].empty()) {
+        XELOGE(
+            "spirv_to_dxil: failed to generate the {}-sample Mesa ROV "
+            "depth-only pixel shader; the guest shader path cannot render "
+            "depth-only ROV draws",
+            UINT32_C(1) << i);
+        return false;
+      }
+      mesa_viz_survey_rov_pixel_shaders_[i] = TranslateDepthOnlyPixelShader(
+          guest_shader_cache_.translator().CreateDepthOnlyFragmentShader(
+              xenos::MsaaSamples(i), true));
     }
   }
 
@@ -165,15 +208,20 @@ bool PipelineCache::Initialize() {
     // Pick some reasonable amount if couldn't determine the number of cores.
     logical_processor_count = 6;
   }
-  // Initialize creation thread synchronization data even if not using creation
-  // threads because they may be used anyway to create pipelines from the
-  // storage.
-  creation_threads_busy_ = 0;
-  creation_completion_event_ =
-      xe::threading::Event::CreateManualResetEvent(true);
-  assert_not_null(creation_completion_event_);
-  creation_completion_set_event_ = false;
-  creation_threads_shutdown_from_ = SIZE_MAX;
+  // Set up even without creation threads - the storage warm-up starts some of
+  // its own.
+  creation_queue_.Initialize(
+      "D3D12 Pipelines",
+      [this](Pipeline* pipeline, SpirvShaderTranslator* translator) {
+        return CreateQueuedPipeline(pipeline, translator);
+      },
+      [this](Pipeline* pipeline, ID3D12PipelineState* state) {
+        StoreCreatedPipeline(pipeline, state);
+      },
+      [this]() { return guest_shader_cache_.CreateWorkerTranslator(); },
+      [this](bool busy) {
+        command_processor_.graphics_system()->on_shader_compilation(busy);
+      });
   if (cvars::d3d12_pipeline_creation_threads != 0) {
     size_t creation_thread_count;
     if (cvars::d3d12_pipeline_creation_threads < 0) {
@@ -184,32 +232,20 @@ bool PipelineCache::Initialize() {
           std::min(uint32_t(cvars::d3d12_pipeline_creation_threads),
                    logical_processor_count);
     }
-    for (size_t i = 0; i < creation_thread_count; ++i) {
-      std::unique_ptr<xe::threading::Thread> creation_thread =
-          xe::threading::Thread::Create({}, [this, i]() { CreationThread(i); });
-      assert_not_null(creation_thread);
-      creation_thread->set_name("D3D12 Pipelines");
-      creation_threads_.push_back(std::move(creation_thread));
-    }
+    creation_queue_.SetThreadCount(creation_thread_count);
   }
   return true;
 }
 
 void PipelineCache::Shutdown() {
   // Shut down all threads, before destroying the pipelines since they may be
-  // creating them.
-  if (!creation_threads_.empty()) {
-    {
-      std::lock_guard<xe_mutex> lock(creation_request_lock_);
-      creation_threads_shutdown_from_ = 0;
+  // creating them. Nothing can be parked for publishing once they are joined,
+  // so release whatever was still held back.
+  for (auto& parked : creation_queue_.Shutdown()) {
+    if (parked.second) {
+      parked.second->Release();
     }
-    creation_request_cond_.notify_all();
-    for (size_t i = 0; i < creation_threads_.size(); ++i) {
-      xe::threading::Wait(creation_threads_[i].get(), false);
-    }
-    creation_threads_.clear();
   }
-  creation_completion_event_.reset();
 
   // Shut down the persistent shader / pipeline storage.
   ShutdownShaderStorage();
@@ -240,9 +276,6 @@ void PipelineCache::Shutdown() {
     delete it.second;
   }
   shaders_.clear();
-
-  // Shut down DXIL shader compilation.
-  dxc_shader_compiler_.reset();
 }
 
 void PipelineCache::InitializeShaderStorage(
@@ -255,12 +288,15 @@ void PipelineCache::InitializeShaderStorage(
 
   ShaderStorageWriter<PipelineStoredDescription>::PipelineStorageConfig
       pipeline_config;
-  pipeline_config.file_suffix =
-      fmt::format(".{}.d3d12.xpso", edram_rov_used ? "rov" : "rtv");
+  // Full ZPD counters change every ROV pixel shader, so they get their own
+  // storage.
+  pipeline_config.file_suffix = fmt::format(
+      ".{}{}.d3d12.xpso", edram_rov_used ? "rov" : "rtv",
+      edram_rov_used && cvars::occlusion_query_full_counters ? "-fc" : "");
   pipeline_config.api_magic = edram_rov_used ? 0x4F525844 : 0x54525844;
-  pipeline_config.version =
-      std::max(PipelineDescription::kVersion,
-               SpirvShaderTranslator::Modification::kVersion);
+  // Sum so a bump of either version invalidates - both only ever move up.
+  pipeline_config.version = PipelineDescription::kVersion +
+                            SpirvShaderTranslator::Modification::kVersion;
 
   uint32_t storage_index = storage_writer_.storage_index() + 1;
 
@@ -284,6 +320,9 @@ void PipelineCache::InitializeShaderStorage(
             AnalyzeShadersForStorage(translations_needed);
           },
           pipeline_stored_descriptions)) {
+    if (completion_callback) {
+      completion_callback();
+    }
     return;
   }
   shader_storage_file_flush_needed_ = false;
@@ -299,21 +338,11 @@ void PipelineCache::InitializeShaderStorage(
     if (!logical_processor_count) {
       logical_processor_count = 6;
     }
-    size_t creation_thread_original_count = creation_threads_.size();
-    size_t creation_thread_needed_count = std::max(
+    size_t creation_thread_original_count = creation_queue_.thread_count();
+    creation_queue_.SetThreadCount(std::max(
         std::min(pipeline_stored_descriptions.size(), logical_processor_count) -
             size_t(1),
-        creation_thread_original_count);
-    while (creation_threads_.size() < creation_thread_needed_count) {
-      size_t creation_thread_index = creation_threads_.size();
-      std::unique_ptr<xe::threading::Thread> creation_thread =
-          xe::threading::Thread::Create({}, [this, creation_thread_index]() {
-            CreationThread(creation_thread_index);
-          });
-      assert_not_null(creation_thread);
-      creation_thread->set_name("D3D12 Pipelines");
-      creation_threads_.push_back(std::move(creation_thread));
-    }
+        creation_thread_original_count));
 
     size_t pipelines_created = 0;
     size_t pipelines_already_exist = 0;
@@ -324,13 +353,25 @@ void PipelineCache::InitializeShaderStorage(
     size_t pipelines_root_sig_failed = 0;
     for (const PipelineStoredDescription& pipeline_stored_description :
          pipeline_stored_descriptions) {
-      const PipelineDescription& pipeline_description =
+      PipelineDescription pipeline_description =
           pipeline_stored_description.description;
+      uint64_t pipeline_description_hash =
+          pipeline_stored_description.description_hash;
+      // Stored by a device without dynamic depth bias.
+      if (depth_bias_dynamic_ &&
+          (pipeline_description.depth_bias ||
+           pipeline_description.depth_bias_slope_scaled ||
+           pipeline_description.resolution_scale_native)) {
+        pipeline_description.depth_bias = 0;
+        pipeline_description.depth_bias_slope_scaled = 0.0f;
+        pipeline_description.resolution_scale_native = 0;
+        pipeline_description_hash =
+            XXH3_64bits(&pipeline_description, sizeof(pipeline_description));
+      }
       // TODO(Triang3l): On Vulkan, skip pipelines requiring unsupported device
       // features (to keep the cache files mostly shareable across devices).
       // Skip already known pipelines - those have already been enqueued.
-      auto found_range =
-          pipelines_.equal_range(pipeline_stored_description.description_hash);
+      auto found_range = pipelines_.equal_range(pipeline_description_hash);
       bool pipeline_found = false;
       for (auto it = found_range.first; it != found_range.second; ++it) {
         Pipeline* found_pipeline = it->second;
@@ -345,155 +386,102 @@ void PipelineCache::InitializeShaderStorage(
         continue;
       }
 
-      // Mesa (spirv_to_dxil) pipelines: re-translate the guest shaders to DXIL
-      // at the current resolution from the stored SPIR-V modifications, then
-      // create the PSO.
-      if (pipeline_description.use_mesa_dxil) {
-        auto vertex_shader_it =
-            shaders_.find(pipeline_description.vertex_shader_hash);
-        if (vertex_shader_it == shaders_.end()) {
-          ++pipelines_vs_not_found;
-          continue;
-        }
-        SpirvShader* mesa_vertex_shader = vertex_shader_it->second;
-        SpirvShader* mesa_pixel_shader = nullptr;
-        if (pipeline_description.pixel_shader_hash) {
-          auto pixel_shader_it =
-              shaders_.find(pipeline_description.pixel_shader_hash);
-          if (pixel_shader_it == shaders_.end()) {
-            ++pipelines_ps_not_found;
-            continue;
-          }
-          mesa_pixel_shader = pixel_shader_it->second;
-        }
-        // Value-initialize so the runtime pointer fields (mesa_*_dxil,
-        // mesa_*_translation) start null. CreateD3D12Pipeline reads them and
-        // uninitialized garbage crashes intermittently. The description bits
-        // are overwritten by the memcpy below.
-        PipelineRuntimeDescription mesa_runtime_description = {};
-        std::memcpy(&mesa_runtime_description.description,
-                    &pipeline_description, sizeof(pipeline_description));
-        // Main-thread work is only the cheap part: the VS/PS translation
-        // objects for shader metadata (CreateD3D12Pipeline reads ucode hash +
-        // modification even on the Mesa path). The expensive
-        // ucode->SPIR-V->DXIL build + signing is deferred to a creation thread
-        // (BuildMesaPipelineDxil in EnsurePipelineShadersTranslated), so
-        // startup is not serialized here.
-        mesa_runtime_description.vertex_shader =
-            mesa_vertex_shader->GetOrCreateTranslation(
-                pipeline_description.vertex_shader_modification);
-        mesa_runtime_description.mesa_vertex_translation =
-            EnsureGuestMesaSpirvTranslation(
-                *mesa_vertex_shader,
-                pipeline_description.vertex_shader_modification);
-        if (mesa_pixel_shader) {
-          mesa_runtime_description.pixel_shader =
-              mesa_pixel_shader->GetOrCreateTranslation(
-                  pipeline_description.pixel_shader_modification);
-          mesa_runtime_description.mesa_pixel_translation =
-              EnsureGuestMesaSpirvTranslation(
-                  *mesa_pixel_shader,
-                  pipeline_description.pixel_shader_modification);
-        }
-        mesa_runtime_description.root_signature =
-            command_processor_.GetMesaRootSignature();
-        if (!mesa_runtime_description.vertex_shader ||
-            !mesa_runtime_description.mesa_vertex_translation) {
-          ++pipelines_vs_translation_missing;
-          continue;
-        }
-        Pipeline* new_pipeline = new Pipeline;
-        std::memcpy(&new_pipeline->description, &mesa_runtime_description,
-                    sizeof(mesa_runtime_description));
-        if (mesa_pixel_shader) {
-          uint32_t bound_rts =
-              (pipeline_description.render_targets[0].used ? 1 : 0) |
-              (pipeline_description.render_targets[1].used ? 2 : 0) |
-              (pipeline_description.render_targets[2].used ? 4 : 0) |
-              (pipeline_description.render_targets[3].used ? 8 : 0);
-          new_pipeline->priority = pipeline_util::CalculatePipelinePriority(
-              bound_rts, mesa_pixel_shader->writes_color_targets(),
-              mesa_pixel_shader->writes_depth());
-        }
-        pipelines_.emplace(pipeline_stored_description.description_hash,
-                           new_pipeline);
-        COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
-        if (!creation_threads_.empty()) {
-          // Creation thread builds the Mesa DXIL off the main thread (the
-          // deferred block in EnsurePipelineShadersTranslated), then the PSO.
-          {
-            std::lock_guard<xe_mutex> lock(creation_request_lock_);
-            creation_queue_.push(new_pipeline);
-          }
-          creation_request_cond_.notify_one();
-        } else {
-          // No creation threads: build the DXIL + create the PSO here.
-          if (BuildMesaPipelineDxil(
-                  new_pipeline->description.mesa_vertex_translation,
-                  new_pipeline->description.mesa_pixel_translation,
-                  guest_shader_cache_.translator(), /*use_try_claim=*/false,
-                  new_pipeline->description)) {
-            new_pipeline->state.store(
-                CreateD3D12Pipeline(new_pipeline->description),
-                std::memory_order_release);
-          }
-        }
-        ++pipelines_created;
+      // Re-translate the guest shaders to DXIL at the current resolution from
+      // the stored SPIR-V modifications, then create the PSO.
+      auto vertex_shader_it =
+          shaders_.find(pipeline_description.vertex_shader_hash);
+      if (vertex_shader_it == shaders_.end()) {
+        ++pipelines_vs_not_found;
         continue;
       }
+      SpirvShader* mesa_vertex_shader = vertex_shader_it->second;
+      SpirvShader* mesa_pixel_shader = nullptr;
+      if (pipeline_description.pixel_shader_hash) {
+        auto pixel_shader_it =
+            shaders_.find(pipeline_description.pixel_shader_hash);
+        if (pixel_shader_it == shaders_.end()) {
+          ++pipelines_ps_not_found;
+          continue;
+        }
+        mesa_pixel_shader = pixel_shader_it->second;
+      }
+      // Value-initialize so the runtime pointer fields (mesa_*_dxil,
+      // mesa_*_translation) start null. CreateD3D12Pipeline reads them and
+      // uninitialized garbage crashes intermittently. The description bits
+      // are overwritten by the memcpy below.
+      PipelineRuntimeDescription mesa_runtime_description = {};
+      std::memcpy(&mesa_runtime_description.description, &pipeline_description,
+                  sizeof(pipeline_description));
+      // Main-thread work is only the cheap part: the VS/PS translation
+      // objects for shader metadata (CreateD3D12Pipeline reads ucode hash +
+      // modification even on the Mesa path). The expensive
+      // ucode->SPIR-V->DXIL build + signing is deferred to a creation thread
+      // (BuildMesaPipelineDxil in EnsurePipelineShadersTranslated), so
+      // startup is not serialized here.
+      mesa_runtime_description.vertex_shader =
+          mesa_vertex_shader->GetOrCreateTranslation(
+              pipeline_description.vertex_shader_modification);
+      mesa_runtime_description.mesa_vertex_translation =
+          EnsureGuestMesaSpirvTranslation(
+              *mesa_vertex_shader,
+              pipeline_description.vertex_shader_modification);
+      if (mesa_pixel_shader) {
+        mesa_runtime_description.pixel_shader =
+            mesa_pixel_shader->GetOrCreateTranslation(
+                pipeline_description.pixel_shader_modification);
+        mesa_runtime_description.mesa_pixel_translation =
+            EnsureGuestMesaSpirvTranslation(
+                *mesa_pixel_shader,
+                pipeline_description.pixel_shader_modification);
+      }
+      mesa_runtime_description.root_signature =
+          command_processor_.GetMesaRootSignature();
+      if (!mesa_runtime_description.vertex_shader ||
+          !mesa_runtime_description.mesa_vertex_translation) {
+        ++pipelines_vs_translation_missing;
+        continue;
+      }
+      Pipeline* new_pipeline = new Pipeline;
+      new_pipeline->from_storage = true;
+      std::memcpy(&new_pipeline->description, &mesa_runtime_description,
+                  sizeof(mesa_runtime_description));
+      pipelines_.emplace(pipeline_description_hash, new_pipeline);
+      COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
+      if (creation_queue_.has_threads()) {
+        // Creation thread builds the Mesa DXIL off the main thread (the
+        // deferred block in EnsurePipelineShadersTranslated), then the PSO.
+        // Nothing is drawing these yet, so they publish as they are built.
+        new_pipeline->creation_pending.store(true, std::memory_order_relaxed);
+        creation_queue_.PushUnordered(new_pipeline);
+      } else {
+        // No creation threads: build the DXIL + create the PSO here.
+        if (BuildMesaPipelineDxil(
+                new_pipeline->description.mesa_vertex_translation,
+                new_pipeline->description.mesa_pixel_translation,
+                guest_shader_cache_.translator(), new_pipeline->description)) {
+          new_pipeline->state.store(
+              CreateD3D12Pipeline(new_pipeline->description),
+              std::memory_order_release);
+        }
+      }
+      ++pipelines_created;
     }
 
-    if (!creation_threads_.empty()) {
+    if (creation_queue_.has_threads()) {
       if (blocking) {
-        // Blocking mode: help drain the queue on this thread, then wait for
-        // background threads to finish.
-        CreateQueuedPipelinesOnProcessorThread();
-        if (creation_threads_.size() > creation_thread_original_count) {
-          {
-            std::lock_guard<xe_mutex> lock(creation_request_lock_);
-            creation_threads_shutdown_from_ = creation_thread_original_count;
-            // Assuming the queue is empty because of
-            // CreateQueuedPipelinesOnProcessorThread.
-          }
-          creation_request_cond_.notify_all();
-          while (creation_threads_.size() > creation_thread_original_count) {
-            xe::threading::Wait(creation_threads_.back().get(), false);
-            creation_threads_.pop_back();
-          }
-          {
-            // Cleanup so additional threads can be created later again.
-            std::lock_guard<xe_mutex> lock(creation_request_lock_);
-            creation_threads_shutdown_from_ = SIZE_MAX;
-          }
-        }
-        // Wait for any background threads (including original ones) to finish
-        // creating pipelines they may have popped from the queue. This ensures
-        // all cached pipelines are fully created before the game starts,
-        // populating the driver's shader cache.
-        bool await_creation_completion_event;
-        {
-          std::lock_guard<xe_mutex> lock(creation_request_lock_);
-          await_creation_completion_event = creation_threads_busy_ != 0;
-          if (await_creation_completion_event) {
-            creation_completion_event_->Reset();
-            creation_completion_set_event_ = true;
-          }
-        }
-        if (await_creation_completion_event) {
-          creation_request_cond_.notify_one();
-          xe::threading::Wait(creation_completion_event_.get(), false);
-        }
+        // Blocking mode: help drain the queue on this thread, using the main
+        // translator, then let the extra threads go and wait for the ones that
+        // are still finishing a pipeline they popped. This ensures all cached
+        // pipelines are fully created before the game starts, populating the
+        // driver's shader cache.
+        creation_queue_.DrainOnCallingThread(&guest_shader_cache_.translator());
+        creation_queue_.SetThreadCount(creation_thread_original_count);
+        creation_queue_.AwaitCompletion();
       } else {
-        // Non-blocking mode: let background threads handle all pipeline
-        // creation. Store completion callback to be invoked when done.
-        std::lock_guard<xe_mutex> lock(creation_request_lock_);
-        if (creation_queue_.empty() && creation_threads_busy_ == 0) {
-          // No work pending - callback will be invoked at end of function.
-        } else {
-          creation_completion_callback_ = std::move(completion_callback);
-          completion_callback =
-              nullptr;  // Prevent invocation at end of function
-        }
+        // Non-blocking mode: the background threads have it, and invoke the
+        // callback when they are done - or leave it to the tail of this
+        // function if they are already done.
+        creation_queue_.TakeCompletionCallback(completion_callback);
       }
     }
 
@@ -520,7 +508,7 @@ void PipelineCache::InitializeShaderStorage(
 
   // Invoke completion callback if provided (for blocking mode or when no
   // background work was needed). For non-blocking mode with background work,
-  // the callback is stored and invoked by CreationThread when done.
+  // the creation queue took it and invokes it when done.
   if (completion_callback) {
     completion_callback();
   }
@@ -544,13 +532,11 @@ void PipelineCache::EndSubmission() {
   }
   // Release placeholder pipelines the GPU is now done with.
   ProcessDeferredDestructions();
-  if (!creation_threads_.empty()) {
-    // Don't wait for pipeline creation - let background threads work
-    // asynchronously. Bindless draws use a placeholder pipeline meanwhile.
-    // Bindful draws are skipped until the pipeline is ready. This avoids
-    // frame-time spikes from blocking on pipeline creation.
-    creation_request_cond_.notify_one();
-  }
+  // Don't wait for pipeline creation - let background threads work
+  // asynchronously. Bindless draws use a placeholder pipeline meanwhile.
+  // Bindful draws are skipped until the pipeline is ready. This avoids
+  // frame-time spikes from blocking on pipeline creation.
+  creation_queue_.Notify();
 }
 
 void PipelineCache::ProcessDeferredDestructions() {
@@ -573,34 +559,10 @@ void PipelineCache::ProcessDeferredDestructions() {
   }
 }
 
-bool PipelineCache::IsCreatingPipelines() {
-  if (creation_threads_.empty()) {
-    return false;
-  }
-  std::lock_guard<xe_mutex> lock(creation_request_lock_);
-  return !creation_queue_.empty() || creation_threads_busy_ != 0;
-}
+bool PipelineCache::IsCreatingPipelines() { return creation_queue_.IsBusy(); }
 
 void PipelineCache::AwaitPipelineCompletion() {
-  if (creation_threads_.empty()) {
-    return;
-  }
-
-  bool await_creation_completion_event;
-  {
-    std::lock_guard<xe_mutex> lock(creation_request_lock_);
-    await_creation_completion_event =
-        !creation_queue_.empty() || creation_threads_busy_ != 0;
-    if (await_creation_completion_event) {
-      creation_completion_event_->Reset();
-      creation_completion_set_event_ = true;
-    }
-  }
-
-  if (await_creation_completion_event) {
-    creation_request_cond_.notify_one();
-    xe::threading::Wait(creation_completion_event_.get(), false);
-  }
+  creation_queue_.AwaitCompletion();
 }
 
 ID3D12PipelineState* PipelineCache::AwaitD3D12PipelineByHandle(void* handle) {
@@ -698,6 +660,7 @@ std::unique_ptr<SpirvShaderTranslator> PipelineCache::CreateTranslator() const {
   return std::make_unique<SpirvShaderTranslator>(
       spirv_features, render_target_cache_.msaa_2x_supported(),
       /*native_2x_msaa_no_attachments=*/false, edram_fragment_shader_interlock,
+      precise_interpolation_supported(),
       render_target_cache_.draw_resolution_scale_x(),
       render_target_cache_.draw_resolution_scale_y());
 }
@@ -712,20 +675,15 @@ Shader::Translation* PipelineCache::EnsureGuestMesaSpirvTranslation(
 }
 
 Shader::Translation* PipelineCache::TranslateGuestMesaSpirv(
-    SpirvShaderTranslator& translator, Shader::Translation& translation,
-    bool use_try_claim) {
+    SpirvShaderTranslator& translator, Shader::Translation& translation) {
   if (!translation.is_translated()) {
-    bool should_translate = true;
-    if (use_try_claim) {
-      should_translate = translation.TryClaimTranslation();
-      if (!should_translate) {
-        // Another thread is translating this same modification - wait for it.
-        while (!translation.is_translated()) {
-          std::this_thread::yield();
-        }
+    if (!translation.TryClaimTranslation()) {
+      // Another thread is translating this same modification. Wait for it.
+      while (!translation.is_translated()) {
+        std::this_thread::yield();
       }
-    }
-    if (should_translate) {
+    } else {
+      CreationQueue::BusyScope busy_scope(creation_queue_);
       uint64_t ucode_hash = translation.shader().ucode_data_hash();
       bool profile = cvars::shader_profiling;
       std::chrono::steady_clock::time_point spirv_gen_start;
@@ -762,8 +720,8 @@ Shader::Translation* PipelineCache::EnsureGuestMesaSpirv(
     SpirvShader& shader, uint64_t spirv_modification) {
   Shader::Translation* translation =
       EnsureGuestMesaSpirvTranslation(shader, spirv_modification);
-  return TranslateGuestMesaSpirv(guest_shader_cache_.translator(), *translation,
-                                 /*use_try_claim=*/false);
+  return TranslateGuestMesaSpirv(guest_shader_cache_.translator(),
+                                 *translation);
 }
 
 const std::vector<uint8_t>* PipelineCache::ConvertGuestMesaSpirvToDxil(
@@ -779,6 +737,7 @@ const std::vector<uint8_t>* PipelineCache::ConvertGuestMesaSpirvToDxil(
     }
   }
 
+  CreationQueue::BusyScope busy_scope(creation_queue_);
   // The conversion (and signing) is the expensive step. Run it outside the
   // cache lock. SpirvToDxilCompiler serializes internally. Two threads racing
   // the same shader may both convert it. try_emplace below keeps the first.
@@ -878,6 +837,7 @@ const std::vector<uint8_t>* PipelineCache::GetGuestMesaGeometryDxil(
     }
   }
 
+  CreationQueue::BusyScope busy_scope(creation_queue_);
   // Build the SPIR-V with the same version and float controls as the guest
   // vertex/pixel shaders so the stages link. The shared generator reads the
   // SpirvShaderTranslator vertex output signature and SystemConstants layout.
@@ -1045,6 +1005,7 @@ PipelineCache::ConvertGuestMesaTessellationToDxil(
     }
   }
 
+  CreationQueue::BusyScope busy_scope(creation_queue_);
   const uint32_t* vs_spirv;
   size_t vs_words;
   const uint32_t* hs_spirv;
@@ -1102,7 +1063,7 @@ PipelineCache::ConvertGuestMesaTessellationToDxil(
 bool PipelineCache::BuildMesaPipelineDxil(
     Shader::Translation* vertex_translation,
     Shader::Translation* pixel_translation, SpirvShaderTranslator& translator,
-    bool use_try_claim, PipelineRuntimeDescription& runtime_description) {
+    PipelineRuntimeDescription& runtime_description) {
   const PipelineDescription& description = runtime_description.description;
   SpirvShaderTranslator::Modification vs_modification(
       description.vertex_shader_modification);
@@ -1113,7 +1074,7 @@ bool PipelineCache::BuildMesaPipelineDxil(
   // ucode->SPIR-V translation and the SPIR-V->DXIL conversion run here on the
   // given translator's thread (a creation thread for the storage warm-up).
   Shader::Translation* vertex_spirv =
-      TranslateGuestMesaSpirv(translator, *vertex_translation, use_try_claim);
+      TranslateGuestMesaSpirv(translator, *vertex_translation);
   if (!vertex_spirv) {
     return false;
   }
@@ -1147,7 +1108,7 @@ bool PipelineCache::BuildMesaPipelineDxil(
 
   if (pixel_translation != nullptr) {
     Shader::Translation* pixel_spirv =
-        TranslateGuestMesaSpirv(translator, *pixel_translation, use_try_claim);
+        TranslateGuestMesaSpirv(translator, *pixel_translation);
     if (pixel_spirv) {
       runtime_description.mesa_pixel_dxil = ConvertGuestMesaSpirvToDxil(
           pixel_translation->shader().ucode_data_hash(),
@@ -1178,6 +1139,7 @@ bool PipelineCache::ConfigurePipeline(
     const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, bool apply_polygon_offset_in_shader,
+    bool zpd_total, bool viz_survey,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
     bool use_interpreter, void** pipeline_handle_out,
@@ -1202,7 +1164,7 @@ bool PipelineCache::ConfigurePipeline(
   // Only use async when there's a pixel shader - VS-only pipelines are fast
   // to compile and don't benefit from async (vertex shaders are small).
   bool use_async = cvars::async_shader_compilation &&
-                   !creation_threads_.empty() && pixel_shader != nullptr;
+                   creation_queue_.has_threads() && pixel_shader != nullptr;
   // An immediate hot-swap placeholder pipeline needs the real vertex shader and
   // a root signature that does not depend on the (not-yet-translated) pixel
   // shader. Only bindless mode has such a fixed root signature, so the
@@ -1255,7 +1217,7 @@ bool PipelineCache::ConfigurePipeline(
   if (!GetCurrentStateDescription(
           vertex_shader, pixel_shader, primitive_processing_result,
           normalized_depth_control, normalized_color_mask,
-          apply_polygon_offset_in_shader,
+          apply_polygon_offset_in_shader, zpd_total, viz_survey,
           bound_depth_and_color_render_target_bits,
           bound_depth_and_color_render_target_formats, runtime_description)) {
     return false;
@@ -1306,7 +1268,6 @@ bool PipelineCache::ConfigurePipeline(
   }
   runtime_description.root_signature =
       command_processor_.GetMesaRootSignature();
-  description.use_mesa_dxil = 1;
 
   if (defer_both) {
     // Defer BOTH shaders to the creation thread. Create the (untranslated)
@@ -1386,8 +1347,7 @@ bool PipelineCache::ConfigurePipeline(
     } else {
       // Sync mode (no creation threads): translate the pixel SPIR-V here.
       Shader::Translation* pixel_spirv = TranslateGuestMesaSpirv(
-          guest_shader_cache_.translator(), *pixel_ps_translation,
-          /*use_try_claim=*/false);
+          guest_shader_cache_.translator(), *pixel_ps_translation);
       if (pixel_spirv) {
         runtime_description.mesa_pixel_dxil = ConvertGuestMesaSpirvToDxil(
             pixel_shader->shader().ucode_data_hash(), pixel_spirv_modification,
@@ -1422,7 +1382,8 @@ bool PipelineCache::ConfigurePipeline(
   }
 
   if (current_pipeline_ != nullptr &&
-      current_pipeline_->description.description == description) {
+      current_pipeline_->description.description == description &&
+      !current_pipeline_->wants_rebuild()) {
     *pipeline_handle_out = current_pipeline_;
     *root_signature_out = current_pipeline_->description.root_signature;
     return true;
@@ -1430,10 +1391,17 @@ bool PipelineCache::ConfigurePipeline(
 
   // Find an existing pipeline in the cache.
   uint64_t hash = XXH3_64bits(&description, sizeof(description));
+  // A warm-up entry whose creation failed is rebuilt below instead of returned.
+  // Only this thread touches the map, so creation threads can flag but not act.
+  Pipeline* rebuild_pipeline = nullptr;
   auto found_range = pipelines_.equal_range(hash);
   for (auto it = found_range.first; it != found_range.second; ++it) {
     Pipeline* found_pipeline = it->second;
     if (found_pipeline->description.description == description) {
+      if (found_pipeline->wants_rebuild()) {
+        rebuild_pipeline = found_pipeline;
+        break;
+      }
       current_pipeline_ = found_pipeline;
       *pipeline_handle_out = found_pipeline;
       *root_signature_out = found_pipeline->description.root_signature;
@@ -1441,11 +1409,22 @@ bool PipelineCache::ConfigurePipeline(
     }
   }
 
-  Pipeline* new_pipeline = new Pipeline;
+  Pipeline* new_pipeline = rebuild_pipeline;
+  if (new_pipeline) {
+    // Already keyed under this hash. The description built above replaces the
+    // one whose DXIL never arrived, so the rebuild uses live state.
+    XELOGW("Rebuilding pipeline that failed to create (VS {:016X}, PS {:016X})",
+           vertex_shader->shader().ucode_data_hash(),
+           pixel_shader ? pixel_shader->shader().ucode_data_hash() : 0);
+    // A live build from here on, so a second failure is final.
+    new_pipeline->from_storage = false;
+  } else {
+    new_pipeline = new Pipeline;
+    pipelines_.emplace(hash, new_pipeline);
+    COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
+  }
   std::memcpy(&new_pipeline->description, &runtime_description,
               sizeof(runtime_description));
-  pipelines_.emplace(hash, new_pipeline);
-  COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
 
   if (use_async) {
     // Queue for background thread. A real-VS placeholder has its VS translated
@@ -1454,35 +1433,30 @@ bool PipelineCache::ConfigurePipeline(
     new_pipeline->pending_vertex_shader =
         (use_placeholder && !defer_both) ? nullptr : vertex_shader;
     new_pipeline->pending_pixel_shader = pixel_shader;
-    // Calculate priority based on whether shader writes to visible RTs.
-    if (pixel_shader) {
-      uint32_t bound_rts = pipeline_util::GetBoundRTMaskFromNormalizedColorMask(
-          normalized_color_mask);
-      new_pipeline->priority = pipeline_util::CalculatePipelinePriority(
-          bound_rts, pixel_shader->shader().writes_color_targets(),
-          pixel_shader->shader().writes_depth());
-    }
     // The skip case (defer_without_placeholder) intentionally creates no
     // placeholder - state stays null and the draw is dropped until ready.
     if (use_placeholder && !defer_without_placeholder) {
       // Create a placeholder pipeline now so the draw can proceed immediately -
-      // real VS + no-op PS, or (interpreter) the ucode interpreter VS + no-op/
-      // debug PS with both real shaders deferred. The creation thread swaps in
-      // the real pipeline when translation finishes.
+      // real VS + stand-in PS, or (interpreter) the ucode interpreter VS +
+      // stand-in PS with both real shaders deferred. The creation thread swaps
+      // in the real pipeline when translation finishes.
       ID3D12PipelineState* placeholder_state = CreateD3D12Pipeline(
           runtime_description, make_interpreter
                                    ? PipelinePlaceholderMode::kInterpreter
                                    : PipelinePlaceholderMode::kRealVertex);
+      // Published before state so a draw that loads the placeholder out of
+      // state always sees it here too, and pins this concrete PSO rather than
+      // the swappable handle - the real pipeline must never run against
+      // bindings built for the placeholder.
+      new_pipeline->placeholder_state.store(placeholder_state,
+                                            std::memory_order_release);
+      new_pipeline->uses_interpreter.store(
+          make_interpreter && placeholder_state != nullptr,
+          std::memory_order_release);
       new_pipeline->state.store(placeholder_state, std::memory_order_release);
       new_pipeline->is_placeholder.store(placeholder_state != nullptr,
                                          std::memory_order_release);
       if (make_interpreter && placeholder_state != nullptr) {
-        // The draw pins this concrete PSO and feeds interpreter constants; the
-        // real VS reads a different (packed) float layout, so it must not run
-        // against interpreter constants after a hot swap.
-        new_pipeline->placeholder_state.store(placeholder_state,
-                                              std::memory_order_release);
-        new_pipeline->uses_interpreter.store(true, std::memory_order_release);
         XELOGI(
             "VS interpreter placeholder created (interpreter VS + no-op PS): "
             "VS {:016X}, PS {:016X}",
@@ -1490,11 +1464,8 @@ bool PipelineCache::ConfigurePipeline(
             pixel_shader ? pixel_shader->shader().ucode_data_hash() : 0);
       }
     }
-    {
-      std::lock_guard<xe_mutex> lock(creation_request_lock_);
-      creation_queue_.push(new_pipeline);
-    }
-    creation_request_cond_.notify_one();
+    new_pipeline->creation_pending.store(true, std::memory_order_relaxed);
+    creation_queue_.Push(new_pipeline);
   } else {
     // Sync mode or no creation threads: create synchronously.
     new_pipeline->state.store(CreateD3D12Pipeline(runtime_description),
@@ -1503,7 +1474,8 @@ bool PipelineCache::ConfigurePipeline(
 
   // Mesa pipelines persist too: their SPIR-V modifications are stored so the
   // reload can rebuild the DXIL (translated at the then-current resolution).
-  if (storage_writer_.is_active()) {
+  // A rebuilt entry came from storage, so writing it again would duplicate it.
+  if (storage_writer_.is_active() && !rebuild_pipeline) {
     pipeline_storage_file_flush_needed_ = true;
     PipelineStoredDescription stored_description;
     stored_description.description_hash = hash;
@@ -1584,11 +1556,49 @@ void PipelineCache::AnalyzeShadersForStorage(
              xe::Clock::QueryHostTickFrequency());
 }
 
+void PipelineCache::GetHostDepthBias(bool primitive_polygonal,
+                                     float& depth_bias_out,
+                                     float& depth_bias_slope_scaled_out) const {
+  int32_t depth_bias;
+  float depth_bias_slope_scaled;
+  GetGuestDepthBias(primitive_polygonal, depth_bias, depth_bias_slope_scaled);
+  depth_bias_out = float(depth_bias);
+  depth_bias_slope_scaled_out =
+      depth_bias_slope_scaled *
+      GetDepthBiasSlopeScale(render_target_cache_.IsDrawScaleNative());
+}
+
+void PipelineCache::GetGuestDepthBias(
+    bool primitive_polygonal, int32_t& depth_bias_out,
+    float& depth_bias_slope_scaled_out) const {
+  const auto& regs = register_file_;
+  float polygon_offset, polygon_offset_scale;
+  draw_util::GetPreferredFacePolygonOffset(
+      regs, primitive_polygonal, polygon_offset_scale, polygon_offset);
+  depth_bias_out = draw_util::GetD3D10IntegerPolygonOffset(
+      regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset);
+  depth_bias_slope_scaled_out =
+      polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit;
+}
+
+float PipelineCache::GetDepthBiasSlopeScale(
+    bool resolution_scale_native) const {
+  // With non-square resolution scaling, make sure the worst-case impact is
+  // reverted (slope only along the scaled axis), thus max. More bias is better
+  // than less bias, because less bias means Z fighting with the background is
+  // more likely. Native draws get the guest bias as is.
+  return resolution_scale_native
+             ? 1.0f
+             : float(std::max(render_target_cache_.draw_resolution_scale_x(),
+                              render_target_cache_.draw_resolution_scale_y()));
+}
+
 bool PipelineCache::GetCurrentStateDescription(
     Shader::Translation* vertex_shader, Shader::Translation* pixel_shader,
     const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, bool depth_bias_in_pixel_shader,
+    bool zpd_total, bool viz_survey,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
     PipelineRuntimeDescription& runtime_description_out) {
@@ -1682,6 +1692,16 @@ bool PipelineCache::GetCurrentStateDescription(
       case xenos::PrimitiveType::kQuadList:
         description_out.geometry_shader = PipelineGeometryShader::kQuadList;
         break;
+      case xenos::PrimitiveType::kLineList:
+      case xenos::PrimitiveType::kLineStrip:
+        // Host lines are 1 host pixel wide, expand them to 1 guest pixel when
+        // the draw is resolution-scaled.
+        description_out.geometry_shader =
+            (render_target_cache_.GetDrawScaleX() > 1 ||
+             render_target_cache_.GetDrawScaleY() > 1)
+                ? PipelineGeometryShader::kLineList
+                : PipelineGeometryShader::kNone;
+        break;
       default:
         description_out.geometry_shader = PipelineGeometryShader::kNone;
         break;
@@ -1758,23 +1778,31 @@ bool PipelineCache::GetCurrentStateDescription(
     cull_front = false;
     cull_back = false;
   }
-  if (!edram_rov_used && !depth_bias_in_pixel_shader) {
-    float polygon_offset, polygon_offset_scale;
-    draw_util::GetPreferredFacePolygonOffset(
-        regs, primitive_polygonal, polygon_offset_scale, polygon_offset);
-    description_out.depth_bias = draw_util::GetD3D10IntegerPolygonOffset(
-        regs.Get<reg::RB_DEPTH_INFO>().depth_format, polygon_offset);
-    description_out.depth_bias_slope_scaled =
-        polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit;
+  if (!edram_rov_used && !depth_bias_in_pixel_shader && !depth_bias_dynamic_) {
+    int32_t depth_bias;
+    float depth_bias_slope_scaled;
+    GetGuestDepthBias(primitive_polygonal, depth_bias, depth_bias_slope_scaled);
+    description_out.depth_bias = depth_bias;
+    description_out.depth_bias_slope_scaled = depth_bias_slope_scaled;
     // The slope-scaled depth bias multiplier depends on this at pipeline
     // creation.
     description_out.resolution_scale_native =
         uint32_t(render_target_cache_.IsDrawScaleNative());
   }
+  description_out.counting_depth_only =
+      uint32_t(edram_rov_used ? viz_survey : zpd_total);
   if (tessellated && cvars::d3d12_tessellation_wireframe) {
     description_out.fill_mode_wireframe = 1;
   }
-  description_out.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
+
+  // With force_depth_clamp, use the host viewport clamp instead of near and far
+  // Z plane clipping. X/Y/W clipping is unchanged. Both 494707EE and 41560881
+  // have passes that rely on alpha inputs that currently gets dropped by
+  // near-plane clipping.
+  // TODO(boma): Investigate whether the difference is in shader arithmetic or
+  // the clipper itself.
+  description_out.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable &&
+                               !cvars::force_depth_clamp;
   bool depth_stencil_bound_and_used = false;
   if (!edram_rov_used) {
     // Depth/stencil. No stencil, always passing depth test and no depth writing
@@ -1861,9 +1889,9 @@ bool PipelineCache::GetCurrentStateDescription(
         // ONE_MINUS_CONSTANT_COLOR
         /* 13 */ PipelineBlendFactor::kInvBlendFactor,
         // CONSTANT_ALPHA
-        /* 14 */ PipelineBlendFactor::kBlendFactor,
+        /* 14 */ PipelineBlendFactor::kAlphaFactor,
         // ONE_MINUS_CONSTANT_ALPHA
-        /* 15 */ PipelineBlendFactor::kInvBlendFactor,
+        /* 15 */ PipelineBlendFactor::kInvAlphaFactor,
         /* 16 */ PipelineBlendFactor::kSrcAlphaSat,
     };
     // Like kBlendFactorMap, but with color modes changed to alpha. Some
@@ -1939,6 +1967,9 @@ bool PipelineCache::GetCurrentStateDescription(
   xenos::MsaaSamples host_msaa_samples =
       regs.Get<reg::RB_SURFACE_INFO>().msaa_samples;
   if (edram_rov_used) {
+    // The depth-only pixel shader is specialized for the guest count, which
+    // the host one is about to lose.
+    description_out.guest_msaa_samples = host_msaa_samples;
     if (host_msaa_samples == xenos::MsaaSamples::k2X) {
       // 2 is not supported in ForcedSampleCount on Nvidia.
       host_msaa_samples = xenos::MsaaSamples::k4X;
@@ -1991,8 +2022,7 @@ bool PipelineCache::GetGeometryShaderKey(
 }
 
 void PipelineCache::EnsurePipelineShadersTranslated(
-    Pipeline* pipeline, SpirvShaderTranslator* mesa_spirv_translator,
-    bool use_try_claim) {
+    Pipeline* pipeline, SpirvShaderTranslator* mesa_spirv_translator) {
   PipelineRuntimeDescription& desc = pipeline->description;
 
   // Storage warm-up pipelines defer the entire DXIL build to here, off the main
@@ -2004,7 +2034,7 @@ void PipelineCache::EnsurePipelineShadersTranslated(
       mesa_spirv_translator) {
     BuildMesaPipelineDxil(desc.mesa_vertex_translation,
                           desc.mesa_pixel_translation, *mesa_spirv_translator,
-                          use_try_claim, desc);
+                          desc);
     return;
   }
 
@@ -2016,7 +2046,7 @@ void PipelineCache::EnsurePipelineShadersTranslated(
     if (desc.mesa_pixel_translation && !desc.mesa_pixel_dxil &&
         mesa_spirv_translator) {
       Shader::Translation* pixel_spirv = TranslateGuestMesaSpirv(
-          *mesa_spirv_translator, *desc.mesa_pixel_translation, use_try_claim);
+          *mesa_spirv_translator, *desc.mesa_pixel_translation);
       if (pixel_spirv) {
         desc.mesa_pixel_dxil = ConvertGuestMesaSpirvToDxil(
             pixel_spirv->shader().ucode_data_hash(),
@@ -2035,7 +2065,7 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   const PipelineDescription& description = runtime_description.description;
   bool as_interpreter =
       placeholder_mode == PipelinePlaceholderMode::kInterpreter;
-  // Both placeholder variants substitute the no-op (or debug) pixel shader.
+  // Both placeholder variants substitute a stand-in for the real pixel shader.
   bool as_placeholder = placeholder_mode != PipelinePlaceholderMode::kNone;
 
   if (runtime_description.pixel_shader != nullptr) {
@@ -2071,15 +2101,8 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   }
 
   // Primitive topology, vertex, hull, domain and geometry shaders.
-  // Mesa pipelines source bytecode from mesa_*_dxil, so no separate guest
-  // shader translation is required for them.
-  if (!runtime_description.vertex_shader->is_translated() &&
-      !description.use_mesa_dxil) {
-    XELOGE("Vertex shader {:016X} not translated",
-           runtime_description.vertex_shader->shader().ucode_data_hash());
-    assert_always();
-    return nullptr;
-  }
+  // Bytecode comes from mesa_*_dxil, so no separate guest shader translation
+  // is required.
   Shader::HostVertexShaderType host_vertex_shader_type =
       SpirvShaderTranslator::Modification(
           runtime_description.vertex_shader->modification())
@@ -2154,13 +2177,55 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   }
 
   // Pixel shader.
+  // Writes EDRAM depth/stencil and no color. The no-op is only a fallback for
+  // a ROV depth-only shader that could not be generated.
+  auto use_rov_depth_only_pixel_shader = [&]() {
+    // VIZ surveys only use the ZPass counter.
+    const std::vector<uint8_t>& mesa_viz_survey_rov_pixel_shader =
+        mesa_viz_survey_rov_pixel_shaders_[size_t(
+            description.guest_msaa_samples)];
+    const std::vector<uint8_t>& mesa_depth_only_rov_pixel_shader =
+        description.counting_depth_only &&
+                !mesa_viz_survey_rov_pixel_shader.empty()
+            ? mesa_viz_survey_rov_pixel_shader
+            : mesa_depth_only_rov_pixel_shaders_[size_t(
+                  description.guest_msaa_samples)];
+    if (!mesa_depth_only_rov_pixel_shader.empty()) {
+      state_desc.PS.pShaderBytecode = mesa_depth_only_rov_pixel_shader.data();
+      state_desc.PS.BytecodeLength = mesa_depth_only_rov_pixel_shader.size();
+    } else {
+      state_desc.PS.pShaderBytecode = shaders::placeholder_ps;
+      state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_ps);
+    }
+  };
   if (as_placeholder) {
-    // Hot-swap placeholder: the real pixel shader is not translated yet, so use
-    // the no-op placeholder (no color output, leaves render targets untouched).
-    // Interpreter placeholders may instead use the flat-grey debug shader so
-    // the interim geometry is visible (host render target path only).
-    if (as_interpreter && cvars::async_shader_vs_interpreter_debug_color &&
-        !edram_rov_used) {
+    // Hot-swap placeholder: the real pixel shader is not translated yet, so
+    // rasterize without writing color. The flat-grey debug shader may stand in
+    // on the host render target path to make the interim geometry visible.
+    if (edram_rov_used) {
+      // Color and depth both go through the pixel shader here, so the no-op
+      // would draw nothing at all. Write depth like a depth-only draw, with the
+      // inputs of the pixel shader stood in for so the signatures link. The
+      // interpreter vertex shader outputs only the position.
+      uint64_t input_modification =
+          as_interpreter
+              ? 0
+              : SpirvShaderTranslator::GetPixelShaderInputModification(
+                    description.pixel_shader_modification);
+      if (!input_modification) {
+        use_rov_depth_only_pixel_shader();
+      } else {
+        const std::vector<uint8_t>* placeholder_pixel_shader =
+            GetMesaRovPlaceholderPixelShader(input_modification,
+                                             description.guest_msaa_samples);
+        if (!placeholder_pixel_shader) {
+          return nullptr;
+        }
+        state_desc.PS.pShaderBytecode = placeholder_pixel_shader->data();
+        state_desc.PS.BytecodeLength = placeholder_pixel_shader->size();
+      }
+    } else if (as_interpreter &&
+               cvars::async_shader_vs_interpreter_debug_color) {
       state_desc.PS.pShaderBytecode = shaders::placeholder_color_ps;
       state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_color_ps);
     } else {
@@ -2181,16 +2246,25 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
              runtime_description.pixel_shader->shader().ucode_data_hash());
       return nullptr;
     }
-  } else if (edram_rov_used) {
-    // Real ROV depth-only shader (writes EDRAM depth/stencil). The no-op
-    // placeholder_ps is only a fallback if generation failed.
-    if (!mesa_depth_only_rov_pixel_shader_.empty()) {
-      state_desc.PS.pShaderBytecode = mesa_depth_only_rov_pixel_shader_.data();
-      state_desc.PS.BytecodeLength = mesa_depth_only_rov_pixel_shader_.size();
-    } else {
-      state_desc.PS.pShaderBytecode = shaders::placeholder_ps;
-      state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_ps);
+  } else if (!edram_rov_used && description.counting_depth_only &&
+             !zpd_total_depth_only_pixel_shader_.empty()) {
+    // Native ZPD query without a guest pixel shader.
+    // Coverage still has to be counted.
+    const std::vector<uint8_t>* zpd_total_pixel_shader =
+        &zpd_total_depth_only_pixel_shader_;
+    if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        (description.depth_func != xenos::CompareFunction::kAlways ||
+         description.depth_write) &&
+        description.depth_format == xenos::DepthRenderTargetFormat::kD24FS8) {
+      zpd_total_pixel_shader = render_target_cache_.depth_float24_round()
+                                   ? &zpd_total_float24_round_pixel_shader_
+                                   : &zpd_total_float24_truncate_pixel_shader_;
     }
+    state_desc.PS.pShaderBytecode = zpd_total_pixel_shader->data();
+    state_desc.PS.BytecodeLength = zpd_total_pixel_shader->size();
+  } else if (edram_rov_used) {
+    // Guest depth-only draw on the ROV path.
+    use_rov_depth_only_pixel_shader();
   } else {
     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
         (description.depth_func != xenos::CompareFunction::kAlways ||
@@ -2203,6 +2277,12 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         state_desc.PS.pShaderBytecode = shaders::float24_truncate_ps;
         state_desc.PS.BytecodeLength = sizeof(shaders::float24_truncate_ps);
       }
+    } else if (!description.depth_write && !description.stencil_write_mask) {
+      // Bind an empty PS to force rasterization.
+      // D3D drops PS-less draws without depth/stencil writes, breaking
+      // occlusion queries (4541096E, 5553083B).
+      state_desc.PS.pShaderBytecode = mesa_depth_only_pixel_shader_.data();
+      state_desc.PS.BytecodeLength = mesa_depth_only_pixel_shader_.size();
     }
   }
 
@@ -2238,25 +2318,19 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       description.front_counter_clockwise ? true : false;
   state_desc.RasterizerState.DepthBias = description.depth_bias;
   state_desc.RasterizerState.DepthBiasClamp = 0.0f;
-  // With non-square resolution scaling, make sure the worst-case impact is
-  // reverted (slope only along the scaled axis), thus max. More bias is better
-  // than less bias, because less bias means Z fighting with the background is
-  // more likely. Native draws get the guest bias as is.
   state_desc.RasterizerState.SlopeScaledDepthBias =
       description.depth_bias_slope_scaled *
-      (description.resolution_scale_native
-           ? 1.0f
-           : float(std::max(render_target_cache_.draw_resolution_scale_x(),
-                            render_target_cache_.draw_resolution_scale_y())));
+      GetDepthBiasSlopeScale(description.resolution_scale_native);
+  if (depth_bias_dynamic_) {
+    state_desc.Flags |= D3D12_PIPELINE_STATE_FLAG_DYNAMIC_DEPTH_BIAS;
+  }
   state_desc.RasterizerState.DepthClipEnable =
       description.depth_clip ? true : false;
   uint32_t msaa_sample_count = uint32_t(1)
                                << uint32_t(description.host_msaa_samples);
   if (edram_rov_used) {
-    // Only 1, 4, 8 and (not on all GPUs) 16 are allowed, using sample 0 as 0
-    // and 3 as 1 for 2x instead (not exactly the same sample positions, but
-    // still top-left and bottom-right - however, this can be adjusted with
-    // programmable sample positions).
+    // Only 1, 4, 8 and (not on all GPUs) 16 are allowed, using samples 2 and
+    // 1 as 0 and 1 for 2x instead (see GetHostSampleXenosPositions).
     assert_true(msaa_sample_count == 1 || msaa_sample_count == 4);
     if (msaa_sample_count != 1 && msaa_sample_count != 4) {
       return nullptr;
@@ -2276,9 +2350,7 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       return nullptr;
     }
     if (msaa_sample_count == 2 && !render_target_cache_.msaa_2x_supported()) {
-      // Using sample 0 as 0 and 3 as 1 for 2x instead (not exactly the same
-      // sample positions, but still top-left and bottom-right - however, this
-      // can be adjusted with programmable sample positions).
+      // Using sample 0 as 0 and 3 as 1 for 2x instead.
       state_desc.SampleMask = 0b1001;
       state_desc.SampleDesc.Count = 4;
     } else {
@@ -2340,14 +2412,26 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
 
     // Render targets and blending.
     state_desc.BlendState.IndependentBlendEnable = true;
-    static constexpr D3D12_BLEND kBlendFactorMap[] = {
-        D3D12_BLEND_ZERO,          D3D12_BLEND_ONE,
-        D3D12_BLEND_SRC_COLOR,     D3D12_BLEND_INV_SRC_COLOR,
-        D3D12_BLEND_SRC_ALPHA,     D3D12_BLEND_INV_SRC_ALPHA,
-        D3D12_BLEND_DEST_COLOR,    D3D12_BLEND_INV_DEST_COLOR,
-        D3D12_BLEND_DEST_ALPHA,    D3D12_BLEND_INV_DEST_ALPHA,
-        D3D12_BLEND_BLEND_FACTOR,  D3D12_BLEND_INV_BLEND_FACTOR,
+    const bool alpha_blend_factor_supported =
+        command_processor_.GetD3D12Provider().IsAlphaBlendFactorSupported();
+    const D3D12_BLEND kBlendFactorMap[] = {
+        D3D12_BLEND_ZERO,
+        D3D12_BLEND_ONE,
+        D3D12_BLEND_SRC_COLOR,
+        D3D12_BLEND_INV_SRC_COLOR,
+        D3D12_BLEND_SRC_ALPHA,
+        D3D12_BLEND_INV_SRC_ALPHA,
+        D3D12_BLEND_DEST_COLOR,
+        D3D12_BLEND_INV_DEST_COLOR,
+        D3D12_BLEND_DEST_ALPHA,
+        D3D12_BLEND_INV_DEST_ALPHA,
+        D3D12_BLEND_BLEND_FACTOR,
+        D3D12_BLEND_INV_BLEND_FACTOR,
         D3D12_BLEND_SRC_ALPHA_SAT,
+        alpha_blend_factor_supported ? D3D12_BLEND_ALPHA_FACTOR
+                                     : D3D12_BLEND_BLEND_FACTOR,
+        alpha_blend_factor_supported ? D3D12_BLEND_INV_ALPHA_FACTOR
+                                     : D3D12_BLEND_INV_BLEND_FACTOR,
     };
     // 8 entries for safety since 3 bits from the guest are passed directly.
     static constexpr D3D12_BLEND_OP kBlendOpMap[] = {
@@ -2395,7 +2479,11 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         }
         blend_desc.BlendOpAlpha = kBlendOpMap[uint32_t(rt.blend_op_alpha)];
       }
-      blend_desc.RenderTargetWriteMask = rt.write_mask;
+      // Not writing an output leaves the target undefined, not unchanged.
+      blend_desc.RenderTargetWriteMask =
+          state_desc.PS.pShaderBytecode == shaders::placeholder_ps
+              ? 0
+              : rt.write_mask;
     }
   }
 
@@ -2419,6 +2507,7 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   // Create the D3D12 pipeline state object.
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
+  CreationQueue::BusyScope busy_scope(creation_queue_);
   bool profile = cvars::shader_profiling;
   std::chrono::steady_clock::time_point pso_create_start;
   if (profile) {
@@ -2429,10 +2518,8 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   if (SUCCEEDED(hr) && profile) {
     // Driver DXIL->ISA compile time.
     XELOGI(
-        "shader_profiling: pipeline create ({}{}) VS {:016X} PS {:016X} "
-        "{:.3f} ms",
-        description.use_mesa_dxil ? "Mesa" : "HLSL",
-        as_placeholder ? ", placeholder" : "",
+        "shader_profiling: pipeline create{} VS {:016X} PS {:016X} {:.3f} ms",
+        as_placeholder ? " (placeholder)" : "",
         runtime_description.vertex_shader
             ? runtime_description.vertex_shader->shader().ucode_data_hash()
             : 0,
@@ -2475,131 +2562,68 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   return state;
 }
 
-void PipelineCache::CreationThread(size_t thread_index) {
-  // Thread-local guest Mesa SPIR-V translator (the translator is not thread
-  // safe), so the deferred ucode->SPIR-V build runs here, off the main thread,
-  // one per creation thread.
-  std::unique_ptr<SpirvShaderTranslator> mesa_spirv_translator =
-      guest_shader_cache_.CreateWorkerTranslator();
-
-  while (true) {
-    Pipeline* pipeline_to_create = nullptr;
-
-    // Check if need to shut down or set the completion event and dequeue the
-    // pipeline if there is any.
-    {
-      std::unique_lock<xe_mutex> lock(creation_request_lock_);
-      if (thread_index >= creation_threads_shutdown_from_ ||
-          creation_queue_.empty()) {
-        if (creation_threads_busy_ == 0) {
-          // Last pipeline in the queue created.
-          if (creation_completion_set_event_) {
-            // Signal the event if requested (blocking mode).
-            creation_completion_set_event_ = false;
-            creation_completion_event_->Set();
-          }
-          if (creation_completion_callback_) {
-            // Invoke completion callback (non-blocking mode).
-            auto callback = std::move(creation_completion_callback_);
-            creation_completion_callback_ = nullptr;
-            lock.unlock();
-            callback();
-            lock.lock();
-          }
-        }
-        if (thread_index >= creation_threads_shutdown_from_) {
-          return;
-        }
-        creation_request_cond_.wait(lock);
-        continue;
-      }
-      // Take the pipeline from the queue and increment the busy thread count
-      // until the pipeline is created - other threads must be able to dequeue
-      // requests, but can't set the completion event until the pipelines are
-      // fully created (rather than just started creating).
-      pipeline_to_create = creation_queue_.top();
-      creation_queue_.pop();
-      ++creation_threads_busy_;
+const std::vector<uint8_t>* PipelineCache::GetMesaRovPlaceholderPixelShader(
+    uint64_t input_modification, xenos::MsaaSamples msaa_samples) {
+  SpirvShaderTranslator::Modification key(input_modification);
+  key.pixel.set_fsi_msaa_samples(msaa_samples);
+  auto it = mesa_rov_placeholder_pixel_shaders_.find(key.value);
+  if (it == mesa_rov_placeholder_pixel_shaders_.end()) {
+    CreationQueue::BusyScope busy_scope(creation_queue_);
+    std::vector<uint8_t> dxil = TranslateDepthOnlyPixelShader(
+        guest_shader_cache_.translator().CreateDepthOnlyFragmentShader(
+            msaa_samples, false, input_modification));
+    if (dxil.empty()) {
+      XELOGE(
+          "spirv_to_dxil: failed to generate the ROV placeholder pixel shader "
+          "for inputs {:016X}; draws with those inputs are skipped until their "
+          "pipelines are ready",
+          input_modification);
     }
-
-    // Build the deferred DXIL off the main thread.
-    EnsurePipelineShadersTranslated(pipeline_to_create,
-                                    mesa_spirv_translator.get(),
-                                    /*use_try_claim=*/true);
-
-    // Create the D3D12 pipeline state object.
-    ID3D12PipelineState* new_state =
-        CreateD3D12Pipeline(pipeline_to_create->description);
-
-    if (new_state != nullptr) {
-      // Swap in the real pipeline. If a placeholder was in use, defer its
-      // destruction until the GPU has passed the submissions that may reference
-      // it. Without a placeholder the old value is null and this is a plain
-      // store.
-      ID3D12PipelineState* old_state = pipeline_to_create->state.exchange(
-          new_state, std::memory_order_acq_rel);
-      pipeline_to_create->is_placeholder.store(false,
-                                               std::memory_order_release);
-      if (old_state != nullptr) {
-        std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
-        deferred_destroy_pipelines_.emplace_back(
-            old_state, command_processor_.GetCurrentSubmission());
-      }
-    } else {
-      // Real creation failed. Keep any placeholder in use, but stop reporting
-      // it as a placeholder so occlusion-query awaits do not block forever.
-      pipeline_to_create->is_placeholder.store(false,
-                                               std::memory_order_release);
-      XELOGE("Pipeline creation failed (VS {:016X}, PS {:016X})",
-             pipeline_to_create->description.vertex_shader
-                 ? pipeline_to_create->description.vertex_shader->shader()
-                       .ucode_data_hash()
-                 : 0,
-             pipeline_to_create->description.pixel_shader
-                 ? pipeline_to_create->description.pixel_shader->shader()
-                       .ucode_data_hash()
-                 : 0);
-    }
-
-    // Pipeline created - the thread is not busy anymore, safe to set the
-    // completion event if needed (at the next iteration, or in some other
-    // thread).
-    {
-      std::lock_guard<xe_mutex> lock(creation_request_lock_);
-      --creation_threads_busy_;
-    }
+    it = mesa_rov_placeholder_pixel_shaders_.emplace(key.value, std::move(dxil))
+             .first;
   }
+  return it->second.empty() ? nullptr : &it->second;
 }
 
-void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
-  assert_false(creation_threads_.empty());
-  while (true) {
-    Pipeline* pipeline_to_create;
-    {
-      std::lock_guard<xe_mutex> lock(creation_request_lock_);
-      if (creation_queue_.empty()) {
-        break;
-      }
-      pipeline_to_create = creation_queue_.top();
-      creation_queue_.pop();
+ID3D12PipelineState* PipelineCache::CreateQueuedPipeline(
+    Pipeline* pipeline, SpirvShaderTranslator* mesa_spirv_translator) {
+  // Build the deferred DXIL off the main thread.
+  EnsurePipelineShadersTranslated(pipeline, mesa_spirv_translator);
+  return CreateD3D12Pipeline(pipeline->description);
+}
+
+void PipelineCache::StoreCreatedPipeline(Pipeline* pipeline,
+                                         ID3D12PipelineState* state) {
+  if (state != nullptr) {
+    // Swap in the real pipeline. If a placeholder was in use, defer its
+    // destruction until the GPU has passed the submissions that may reference
+    // it. Without a placeholder the old value is null and this is a plain
+    // store.
+    ID3D12PipelineState* old_state =
+        pipeline->state.exchange(state, std::memory_order_acq_rel);
+    pipeline->is_placeholder.store(false, std::memory_order_release);
+    if (old_state != nullptr) {
+      std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+      deferred_destroy_pipelines_.emplace_back(
+          old_state, command_processor_.GetCurrentSubmission());
     }
-
-    // Build the deferred DXIL on the processor thread (uses the main
-    // translator).
-    EnsurePipelineShadersTranslated(pipeline_to_create,
-                                    &guest_shader_cache_.translator(),
-                                    /*use_try_claim=*/true);
-
-    ID3D12PipelineState* new_state =
-        CreateD3D12Pipeline(pipeline_to_create->description);
-
-    // Store the pipeline. If creation failed, state stays nullptr.
-    if (new_state != nullptr) {
-      pipeline_to_create->state.store(new_state, std::memory_order_release);
-    } else {
-      XELOGW("ProcessorThread: Pipeline creation failed");
-    }
+    pipeline->creation_pending.store(false, std::memory_order_release);
+    return;
   }
+  // Real creation failed. Keep any placeholder in use, but stop reporting it as
+  // a placeholder so occlusion-query awaits do not block forever.
+  pipeline->is_placeholder.store(false, std::memory_order_release);
+  XELOGE("Pipeline creation failed (VS {:016X}, PS {:016X})",
+         pipeline->description.vertex_shader
+             ? pipeline->description.vertex_shader->shader().ucode_data_hash()
+             : 0,
+         pipeline->description.pixel_shader
+             ? pipeline->description.pixel_shader->shader().ucode_data_hash()
+             : 0);
+  // After the log: this is what wants_rebuild() waits on, and the rebuild
+  // overwrites the description the log just read.
+  pipeline->creation_failed.store(true, std::memory_order_release);
+  pipeline->creation_pending.store(false, std::memory_order_release);
 }
 
 }  // namespace d3d12

@@ -675,6 +675,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         result = true;
         break;
       }
+      case PM4_WAIT_IB_PFD_COMPLETE: {
+        // Waits for earlier INDIRECT_BUFFER_PFD base and size writes.
+        // No wait is needed since we process indirect buffers synchronously.
+        reader_.AdvanceRead(count * sizeof(uint32_t));
+        result = true;
+        break;
+      }
       case PM4_WAIT_FOR_IDLE: {
         // This opcode is used by 5454084E while going / being ingame.
         assert_true(count == 1);
@@ -1373,7 +1380,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
         XELOGE("{}: Packet too small, can't read VGT_DMA_BASE", opcode_name);
         return false;
       }
-      uint32_t vgt_dma_base = reader_.ReadAndSwap<uint32_t>();
+      // Wrap writeback & XPS addresses to their physical backing.
+      uint32_t vgt_dma_base = CpuToGpu(reader_.ReadAndSwap<uint32_t>());
       --count_remaining;
       register_file_->values[XE_GPU_REG_VGT_DMA_BASE] = vgt_dma_base;
       reg::VGT_DMA_SIZE vgt_dma_size;

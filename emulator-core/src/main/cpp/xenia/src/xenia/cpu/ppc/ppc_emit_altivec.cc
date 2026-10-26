@@ -2147,7 +2147,6 @@ int InstrEmit_vupkhsh(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupkhsh_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupkhsh128(PPCHIRBuilder& f, const InstrData& i) {
-  assert_zero(VX128_VA128);
   return InstrEmit_vupkhsh_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2164,7 +2163,6 @@ int InstrEmit_vupklsh(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupklsh_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupklsh128(PPCHIRBuilder& f, const InstrData& i) {
-  assert_zero(VX128_VA128);
   return InstrEmit_vupklsh_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2181,11 +2179,6 @@ int InstrEmit_vupkhsb(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupkhsb_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupkhsb128(PPCHIRBuilder& f, const InstrData& i) {
-  uint32_t va = VX128_VA128;
-  if (va == 0x60) {
-    // Hrm, my instruction tables suck.
-    return InstrEmit_vupkhsh_(f, VX128_VD128, VX128_VB128);
-  }
   return InstrEmit_vupkhsb_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2202,11 +2195,6 @@ int InstrEmit_vupklsb(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupklsb_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupklsb128(PPCHIRBuilder& f, const InstrData& i) {
-  uint32_t va = VX128_VA128;
-  if (va == 0x60) {
-    // Hrm, my instruction tables suck.
-    return InstrEmit_vupklsh_(f, VX128_VD128, VX128_VB128);
-  }
   return InstrEmit_vupklsb_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2609,10 +2597,12 @@ void RegisterEmitCategoryAltivec() {
   XEREGISTERINSTR(vupkhsb);
   XEREGISTERINSTR(vupkhsb128);
   XEREGISTERINSTR(vupkhsh);
+  XEREGISTERINSTR(vupkhsh128);
   XEREGISTERINSTR(vupklpx);
   XEREGISTERINSTR(vupklsb);
   XEREGISTERINSTR(vupklsb128);
   XEREGISTERINSTR(vupklsh);
+  XEREGISTERINSTR(vupklsh128);
   XEREGISTERINSTR(vupkd3d128);
   XEREGISTERINSTR(vxor);
   XEREGISTERINSTR(vxor128);

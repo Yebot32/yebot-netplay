@@ -587,8 +587,9 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
   X_STATUS result = 0;
   do {
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(
-        num_events, events, wait_all, 1, alertable,
-        timeout != -1 ? &timeout_wait : nullptr);
+        num_events, events,
+        wait_all ? X_KWAIT_REASON::WaitAll : X_KWAIT_REASON::WaitAny, 1,
+        alertable, timeout != -1 ? &timeout_wait : nullptr);
   } while (result == X_STATUS_ALERTED);
 
   if (XFAILED(result)) {
@@ -596,13 +597,14 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
     XThread::SetLastError(error);
     return ~0u;
   }
-  return 0;
+  // The signaled event's index, WSA_WAIT_TIMEOUT or WSA_WAIT_IO_COMPLETION.
+  return result;
 }
 DECLARE_XAM_EXPORT2(NetDll_WSAWaitForMultipleEvents, kNetworking, kImplemented,
                     kBlocking);
 
 dword_result_t NetDll_WSACreateEvent_entry() {
-  XEvent* ev = new XEvent(kernel_state());
+  auto ev = object_ref<XEvent>(new XEvent(kernel_state()));
   ev->Initialize(true, false);
   return ev->handle();
 }
@@ -1119,6 +1121,20 @@ DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kSketchy);
 
 // https://www.google.com/patents/WO2008112448A1?cl=en
 // Reserves a port for use by system link
+// TODO(has207): cross-platform System Link, for titles with the
+// XEX_SYSTEM_CROSS_PLATFORM_SYSTEM_LINK flag. Aliens: Colonial Marines
+// (5345080C) sets port 14000 here. Only those titles may set it and it then
+// replaces UDP 3074 for their System Link traffic. Their System Link key IDs
+// have type 0x40 and only those are accepted. Frames carry the console's own
+// IP in place of 0.0.0.1, unicast goes to the peer's XNADDR IP and peers must
+// share the subnet. Their broadcast keys are SHA-1 of each key's index byte
+// and the LAN key AES-CBC encrypted with hypervisor key 0x43 and a zero IV, in
+// place of HMAC with key 0x19. That key's value is unknown. Until it is,
+// consoles can't authenticate us. GFWL's xlive.dll always uses this format and
+// seems to take each title's already encrypted LAN key from its config. A host
+// socket on this port with the host's own IP could reach consoles on the LAN
+// without Kai or the tunnel. Over Kai, consoles need an Xbox One MAC and a
+// Kai-assigned IP. Xenia-to-xenia already works over the current traffic.
 dword_result_t NetDll_XNetSetSystemLinkPort_entry(dword_t caller,
                                                   dword_t port) {
   // The guest passes this already byte-swapped, as it would go on the wire.

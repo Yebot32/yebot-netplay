@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
@@ -105,6 +106,11 @@ class TextureCache {
   // scaled state of the range.
   void MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled,
                            bool resolution_scaled);
+  // Records that the shared memory buffer also holds the downscaled output of a
+  // scaled resolve, so a CPU write into it can unmark all of it: textures over
+  // the rest of it load from the shared memory buffer correctly then.
+  void MarkScaledResolveMirrored(uint32_t start_unscaled,
+                                 uint32_t length_unscaled);
   // Ensures the memory backing the range in the scaled resolve address space is
   // allocated and returns whether it is.
   virtual bool EnsureScaledResolveMemoryCommitted(
@@ -729,6 +735,9 @@ class TextureCache {
   void ScaledResolveGlobalWatchCallback(
       const global_unique_lock_type& global_lock, uint32_t address_first,
       uint32_t address_last, bool invalidated_by_gpu);
+  // Clears the scaled marks of the pages, returning whether any was set. Under
+  // global_critical_region_.
+  bool UnmarkScaledResolvePages(uint32_t page_first, uint32_t page_last);
 
   const RegisterFile& register_file_;
   SharedMemory& shared_memory_;
@@ -747,6 +756,11 @@ class TextureCache {
   // >> 12 for 4 KB pages, >> 5 for uint32_t level 1 bits, >> 6 for uint64_t
   // level 2 bits.
   uint64_t scaled_resolve_pages_l2_[SharedMemory::kBufferSize >> (12 + 5 + 6)];
+  // First to last page of each scaled resolve also in the shared memory buffer,
+  // by first page, so that a CPU write into one unmarks all of it. Under
+  // global_critical_region_.
+  std::map<uint32_t, uint32_t> scaled_resolve_extents_;
+  static constexpr size_t kMaxScaledResolveExtents = 4096;
 
   // Global watch for scaled resolve data invalidation.
   SharedMemory::GlobalWatchHandle scaled_resolve_global_watch_handle_ = nullptr;

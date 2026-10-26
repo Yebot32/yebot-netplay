@@ -17,16 +17,19 @@ namespace xe {
 namespace test {
 
 // All tests use kMemoryAllocationReserve which only touches the page table,
-// not host memory. This lets us pass nullptr for membase and Memory*.
+// not host memory, so membase can be nullptr. PhysicalHeap allocations notify
+// the Memory's invalidation callbacks, so they need an uninitialized Memory
+// with none registered.
 
 TEST_CASE("PhysicalHeap::GetPhysicalAddress", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   SECTION("heap with no offset returns heap-relative address") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     REQUIRE(heap.host_address_offset() == 0);
@@ -37,7 +40,7 @@ TEST_CASE("PhysicalHeap::GetPhysicalAddress", "[memory]") {
 
   SECTION("0xE0000000 heap always has 0x1000 physical offset") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xE0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xE0000000,
                     0x1FD00000, 4096, &parent);
 
     // The 0x1000 physical offset is baked into the view mapping
@@ -46,16 +49,28 @@ TEST_CASE("PhysicalHeap::GetPhysicalAddress", "[memory]") {
     REQUIRE(heap.GetPhysicalAddress(0xE0001000) == 0x2000);
     REQUIRE(heap.GetPhysicalAddress(0xE0010000) == 0x11000);
   }
+
+  SECTION("0x7F000000 XPS heap overlays the start of physical memory") {
+    PhysicalHeap heap;
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0x7F000000,
+                    0x00C80000, 4096, &parent);
+
+    REQUIRE(heap.host_address_offset() == 0);
+    REQUIRE(heap.GetPhysicalAddress(0x7F000000) == 0);
+    REQUIRE(heap.GetPhysicalAddress(0x7F001000) == 0x1000);
+    REQUIRE(heap.GetPhysicalAddress(0x7FC7F000) == 0xC7F000);
+  }
 }
 
 TEST_CASE("PhysicalHeap::Alloc alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   SECTION("returned address is page-aligned") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     uint32_t addr = 0;
@@ -70,7 +85,7 @@ TEST_CASE("PhysicalHeap::Alloc alignment", "[memory]") {
 
   SECTION("multiple allocations with different alignments") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     for (uint32_t alignment : {0x10000u, 0x20000u, 0x40000u, 0x100000u}) {
@@ -84,13 +99,14 @@ TEST_CASE("PhysicalHeap::Alloc alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap::AllocRange alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   SECTION("returned address respects alignment within range") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     uint32_t addr = 0;
@@ -105,7 +121,7 @@ TEST_CASE("PhysicalHeap::AllocRange alignment", "[memory]") {
 
   SECTION("large alignment preserved through translation") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xC0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xC0000000,
                     0x20000000, 16 * 1024 * 1024, &parent);
 
     uint32_t addr = 0;
@@ -118,12 +134,13 @@ TEST_CASE("PhysicalHeap::AllocRange alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap::AllocFixed alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   PhysicalHeap heap;
-  heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                   0x20000000, 64 * 1024, &parent);
 
   // AllocFixed at a specific aligned address must succeed
@@ -133,12 +150,13 @@ TEST_CASE("PhysicalHeap::AllocFixed alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap vE0000000 alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   PhysicalHeap heap;
-  heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xE0000000,
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xE0000000,
                   0x1FD00000, 4096, &parent);
 
   // The 0xE0000000 heap always has a 0x1000 physical offset, so the
@@ -161,27 +179,29 @@ TEST_CASE("PhysicalHeap vE0000000 alignment", "[memory]") {
     REQUIRE(translation_offset % heap.page_size() == 0);
   }
 
-  SECTION("alloc with alignment larger than page_size is rejected") {
-    // vE0000000 has a 0x1000 physical translation offset, so a 64KB
-    // alignment request can't produce a 64KB-aligned guest address.
-    // PhysicalHeap::Alloc forces top-down, which here lands one stride
-    // past the end of the child heap and BaseHeap::AllocFixed rejects
-    // it as out of range.
+  SECTION("alloc with alignment larger than page_size is physically aligned") {
+    // The alignment is a physical one and the guest reads it back through
+    // MmGetPhysicalAddress. The 0x1000 translation offset means the guest
+    // address itself cannot carry it.
     uint32_t alignment = 0x10000;  // 64KB
+    uint32_t size = 0x10000;
     uint32_t addr = 0;
-    bool ok = heap.Alloc(0x10000, alignment, kMemoryAllocationReserve,
+    bool ok = heap.Alloc(size, alignment, kMemoryAllocationReserve,
                          kMemoryProtectRead, false, &addr);
-    REQUIRE_FALSE(ok);
+    REQUIRE(ok);
+    REQUIRE(heap.GetPhysicalAddress(addr) % alignment == 0);
+    REQUIRE(addr + size - 1 <= heap.heap_base() + heap.heap_size() - 1);
   }
 }
 
 TEST_CASE("PhysicalHeap vE0000000 AllocRange alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   PhysicalHeap heap;
-  heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xE0000000,
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xE0000000,
                   0x1FD00000, 4096, &parent);
 
   SECTION("page-aligned AllocRange succeeds") {
@@ -207,6 +227,31 @@ TEST_CASE("PhysicalHeap vE0000000 AllocRange alignment", "[memory]") {
     REQUIRE(ok);
     REQUIRE(addr >= 0xE0000000);
   }
+}
+
+TEST_CASE("PhysicalHeap::AllocRange stays within the requested range",
+          "[memory]") {
+  Memory memory;
+  VirtualHeap parent;
+  parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
+                    0x20000000, 4096);
+
+  PhysicalHeap heap;
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+                  0x20000000, 64 * 1024, &parent);
+
+  // A ceiling that is not a multiple of the alignment must not be rounded up
+  // to the next one, which would place the allocation above it.
+  const uint32_t size = 0x10000;
+  const uint32_t alignment = 0x10000;
+  const uint32_t high_address = 0xA0FF8000;
+  uint32_t addr = 0;
+  bool ok = heap.AllocRange(0xA0000000, high_address, size, alignment,
+                            kMemoryAllocationReserve, kMemoryProtectRead, true,
+                            &addr);
+  REQUIRE(ok);
+  REQUIRE(heap.GetPhysicalAddress(addr) % alignment == 0);
+  REQUIRE(addr + size - 1 <= high_address);
 }
 
 }  // namespace test
