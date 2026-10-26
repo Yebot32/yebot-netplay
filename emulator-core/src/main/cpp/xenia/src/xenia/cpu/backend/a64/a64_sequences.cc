@@ -848,6 +848,33 @@ EMITTER_OPCODE_TABLE(OPCODE_SIGN_EXTEND, SIGN_EXTEND_I16_I8, SIGN_EXTEND_I32_I8,
 // ============================================================================
 // OPCODE_TRUNCATE
 // ============================================================================
+// True when every reader of the result is a compare, which reads it as a
+// 32-bit operand.
+inline bool TruncationOnlyReadAsWord(const hir::Instr* instr) {
+  const hir::Value* result = instr->dest;
+  if (!result || !result->use_head) {
+    return false;
+  }
+  for (const hir::Value::Use* use = result->use_head; use; use = use->next) {
+    switch (use->instr->GetOpcodeNum()) {
+      case hir::OPCODE_COMPARE_EQ:
+      case hir::OPCODE_COMPARE_NE:
+      case hir::OPCODE_COMPARE_SLT:
+      case hir::OPCODE_COMPARE_SLE:
+      case hir::OPCODE_COMPARE_SGT:
+      case hir::OPCODE_COMPARE_SGE:
+      case hir::OPCODE_COMPARE_ULT:
+      case hir::OPCODE_COMPARE_ULE:
+      case hir::OPCODE_COMPARE_UGT:
+      case hir::OPCODE_COMPARE_UGE:
+        break;
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
 struct TRUNCATE_I8_I16
     : Sequence<TRUNCATE_I8_I16, I<OPCODE_TRUNCATE, I8Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
@@ -886,6 +913,12 @@ struct TRUNCATE_I32_I64
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // mov wD, wS — implicitly truncates (upper 32 bits zeroed).
     auto w_src = WReg(i.src1.reg().getIdx());
+    if (i.dest.reg().getIdx() == w_src.getIdx() &&
+        TruncationOnlyReadAsWord(i.instr)) {
+      // The move only clears the upper half, which ZERO_EXTEND_I64_I32
+      // relies on in general but no compare reads.
+      return;
+    }
     e.mov(i.dest, w_src);
   }
 };
@@ -2820,20 +2853,11 @@ struct SELECT_V128_V128
       // dest already holds the mask. BSL is safe here.
       e.bsl(VReg(d).b16, VReg(s3).b16, VReg(s2).b16);
     } else if (d == s3) {
-      // dest holds the mask=1 value. BIT inserts mask=1 bits from s3, keeps
-      // dest (=s2-candidate) where mask=0... no, dest=s3 not s2.
-      // Use: copy s2 to scratch, then BIT(scratch, s3, mask), move to dest.
-      // Or: copy mask to scratch v0, copy s2 to dest, BIT(dest, s3_orig, v0).
-      // Simplest: use scratch v0 for mask, then BSL.
-      e.orr(VReg(0).b16, VReg(s1).b16, VReg(s1).b16);  // v0 = mask
-      e.bsl(VReg(0).b16, VReg(s3).b16, VReg(s2).b16);  // v0 = result
-      e.orr(VReg(d).b16, VReg(0).b16, VReg(0).b16);    // dest = result
+      // dest holds the mask=1 value: insert s2 where the mask is clear.
+      e.bif(VReg(d).b16, VReg(s2).b16, VReg(s1).b16);
     } else if (d == s2) {
-      // dest holds the mask=0 value. BIF inserts ~mask bits from s2,
-      // but dest=s2... Use scratch for mask.
-      e.orr(VReg(0).b16, VReg(s1).b16, VReg(s1).b16);  // v0 = mask
-      e.bsl(VReg(0).b16, VReg(s3).b16, VReg(s2).b16);  // v0 = result
-      e.orr(VReg(d).b16, VReg(0).b16, VReg(0).b16);    // dest = result
+      // dest holds the mask=0 value: insert s3 where the mask is set.
+      e.bit(VReg(d).b16, VReg(s3).b16, VReg(s1).b16);
     } else {
       // No aliasing — copy mask to dest, then BSL.
       e.orr(VReg(d).b16, VReg(s1).b16, VReg(s1).b16);
