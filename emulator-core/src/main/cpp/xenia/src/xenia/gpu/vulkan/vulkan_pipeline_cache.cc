@@ -9,10 +9,12 @@
 
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <set>
+#include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
@@ -2903,6 +2905,89 @@ void VulkanPipelineCache::ProcessDeferredDestructions() {
   }
 }
 
+// Keeps the driver-specific cache directory within a disk budget by deleting
+// its least recently written files, never the one about to be used.
+//
+// The directory holds one file per title per driver, and nothing removed the
+// files for drivers that are no longer installed, so trying a few custom
+// drivers left every one of them behind. hakuX measured what that costs: a
+// shared cache reached 515 MB over 45 titles and each title writing all of it
+// back stalled the picture for 0.2-0.8 s.
+static void PruneVulkanPipelineCacheDirectory(
+    const std::filesystem::path& directory, const std::filesystem::path& keep,
+    uint64_t budget_bytes) {
+  if (!budget_bytes) {
+    return;
+  }
+  struct Entry {
+    std::filesystem::path path;
+    uint64_t size;
+    std::filesystem::file_time_type last_write;
+  };
+  std::vector<Entry> entries;
+  uint64_t total = 0;
+  std::error_code ec;
+  for (const std::filesystem::directory_entry& item :
+       std::filesystem::directory_iterator(directory, ec)) {
+    if (ec) {
+      return;
+    }
+    // Only this function's own files - the shader and pipeline storage beside
+    // them is not a rebuildable cache in the same sense.
+    if (item.path().extension() != ".bin") {
+      continue;
+    }
+    if (!item.is_regular_file(ec) || ec) {
+      ec.clear();
+      continue;
+    }
+    const uint64_t size = uint64_t(item.file_size(ec));
+    if (ec) {
+      ec.clear();
+      continue;
+    }
+    const std::filesystem::file_time_type last_write = item.last_write_time(ec);
+    if (ec) {
+      ec.clear();
+      continue;
+    }
+    entries.push_back({item.path(), size, last_write});
+    total += size;
+  }
+  if (total <= budget_bytes) {
+    return;
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const Entry& a, const Entry& b) {
+              return a.last_write < b.last_write;
+            });
+  // Trim to three quarters of the budget, so this runs occasionally rather
+  // than on every launch once the limit is reached.
+  const uint64_t target = budget_bytes - budget_bytes / 4;
+  uint64_t removed_count = 0;
+  uint64_t removed_bytes = 0;
+  for (const Entry& entry : entries) {
+    if (total <= target) {
+      break;
+    }
+    if (entry.path == keep) {
+      continue;
+    }
+    std::error_code remove_ec;
+    std::filesystem::remove(entry.path, remove_ec);
+    if (remove_ec) {
+      continue;
+    }
+    total -= entry.size;
+    removed_bytes += entry.size;
+    ++removed_count;
+  }
+  if (removed_count) {
+    XELOGI("Pipeline cache: removed {} file(s), {} bytes, {} remain", 
+           removed_count, removed_bytes, total);
+  }
+}
+
 void VulkanPipelineCache::InitializeShaderStorage(
     const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
     std::function<void()> completion_callback) {
@@ -3021,6 +3106,21 @@ void VulkanPipelineCache::InitializeShaderStorage(
       }
     }
   }
+
+  // Named in the log so a bug report from a device says which driver's cache
+  // was actually in use - the point of keying by driver is lost if the only
+  // way to tell them apart is a hex string in a filename.
+  XELOGI("Pipeline cache: title {:08X}, driver {}, file {}",
+         shader_storage_title_id_, uint32_t(device_properties.driverID),
+         xe::path_to_utf8(vk_pipeline_cache_path_.filename()));
+
+  // The cache for this title and driver is named now, so the directory can be
+  // trimmed without touching it.
+  PruneVulkanPipelineCacheDirectory(
+      shader_storage_local_root, vk_pipeline_cache_path_,
+      cvars::vulkan_pipeline_cache_budget_mb > 0
+          ? uint64_t(cvars::vulkan_pipeline_cache_budget_mb) * 1024 * 1024
+          : 0);
 
   // Try to load existing VkPipelineCache data.
   std::vector<uint8_t> pipeline_cache_data;

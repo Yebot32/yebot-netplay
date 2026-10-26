@@ -316,3 +316,18 @@ DEFINE_int32(
     "Nothing has yet attributed that to either one - the point of the switch "
     "is to find out. Turn 1 and 2 on separately before turning both on.",
     "GPU");
+
+DEFINE_int32(
+    vulkan_pipeline_cache_budget_mb, 512,
+    "How much disk the Vulkan pipeline cache may use before the least "
+    "recently written files are deleted. Each title keeps one cache file per "
+    "driver it has run on, so trying several custom drivers multiplies them; "
+    "nothing used to remove the ones for drivers no longer in use.\n"
+    "  0 disables the limit.\n"
+    "DEFAULT 512. hakuX measured a shared cache at 515 MB across 45 titles and "
+    "each title writing the whole of it back stalled the picture for 0.2-0.8 s "
+    "- that is roughly where the disk cost starts to outweigh the shader "
+    "compilation it saves. Files are only ever deleted once the total is over "
+    "budget, and the cache for the title currently starting is never one of "
+    "them.",
+    "GPU");
