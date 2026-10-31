@@ -22,6 +22,21 @@
 
 DECLARE_bool(spirv_multiply_zero_test_on_bits);
 
+// Measured on Halo 3's main menu (Tab S9, stock Adreno driver): the
+// min(|a|, |b|) == 0 test costs about half the GPU frame time, because the
+// driver expands the NaN-aware min into several instructions per multiply.
+// Skipping the emulation altogether is not an option - Halo 3 then draws a
+// black ellipse in the middle of the screen.
+DEFINE_bool(spirv_multiply_zero_nan_select, true,
+            "Emulate Shader Model 3 zero multiplication by replacing a NaN "
+            "product with +0 instead of testing both operands for zero. A "
+            "plain multiply already gives 0 for zero times anything finite, so "
+            "only 0 * inf and 0 * NaN differ, and both produce NaN. Roughly "
+            "halves GPU time on the stock Adreno driver. Differs from the "
+            "guest only where a NaN meets a non-zero operand (guest NaN, "
+            "host 0). Disable to get the exact operand test back.",
+            "GPU");
+
 namespace xe {
 namespace gpu {
 
@@ -32,6 +47,21 @@ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value,
   int num_components = builder_->getNumComponents(value);
   assert_true(builder_->getNumComponents(operand_0_abs) == num_components);
   assert_true(builder_->getNumComponents(operand_1_abs) == num_components);
+  if (cvars::spirv_multiply_zero_nan_select) {
+    // A plain product is already 0 for zero times anything finite (and for a
+    // denormal operand, which the host flushes), so only 0 * inf and 0 * NaN
+    // differ - and both come out NaN. Adding +0 then turns the -0 of, say,
+    // 0 * -5 into the +0 the guest returns, which matters to a later rcp.
+    return builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_,
+        builder_->createTriOp(
+            spv::OpSelect, type_float_,
+            builder_->createUnaryOp(spv::OpIsNan,
+                                    type_bool_vectors_[num_components - 1],
+                                    value),
+            const_float_vectors_0_[num_components - 1], value),
+        const_float_vectors_0_[num_components - 1]);
+  }
   if (!cvars::spirv_multiply_zero_test_on_bits) {
     return builder_->createTriOp(
         spv::OpSelect, type_float_,
@@ -349,7 +379,11 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
                                                      instr.vector_operands[i]);
         }
         spv::Id different_zero;
-        if (cvars::spirv_multiply_zero_test_on_bits) {
+        if (cvars::spirv_multiply_zero_nan_select) {
+          different_zero = builder_->createUnaryOp(
+              spv::OpIsNan, type_bool_vectors_[different_count - 1],
+              different_result);
+        } else if (cvars::spirv_multiply_zero_test_on_bits) {
           // As in ZeroIfAnyOperandIsZero.
           spv::Id different_uint_type = type_uint_vectors_[different_count - 1];
           spv::Id different_zero_uint = builder_->makeUintConstant(0);
@@ -380,6 +414,12 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
         different_result = builder_->createTriOp(
             spv::OpSelect, different_type, different_zero,
             const_float_vectors_0_[different_count - 1], different_result);
+        if (cvars::spirv_multiply_zero_nan_select) {
+          // -0 to +0, see ZeroIfAnyOperandIsZero.
+          different_result = builder_->createNoContractionBinOp(
+              spv::OpFAdd, different_type, different_result,
+              const_float_vectors_0_[different_count - 1]);
+        }
         // Insert the different components back to the result.
         if (multiplicands_different != used_result_components) {
           if (different_count > 1) {
