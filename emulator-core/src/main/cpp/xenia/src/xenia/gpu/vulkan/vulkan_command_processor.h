@@ -839,6 +839,18 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // the scissor wide open.
   uint32_t pass_open_viewport_w_ = 0;
   uint32_t pass_open_viewport_h_ = 0;
+  // Sum over the pass's draws of (scissor ∩ viewport) area in host pixels: an
+  // upper bound on the fragments each draw can rasterise, to attribute the
+  // fragment counters to passes.
+  uint64_t pass_open_area_ = 0;
+  // Draws whose clamped area covers at least 90% of the framebuffer.
+  uint32_t pass_open_fullscreen_ = 0;
+  std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_fullscreen_{};
+  std::array<uint64_t, size_t(kPassTimestampPairsPerSubmission) *
+                           kPassTimestampRingSubmissions>
+      pass_ts_area_{};
   std::array<uint32_t, size_t(kPassTimestampPairsPerSubmission) *
                            kPassTimestampRingSubmissions>
       pass_ts_scissor_{};
@@ -849,6 +861,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint64_t ns = 0;
     uint64_t passes = 0;
     uint64_t draws = 0;
+    uint64_t area = 0;
+    uint64_t fullscreen = 0;
     uint32_t max_scissor_w = 0;
     uint32_t max_scissor_h = 0;
     uint32_t max_viewport_w = 0;

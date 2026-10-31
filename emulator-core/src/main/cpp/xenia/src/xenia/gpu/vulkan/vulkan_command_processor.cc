@@ -2632,12 +2632,14 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           const bool transfer = (key & 0x80000000u) != 0;
           XELOGI(
               "VkPassTime: {}{}x{} : {:.2f}ms/fr ({:.1f}pass {:.0f}draw/fr, "
-              "{:.3f}ms ea) scissor<={}x{} viewport<={}x{}",
+              "{:.3f}ms ea) area {:.2f}Mpx/fr fullscreen {:.1f}/fr scissor<={}x{} viewport<={}x{}",
               transfer ? "xfer " : "", (key >> 16) & 0x7FFF, key & 0xFFFF,
               kv.second.ns / f / 1e6, kv.second.passes / f, kv.second.draws / f,
               kv.second.passes
                   ? kv.second.ns / static_cast<double>(kv.second.passes) / 1e6
                   : 0.0,
+              kv.second.area / f / 1e6,
+              kv.second.fullscreen / f,
               kv.second.max_scissor_w, kv.second.max_scissor_h,
               kv.second.max_viewport_w, kv.second.max_viewport_h);
         }
@@ -3502,6 +3504,8 @@ void VulkanCommandProcessor::OpenPassTimestamp(uint32_t bucket_key) {
   pass_open_scissor_h_ = 0;
   pass_open_viewport_w_ = 0;
   pass_open_viewport_h_ = 0;
+  pass_open_area_ = 0;
+  pass_open_fullscreen_ = 0;
 }
 
 void VulkanCommandProcessor::ClosePassTimestamp() {
@@ -3520,6 +3524,8 @@ void VulkanCommandProcessor::ClosePassTimestamp() {
       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pass_timestamp_pool_,
       pass_ts_open_pair_ * 2 + 1);
   pass_ts_draws_[pass_ts_open_pair_] = pass_open_draws_;
+  pass_ts_area_[pass_ts_open_pair_] = pass_open_area_;
+  pass_ts_fullscreen_[pass_ts_open_pair_] = pass_open_fullscreen_;
   pass_ts_scissor_[pass_ts_open_pair_] =
       (std::min(pass_open_scissor_w_, 0xFFFFu) << 16) |
       std::min(pass_open_scissor_h_, 0xFFFFu);
@@ -5439,6 +5445,33 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         std::max(pass_open_viewport_h_,
                  uint32_t(std::max(0.0f, dynamic_viewport_.y +
                                              std::abs(dynamic_viewport_.height))));
+    {
+      const float vx0 = std::max(0.0f, dynamic_viewport_.x);
+      const float vy0 = std::max(
+          0.0f, std::min(dynamic_viewport_.y,
+                         dynamic_viewport_.y + dynamic_viewport_.height));
+      const float fb_w =
+          current_framebuffer_ ? float(current_framebuffer_->host_extent.width)
+                               : 1e9f;
+      const float fb_h =
+          current_framebuffer_ ? float(current_framebuffer_->host_extent.height)
+                               : 1e9f;
+      const float vx1 =
+          std::min(fb_w, dynamic_viewport_.x + dynamic_viewport_.width);
+      const float vy1 = std::min(fb_h, vy0 + std::abs(dynamic_viewport_.height));
+      const float sx0 = float(std::max(0, dynamic_scissor_.offset.x));
+      const float sy0 = float(std::max(0, dynamic_scissor_.offset.y));
+      const float w = std::min(vx1, sx0 + dynamic_scissor_.extent.width) -
+                      std::max(vx0, sx0);
+      const float hgt = std::min(vy1, sy0 + dynamic_scissor_.extent.height) -
+                        std::max(vy0, sy0);
+      if (w > 0.0f && hgt > 0.0f) {
+        pass_open_area_ += uint64_t(w * hgt);
+        if (current_framebuffer_ && w * hgt >= 0.9f * fb_w * fb_h) {
+          ++pass_open_fullscreen_;
+        }
+      }
+    }
   }
   if (cvars::vulkan_mid_frame_submission_draws > 0 &&
       draws_since_submission_ >=
@@ -6693,6 +6726,8 @@ void VulkanCommandProcessor::CheckSubmissionCompletionAndDeviceLoss(
               bucket.ns += uint64_t((p1 - p0) * period_ns);
               bucket.passes++;
               bucket.draws += pass_ts_draws_[pair];
+              bucket.area += pass_ts_area_[pair];
+              bucket.fullscreen += pass_ts_fullscreen_[pair];
               bucket.max_scissor_w =
                   std::max(bucket.max_scissor_w, pass_ts_scissor_[pair] >> 16);
               bucket.max_scissor_h = std::max(bucket.max_scissor_h,
