@@ -419,6 +419,11 @@ void DirectoryScanner::ScanDirectory(const std::filesystem::path& dir) {
              xe::path_to_utf8(path));
       continue;
     }
+    // A default executable makes the directory a game, but a disc for both
+    // consoles holds a default.xbe and a default.xex, one game each.
+    if (found_xex && ext != ".xex" && ext != ".xbe") {
+      continue;
+    }
     {
       std::lock_guard<std::mutex> lock(mu_);
       progress_.files_probed++;
@@ -432,7 +437,7 @@ void DirectoryScanner::ScanDirectory(const std::filesystem::path& dir) {
           RecordGame(MakeFromXex(path, "xex", *m));
           found_xex = true;
           phase1_hits++;
-          break;  // default.xex terminates current directory.
+          continue;
         }
         XELOGD("DirectoryScanner:     -> xex miss");
       } else if (ext == ".xbe") {
@@ -442,7 +447,7 @@ void DirectoryScanner::ScanDirectory(const std::filesystem::path& dir) {
           RecordGame(MakeFromXbe(path, "xbe", *m));
           found_xex = true;
           phase1_hits++;
-          break;  // default.xbe terminates current directory.
+          continue;
         }
         XELOGD("DirectoryScanner:     -> xbe miss");
       } else if (ext == ".iso") {

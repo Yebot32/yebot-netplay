@@ -97,6 +97,9 @@ class Entry {
   virtual bool has_open_files() const { return false; }
   virtual void RetainFile() {}
   virtual void ReleaseFile() {}
+  // Empties the file in place. False when it has to be deleted and created
+  // again instead.
+  virtual bool Overwrite() { return false; }
 
   virtual bool SetAttributes(uint64_t attributes) { return false; }
   virtual bool SetCreateTimestamp(uint64_t timestamp) { return false; }

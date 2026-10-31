@@ -312,6 +312,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
     return descriptor_set_layouts_single_transient_[size_t(
         transient_descriptor_layout)];
   }
+  // Queues a framebuffer for destruction once the submission using it now has
+  // completed.
+  void DestroyFramebufferWhenIdle(VkFramebuffer framebuffer);
+
   // A frame must be open.
   VkDescriptorSet AllocateSingleTransientDescriptor(
       SingleTransientDescriptorLayout transient_descriptor_layout);

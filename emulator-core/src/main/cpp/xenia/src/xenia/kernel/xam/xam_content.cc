@@ -554,6 +554,9 @@ DECLARE_XAM_EXPORT1(XamContentOpenFile, kContent, kStub);
 
 dword_result_t XamContentFlush_entry(lpstring_t root_name,
                                      pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!root_name || !ValidRootName(root_name.value())) {
+    return X_ERROR_INVALID_NAME;
+  }
   X_RESULT result = X_ERROR_SUCCESS;
   if (overlapped_ptr) {
     kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
@@ -566,6 +569,9 @@ DECLARE_XAM_EXPORT1(XamContentFlush, kContent, kStub);
 
 dword_result_t XamContentClose_entry(lpstring_t root_name,
                                      pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!root_name || !ValidRootName(root_name.value())) {
+    return X_ERROR_INVALID_NAME;
+  }
   // Closes a previously opened root from XamContentCreate*.
   return CompleteRequest(
       overlapped_ptr,
