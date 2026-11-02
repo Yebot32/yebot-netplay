@@ -61,6 +61,13 @@ DEFINE_bool(
     "fewer than one is unmet on the first check, and that one genuinely "
     "lasts ~7 ms either way (see the GpuFrame wait_reg_mem stats).",
     "GPU");
+DEFINE_int32(
+    wait_reg_mem_backoff_max_us, 0,
+    "With wait_reg_mem_backoff: the longest sleep between the re-checks, in "
+    "microseconds (0: up to the guest-requested interval). A short one sees "
+    "the guest CPU's write sooner. Read per wait "
+    "(debug.xendroid.wrm_max_us on Android).",
+    "GPU");
 
 DEFINE_uint32(
     framerate_limit, 60,

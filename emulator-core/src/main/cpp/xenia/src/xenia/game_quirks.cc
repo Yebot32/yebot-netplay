@@ -72,6 +72,14 @@ static const Quirk kQuirks[] = {
     // (2026-10-08).
     {0x45410961, "texture_partial_reload", true,
      "only the layers and levels written since the last load reloaded"},
+    // Its command stream waits on memory once a frame (~7 ms) for its CPU to
+    // finish with the exported data. Re-checked within 200 us instead of
+    // after the 1 ms poll interval, the write is seen 0.69 -> 0.29 ms later
+    // on average, the wait 7.76 -> 7.23 ms (2026-10-08).
+    {0x45410961, "wait_reg_mem_backoff", true,
+     "unmet memory waits re-checked early"},
+    {0x45410961, "wait_reg_mem_backoff_max_us", int64_t(200),
+     "unmet memory waits re-checked within 200 us"},
     // Forza Horizon: both exact (the same image for every input); on the POCO
     // F7 (Adreno 825) together +3.0% fps, -3.7% GPU time (AB5, 2026-09-29).
     {0x4D5309C9, "spirv_texture_sign_branch", true,

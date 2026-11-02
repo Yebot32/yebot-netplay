@@ -19,6 +19,7 @@ DECLARE_path(dump_shaders);
 DECLARE_bool(guest_display_refresh_cap);
 
 DECLARE_bool(wait_reg_mem_backoff);
+DECLARE_int32(wait_reg_mem_backoff_max_us);
 
 DECLARE_uint32(framerate_limit);
 DECLARE_bool(framerate_limit_adaptive);

@@ -955,6 +955,15 @@ void CommandProcessor::BinTracePoll() {
       }
     }
   }
+  if (__system_property_get("debug.xendroid.wrm_max_us", value) > 0 &&
+      value[0] >= '0' && value[0] <= '9') {
+    const int32_t max_us = std::atoi(value);
+    if (cvars::wait_reg_mem_backoff_max_us != max_us) {
+      cvars::wait_reg_mem_backoff_max_us = max_us;
+      XELOGI("debug.xendroid.wrm_max_us: wait_reg_mem_backoff_max_us = {}",
+             max_us);
+    }
+  }
   if (__system_property_get("debug.xendroid.wait_reg_mem_backoff", value) > 0 &&
       (value[0] == '0' || value[0] == '1')) {
     const bool enabled = value[0] == '1';

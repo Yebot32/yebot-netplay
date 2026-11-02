@@ -1022,9 +1022,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
             // Most of these waits are met by the guest CPU long before the
             // guest's poll interval runs out - re-check early and often,
             // then settle on the guest interval for genuinely long waits
-            // (vblank counters).
+            // (vblank counters), or on wait_reg_mem_backoff_max_us.
             xe::threading::NanoSleep(backoff_us * 1000);
             backoff_us *= 2;
+            if (cvars::wait_reg_mem_backoff_max_us > 0) {
+              backoff_us = std::min(
+                  backoff_us, uint64_t(cvars::wait_reg_mem_backoff_max_us));
+            }
           } else {
 #if XE_PLATFORM_WIN32
             // Accurate timing: 90% sleep, 10% spin
