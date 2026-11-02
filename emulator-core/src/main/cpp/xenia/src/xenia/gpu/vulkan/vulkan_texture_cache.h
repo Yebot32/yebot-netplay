@@ -13,6 +13,7 @@
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -100,6 +101,9 @@ class VulkanTextureCache final : public TextureCache {
   // they can be promoted. Without this only textures that happen to be created
   // while a matching resolve is live ever get promoted.
   std::vector<TextureKey> resolve_dest_promotion_queue_;
+  // Keys whose promoted image the driver refused, created unpromoted.
+  std::unordered_set<TextureKey, TextureKey::Hasher>
+      resolve_dest_promotion_refused_;
   // Promoted textures by guest base address, so an in-pass resolve can find
   // the image it is about to fill. Several textures of different formats can
   // share a base. Entries are removed by ~VulkanTexture.
@@ -134,6 +138,19 @@ class VulkanTextureCache final : public TextureCache {
   VulkanTexture* FindResolveDestTexture(
       uint32_t base, uint32_t* base_delta_out = nullptr) const;
   bool ShouldPromoteToResolveDest(const TextureKey& key) const;
+  // The format of the image of a texture with the key, and with mutable
+  // formats the other one of its unsigned and signed versions.
+  void GetTextureImageFormats(const TextureKey& key,
+                              VkFormat formats_out[2]) const;
+  // The uint format a resolve stores into the image of a texture with the key
+  // through, VK_FORMAT_UNDEFINED if it can't be a resolve destination - the
+  // structural match of ShouldPromoteToResolveDest, then the host format.
+  VkFormat GetResolveDestUintFormat(const TextureKey& key,
+                                    VkFormat host_format) const;
+  // Whether a texture with the key created now would be promoted (the
+  // recreation queue takes only those - one that wouldn't be was recreated
+  // unpromoted at every load).
+  bool CanPromoteToResolveDest(const TextureKey& key) const;
   // Whether the texture can be served from its resolve instead of uploaded.
   bool TryServeFromResolveDest(const VulkanTexture& texture, bool load_base,
                                bool load_mips) const;

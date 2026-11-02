@@ -690,6 +690,9 @@ class TextureCache {
   // if it is still referenced by an unfinished submission.
   bool RecreateTextureForHostChange(const TextureKey& key,
                                     uint64_t completed_submission_index);
+  bool HasTexture(const TextureKey& key) const {
+    return textures_.find(key) != textures_.end();
+  }
 
   Texture* FindOrCreateTexture(TextureKey key);
 

@@ -664,10 +664,16 @@ void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
     auto pending = std::move(resolve_dest_promotion_queue_);
     resolve_dest_promotion_queue_.clear();
     for (const TextureKey& key : pending) {
-      if (!RecreateTextureForHostChange(key, completed)) {
-        // Still in flight - retry next submission.
-        resolve_dest_promotion_queue_.push_back(key);
+      if (RecreateTextureForHostChange(key, completed)) {
+        continue;
       }
+      if (!HasTexture(key)) {
+        // Gone (evicted) - a new texture with the key is promoted when it is
+        // created.
+        continue;
+      }
+      // Still in flight - retry next submission.
+      resolve_dest_promotion_queue_.push_back(key);
     }
   }
   TextureCache::BeginSubmission(new_submission_index);
@@ -1405,31 +1411,38 @@ uint32_t VulkanTextureCache::GetMaxHostTextureDepthOrArraySize(
   }
 }
 
-std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
-    TextureKey key) {
-  VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+void VulkanTextureCache::GetTextureImageFormats(const TextureKey& key,
+                                                VkFormat formats_out[2]) const {
+  formats_out[0] = VK_FORMAT_UNDEFINED;
+  formats_out[1] = VK_FORMAT_UNDEFINED;
   const HostFormatPair& host_format = GetHostFormatPair(key);
   if (host_format.format_signed.format == VK_FORMAT_UNDEFINED) {
     // Only the unsigned format may be available, if at all.
-    formats[0] = host_format.format_unsigned.format;
+    formats_out[0] = host_format.format_unsigned.format;
   } else if (host_format.format_unsigned.format == VK_FORMAT_UNDEFINED) {
     // Only the signed format may be available, if at all.
-    formats[0] = host_format.format_signed.format;
+    formats_out[0] = host_format.format_signed.format;
   } else {
     // Both unsigned and signed formats are available.
     if (IsSignedVersionSeparateForFormat(key)) {
-      formats[0] = key.signed_separate ? host_format.format_signed.format
-                                       : host_format.format_unsigned.format;
+      formats_out[0] = key.signed_separate ? host_format.format_signed.format
+                                           : host_format.format_unsigned.format;
     } else {
       // Same format for unsigned and signed, or compatible formats.
-      formats[0] = host_format.format_unsigned.format;
+      formats_out[0] = host_format.format_unsigned.format;
       if (host_format.format_signed.format !=
           host_format.format_unsigned.format) {
         assert_not_zero(host_format.unsigned_signed_compatible);
-        formats[1] = host_format.format_signed.format;
+        formats_out[1] = host_format.format_signed.format;
       }
     }
   }
+}
+
+std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
+    TextureKey key) {
+  VkFormat formats[2];
+  GetTextureImageFormats(key, formats);
   if (formats[0] == VK_FORMAT_UNDEFINED) {
     // A format the emulator has no host format for: the texture is never
     // created and samples as black. Reported once per format.
@@ -1455,51 +1468,12 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
   // Resolve-to-texture: the resolve writes the texel already packed, so the
   // image needs a same-size uint alias it can be stored through. Only the
   // formats an in-pass resolve can produce are supported.
-  VkFormat resolve_dest_uint_format = VK_FORMAT_UNDEFINED;
-  if (ShouldPromoteToResolveDest(key)) {
-    // The resolve stores texels packed in the guest format, which the image
-    // takes as they are only where its upload is a plain copy: k_11_11_10 and
-    // the float fallbacks of the 16-bit normalized formats share these host
-    // formats but convert as they load. Depth is the exception - its direct
-    // resolve writes the converted value. (Gears of War 3's k_16_16_16_16
-    // resolves would need 64bpp variants of the direct resolve storing into
-    // the texture; promoted without them, those textures would only lose
-    // their framebuffer compression.)
-    const LoadShaderIndex load_shader = GetLoadShaderForKey(key);
-    switch (formats[0]) {
-      case VK_FORMAT_R32_SFLOAT:
-        if (load_shader == kLoadShaderIndexDepthUnorm ||
-            load_shader == kLoadShaderIndexDepthFloat) {
-          resolve_dest_uint_format = VK_FORMAT_R32_UINT;
-          break;
-        }
-        [[fallthrough]];
-      case VK_FORMAT_R8G8B8A8_UNORM:
-      case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-      // Gears of War 3 resolves its 640x360 k_16_16_FLOAT buffers each frame.
-      case VK_FORMAT_R16G16_UNORM:
-      case VK_FORMAT_R16G16_SNORM:
-      case VK_FORMAT_R16G16_SFLOAT:
-        if (load_shader == kLoadShaderIndex32bpb) {
-          resolve_dest_uint_format = VK_FORMAT_R32_UINT;
-        }
-        break;
-      case VK_FORMAT_R32G32_SFLOAT:
-      case VK_FORMAT_R16G16B16A16_SFLOAT:
-        if (load_shader == kLoadShaderIndex64bpb) {
-          resolve_dest_uint_format = VK_FORMAT_R32G32_UINT;
-        }
-        break;
-      // The other exception: unsigned k_10_11_11, whose expansion to 16 bits
-      // per component a variant of the full color direct resolve stores.
-      case VK_FORMAT_R16G16B16A16_UNORM:
-        if (load_shader == kLoadShaderIndexR11G11B10ToRGBA16) {
-          resolve_dest_uint_format = VK_FORMAT_R32G32_UINT;
-        }
-        break;
-      default:
-        break;
-    }
+  VkFormat resolve_dest_uint_format =
+      GetResolveDestUintFormat(key, formats[0]);
+  if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED &&
+      resolve_dest_promotion_refused_.count(key)) {
+    // The driver refused the promoted image of this key before.
+    resolve_dest_uint_format = VK_FORMAT_UNDEFINED;
   }
   // Texture loads straight into the image store through the same kind of uint
   // alias (one view serves both): R32_UINT for the 32-bit host formats,
@@ -1630,6 +1604,10 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
           "VulkanTextureCache: resolve-to-texture promotion or storage alias "
           "unsupported for format {}, falling back to a plain texture",
           uint32_t(image_create_info.format));
+      if (resolve_dest_uint_format != VK_FORMAT_UNDEFINED) {
+        // Not queued for recreation again.
+        resolve_dest_promotion_refused_.insert(key);
+      }
       resolve_dest_uint_format = VK_FORMAT_UNDEFINED;
       storage_uint_format = VK_FORMAT_UNDEFINED;
       load_to_image_storage = false;
@@ -2155,6 +2133,66 @@ bool VulkanTextureCache::ShouldPromoteToResolveDest(
   return false;
 }
 
+VkFormat VulkanTextureCache::GetResolveDestUintFormat(
+    const TextureKey& key, VkFormat host_format) const {
+  if (!ShouldPromoteToResolveDest(key)) {
+    return VK_FORMAT_UNDEFINED;
+  }
+  VkFormat resolve_dest_uint_format = VK_FORMAT_UNDEFINED;
+  // The resolve stores texels packed in the guest format, which the image
+  // takes as they are only where its upload is a plain copy: k_11_11_10 and
+  // the float fallbacks of the 16-bit normalized formats share these host
+  // formats but convert as they load. Depth is the exception - its direct
+  // resolve writes the converted value. (Gears of War 3's k_16_16_16_16
+  // resolves would need 64bpp variants of the direct resolve storing into
+  // the texture; promoted without them, those textures would only lose
+  // their framebuffer compression.)
+  const LoadShaderIndex load_shader = GetLoadShaderForKey(key);
+  switch (host_format) {
+    case VK_FORMAT_R32_SFLOAT:
+      if (load_shader == kLoadShaderIndexDepthUnorm ||
+          load_shader == kLoadShaderIndexDepthFloat) {
+        resolve_dest_uint_format = VK_FORMAT_R32_UINT;
+        break;
+      }
+      [[fallthrough]];
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    // Gears of War 3 resolves its 640x360 k_16_16_FLOAT buffers each frame.
+    case VK_FORMAT_R16G16_UNORM:
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_SFLOAT:
+      if (load_shader == kLoadShaderIndex32bpb) {
+        resolve_dest_uint_format = VK_FORMAT_R32_UINT;
+      }
+      break;
+    case VK_FORMAT_R32G32_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+      if (load_shader == kLoadShaderIndex64bpb) {
+        resolve_dest_uint_format = VK_FORMAT_R32G32_UINT;
+      }
+      break;
+    // The other exception: unsigned k_10_11_11, whose expansion to 16 bits
+    // per component a variant of the full color direct resolve stores.
+    case VK_FORMAT_R16G16B16A16_UNORM:
+      if (load_shader == kLoadShaderIndexR11G11B10ToRGBA16) {
+        resolve_dest_uint_format = VK_FORMAT_R32G32_UINT;
+      }
+      break;
+    default:
+      break;
+  }
+  return resolve_dest_uint_format;
+}
+
+bool VulkanTextureCache::CanPromoteToResolveDest(const TextureKey& key) const {
+  VkFormat formats[2];
+  GetTextureImageFormats(key, formats);
+  return formats[0] != VK_FORMAT_UNDEFINED &&
+         GetResolveDestUintFormat(key, formats[0]) != VK_FORMAT_UNDEFINED &&
+         !resolve_dest_promotion_refused_.count(key);
+}
+
 TextureCache::LoadShaderIndex VulkanTextureCache::GetLoadShaderForKey(
     const TextureKey& key) const {
   const HostFormatPair& host_format_pair = GetHostFormatPair(key);
@@ -2545,7 +2583,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryUpload(
   if (cvars::vulkan_resolve_to_texture_promote &&
       vulkan_texture.resolve_dest_storage_view() == VK_NULL_HANDLE &&
       resolve_dest_promotion_queue_.size() < 64 &&
-      ShouldPromoteToResolveDest(texture.key()) &&
+      CanPromoteToResolveDest(texture.key()) &&
       std::find(resolve_dest_promotion_queue_.cbegin(),
                 resolve_dest_promotion_queue_.cend(),
                 texture.key()) == resolve_dest_promotion_queue_.cend()) {
