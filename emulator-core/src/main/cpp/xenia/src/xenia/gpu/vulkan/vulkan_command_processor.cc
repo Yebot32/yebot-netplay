@@ -127,6 +127,16 @@ DECLARE_bool(spirv_texture_fetch_constants_decoded);
 DECLARE_bool(spirv_texture_exp_adjust_specialization);
 
 DEFINE_bool(
+    vulkan_texture_descriptor_set_frame_reuse, true,
+    "With the content-hash gate of vulkan_cache_texture_descriptors, also "
+    "reuse a texture descriptor set written earlier in the frame with the "
+    "same images and samplers, rather than only the one the previous draw "
+    "had: the sets live until the frame completes, and draws alternate "
+    "between a few texture combinations. Results are identical. Read per draw "
+    "(debug.xendroid.texset_reuse on Android).",
+    "Vulkan");
+
+DEFINE_bool(
     vulkan_texture_sign_classes, true,
     "With spirv_texture_sign_specialization: give each draw's pipeline the "
     "signs of the textures its pixel shader fetches (otherwise the shaders "
@@ -594,6 +604,9 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
                             cvars::texture_partial_reload);
   PollDebugPropertyOverride("debug.xendroid.lookup_memo", "texture_lookup_memo",
                             cvars::texture_lookup_memo);
+  PollDebugPropertyOverride("debug.xendroid.texset_reuse",
+                            "vulkan_texture_descriptor_set_frame_reuse",
+                            cvars::vulkan_texture_descriptor_set_frame_reuse);
   PollDebugPropertyOverride("debug.xendroid.texload_levels",
                             "vulkan_texture_load_levels_to_image",
                             cvars::vulkan_texture_load_levels_to_image);
@@ -10396,6 +10409,8 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
   // cache for them is no longer valid.
   current_texture_descriptor_set_hash_valid_vertex_ = false;
   current_texture_descriptor_set_hash_valid_pixel_ = false;
+  texture_set_frame_reuse_.clear();
+  texture_set_frame_reuse_frame_ = UINT64_MAX;
 
   constants_transient_descriptors_free_.clear();
   constants_transient_descriptors_used_.clear();
@@ -11806,6 +11821,50 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         sampler_count_pixel);
     return false;
   }
+  // vulkan_texture_descriptor_set_frame_reuse: a set written earlier in the
+  // frame with the same content (the hash covers the layout, images and
+  // samplers) is bound instead of writing a new one. Sets written in the frame
+  // go back to the free list only once it completes; the map is dropped at
+  // every frame and pool reset.
+  if (cvars::vulkan_cache_texture_descriptors &&
+      !cvars::vulkan_texture_descriptor_reuse_edge &&
+      cvars::vulkan_texture_descriptor_set_frame_reuse &&
+      (write_vertex_textures || write_pixel_textures)) {
+    if (texture_set_frame_reuse_frame_ != frame_current_) {
+      texture_set_frame_reuse_.clear();
+      texture_set_frame_reuse_frame_ = frame_current_;
+    }
+    if (write_vertex_textures) {
+      auto it = texture_set_frame_reuse_.find(texture_set_hash_vertex);
+      if (it != texture_set_frame_reuse_.end()) {
+        write_vertex_textures = false;
+        current_graphics_descriptor_sets_
+            [SpirvShaderTranslator::kDescriptorSetTexturesVertex] = it->second;
+        current_graphics_descriptor_set_values_up_to_date_ |=
+            UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
+        current_textures_vertex_shader_ = vertex_shader;
+        current_written_samplers_vertex_ = current_samplers_vertex_;
+        current_texture_descriptor_set_hash_vertex_ = texture_set_hash_vertex;
+        current_texture_descriptor_set_hash_valid_vertex_ = true;
+        ++vk_frame_sync_stats_.texture_set_reuses;
+      }
+    }
+    if (write_pixel_textures) {
+      auto it = texture_set_frame_reuse_.find(texture_set_hash_pixel);
+      if (it != texture_set_frame_reuse_.end()) {
+        write_pixel_textures = false;
+        current_graphics_descriptor_sets_
+            [SpirvShaderTranslator::kDescriptorSetTexturesPixel] = it->second;
+        current_graphics_descriptor_set_values_up_to_date_ |=
+            UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
+        current_textures_pixel_shader_ = pixel_shader;
+        current_written_samplers_pixel_ = current_samplers_pixel_;
+        current_texture_descriptor_set_hash_pixel_ = texture_set_hash_pixel;
+        current_texture_descriptor_set_hash_valid_pixel_ = true;
+        ++vk_frame_sync_stats_.texture_set_reuses;
+      }
+    }
+  }
   // When a needed texture set is skipped (not re-written this draw), the cached
   // VkDescriptorSet must still be a real, allocated set - never the frame-open
   // VK_NULL_HANDLE memset value - or the bind loop below would bind a null
@@ -12041,6 +12100,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     if (!texture_descriptor_set_write_count) {
       return false;
     }
+    if (texture_set_frame_reuse_frame_ == frame_current_ &&
+        cvars::vulkan_texture_descriptor_set_frame_reuse &&
+        !cvars::vulkan_texture_descriptor_reuse_edge) {
+      texture_set_frame_reuse_.emplace(texture_set_hash_vertex,
+                                       write_textures[0].dstSet);
+    }
     write_descriptor_set_count += texture_descriptor_set_write_count;
     write_descriptor_set_bits |=
         UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
@@ -12078,6 +12143,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         write_textures);
     if (!texture_descriptor_set_write_count) {
       return false;
+    }
+    if (texture_set_frame_reuse_frame_ == frame_current_ &&
+        cvars::vulkan_texture_descriptor_set_frame_reuse &&
+        !cvars::vulkan_texture_descriptor_reuse_edge) {
+      texture_set_frame_reuse_.emplace(texture_set_hash_pixel,
+                                       write_textures[0].dstSet);
     }
     write_descriptor_set_count += texture_descriptor_set_write_count;
     write_descriptor_set_bits |=

@@ -905,6 +905,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint64_t rb_uma_unread = 0;
     // Bytes the direct readbacks copied into guest RAM.
     uint64_t rb_uma_bytes = 0;
+    // Texture descriptor sets reused from earlier in the frame
+    // (vulkan_texture_descriptor_set_frame_reuse).
+    uint64_t texture_set_reuses = 0;
     // Command processor thread time spent replaying the deferred command
     // buffer into Vulkan and submitting it (part of the draw/swap time).
     uint64_t replay_ns = 0;
@@ -1787,6 +1790,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // readback_resolve=uma: last submission that resolved each destination key,
   // so the direct host read only happens once that submission has retired.
   std::unordered_map<uint64_t, uint64_t> uma_readback_last_write_;
+  // vulkan_texture_descriptor_set_frame_reuse: the texture descriptor sets
+  // written in the frame by their content hash, and the frame.
+  std::unordered_map<uint64_t, VkDescriptorSet> texture_set_frame_reuse_;
+  uint64_t texture_set_frame_reuse_frame_ = UINT64_MAX;
   // Guest frame of each destination's last uma readback, for the bounded
   // fence collection staleness cap.
   std::unordered_map<uint64_t, uint64_t> uma_readback_last_read_frame_;
