@@ -3704,6 +3704,19 @@ void VulkanCommandProcessor::DumpFrameDraw(
       }
     }
   }
+  // The bool constants (VS 0...127 then PS 128...255) and the loop
+  // constants the shaders branch on.
+  line += " bool";
+  for (uint32_t i = 0; i < 8; ++i) {
+    line += fmt::format(
+        "{}{:08X}", i ? "," : " ",
+        regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 + i]);
+  }
+  line += " loop";
+  for (uint32_t i = 0; i < 32; ++i) {
+    line += fmt::format("{}{:X}", i ? "," : " ",
+                        regs.values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + i]);
+  }
   // Clipping and the viewport transform.
   line += fmt::format(
       " clip {:08X} vte {:08X} vport {:g},{:g},{:g},{:g},{:g},{:g}",
