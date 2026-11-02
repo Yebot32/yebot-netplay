@@ -707,7 +707,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // delay than it would reduce - such as when there are unfinished graphics
   // pipeline creation requests.
   bool CanEndSubmissionImmediately() const;
-  bool AwaitAllQueueOperationsCompletion() {
+  // Always inlined: VkAwaitSites attributes its waits to the callers.
+  XE_FORCEINLINE bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionCompletionAndDeviceLoss(GetCurrentSubmission());
     const bool drained = !submission_open_ &&
                          GetCompletedSubmission() + 1u >= GetCurrentSubmission();
@@ -899,6 +900,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint64_t primary_buffer_splits = 0;
     uint64_t rb_uma_direct = 0;
     uint64_t rb_uma_first_use = 0;
+    // Resolves not copied: the CPU had not read their range
+    // (readback_resolve_uma_read_watch).
+    uint64_t rb_uma_unread = 0;
+    // Bytes the direct readbacks copied into guest RAM.
+    uint64_t rb_uma_bytes = 0;
     // Command processor thread time spent replaying the deferred command
     // buffer into Vulkan and submitting it (part of the draw/swap time).
     uint64_t replay_ns = 0;

@@ -96,6 +96,13 @@ DEFINE_bool(
     "the image afterwards. Results are identical. Read per texture load "
     "(debug.xendroid.texload_levels on Android).",
     "Vulkan");
+DEFINE_int32(
+    vulkan_skip_gpu_written_texture_loads, 0,
+    "Diagnostics - measures what serving texture loads from resolves could "
+    "save: 1 - skip every load of a cube map, 2 - skip the loads of textures "
+    "whose loaded memory the GPU wrote. The images keep stale or undefined "
+    "texels. Read per load (debug.xendroid.skip_texload on Android).",
+    "Vulkan");
 
 DEFINE_bool(
     vulkan_fast_sampler_filterability, true,
@@ -2205,6 +2212,21 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
   if (cvars::vulkan_resolve_dest_diag && load_base) {
     LogResolveDestMiss(vulkan_texture, load_mips);
+  }
+  if (cvars::vulkan_skip_gpu_written_texture_loads > 0) {
+    const TextureKey& key = vulkan_texture.key();
+    if (cvars::vulkan_skip_gpu_written_texture_loads == 1
+            ? key.dimension == xenos::DataDimension::kCube
+            : load_base ? shared_memory().IsRangeGpuWritten(
+                              key.base_page << 12,
+                              std::max(vulkan_texture.GetGuestBaseSize(),
+                                       UINT32_C(1)))
+                        : shared_memory().IsRangeGpuWritten(
+                              key.mip_page << 12,
+                              std::max(vulkan_texture.GetGuestMipsSize(),
+                                       UINT32_C(1)))) {
+      return true;
+    }
   }
   if (!LoadTextureDataFromResidentMemoryUpload(vulkan_texture, load_base,
                                                load_mips)) {

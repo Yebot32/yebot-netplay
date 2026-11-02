@@ -65,7 +65,15 @@ void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {
     return;
   }
   memexport_await_pending_ = false;
-  memexport_await_reason_ = "coherency";
+  // With the range for the memexport log (debug.xendroid.memexport_log).
+  static thread_local char coherency_reason[] = "coherency 00000000+00000000";
+  for (uint32_t i = 0; i < 8; ++i) {
+    coherency_reason[10 + i] =
+        "0123456789ABCDEF"[(base_bytes >> (28 - 4 * i)) & 0xF];
+    coherency_reason[19 + i] =
+        "0123456789ABCDEF"[(size_bytes >> (28 - 4 * i)) & 0xF];
+  }
+  memexport_await_reason_ = coherency_reason;
   AwaitAllQueueOperationsCompletion();
   memexport_await_reason_ = nullptr;
 }

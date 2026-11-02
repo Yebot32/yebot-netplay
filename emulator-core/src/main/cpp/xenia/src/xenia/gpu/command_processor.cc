@@ -162,6 +162,27 @@ DEFINE_string(
     "GPU");
 
 DEFINE_bool(
+    readback_resolve_uma_read_watch, false,
+    "With readback_resolve = uma: after the first resolve into a range, copy "
+    "its later resolves into guest RAM only once the CPU has read the range "
+    "(the read watch of the fast mode), instead of after every resolve. The "
+    "first read of a range then sees the copy of an earlier resolve. A CPU "
+    "write into part of a page holding resolve output that was not copied "
+    "puts older data back in the rest of the page. Read per resolve "
+    "(debug.xendroid.uma_read_watch on Android).",
+    "GPU");
+
+DEFINE_int32(
+    readback_resolve_uma_read_watch_min_kb, 256,
+    "With readback_resolve_uma_read_watch: resolves writing less than this "
+    "many KB are still copied after every resolve, read or not - few bytes, "
+    "and what the game reads back may be in one without the read watch "
+    "noticing (Need for Speed: Most Wanted's exposure went white from its "
+    "first frames without them). Read per resolve "
+    "(debug.xendroid.uma_watch_min_kb on Android).",
+    "GPU");
+
+DEFINE_bool(
     memexport_enable, false,
     "Make memory export output visible to the CPU by routing the draws that "
     "write it to a buffer aliasing guest RAM. Needed by games that read "

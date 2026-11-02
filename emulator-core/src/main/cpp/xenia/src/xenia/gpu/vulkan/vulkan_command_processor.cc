@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <dlfcn.h>
+
 #include <set>
 
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
@@ -91,6 +93,9 @@ DECLARE_bool(spirv_specialize_no_alpha);
 DECLARE_bool(vulkan_texture_load_coalesced);
 DECLARE_bool(vulkan_texture_load_to_image);
 DECLARE_bool(vulkan_texture_load_levels_to_image);
+DECLARE_int32(vulkan_skip_gpu_written_texture_loads);
+DECLARE_bool(readback_resolve_uma_read_watch);
+DECLARE_int32(readback_resolve_uma_read_watch_min_kb);
 DECLARE_bool(texture_partial_reload);
 DECLARE_bool(texture_integer_num_format);
 DECLARE_bool(vulkan_direct_host_resolve);
@@ -462,6 +467,19 @@ DEFINE_bool(
     "1.3 or VK_KHR_dynamic_rendering extension support.",
     "Vulkan");
 
+namespace {
+// Where the awaits for the GPU that blocked came from, with
+// log_gpu_frame_time_breakdown: the return addresses into the callers of
+// CheckSubmissionCompletionAndDeviceLoss (offsets in the library for
+// addr2line), with their count and time, reported as VkAwaitSites.
+struct AwaitSite {
+  uintptr_t address;
+  uint64_t count;
+  uint64_t ns;
+};
+AwaitSite await_sites[8];
+}  // namespace
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -567,6 +585,9 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
   PollDebugPropertyOverride("debug.xendroid.texload_to_image",
                             "vulkan_texture_load_to_image",
                             cvars::vulkan_texture_load_to_image);
+  PollDebugPropertyOverride("debug.xendroid.uma_read_watch",
+                            "readback_resolve_uma_read_watch",
+                            cvars::readback_resolve_uma_read_watch);
   PollDebugPropertyOverride("debug.xendroid.partial_reload",
                             "texture_partial_reload",
                             cvars::texture_partial_reload);
@@ -669,6 +690,35 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
       cvars::vulkan_texture_load_coalesced = mode >= 1;
       cvars::vulkan_texture_load_to_image = mode >= 2;
       XELOGI("debug.xendroid.texload_mode: texload_mode = {}", mode);
+    }
+  }
+  // Diagnostics: skip the loads of cube maps (1) or GPU-written textures (2).
+  char skip_texload_value[PROP_VALUE_MAX] = {};
+  if (__system_property_get("debug.xendroid.skip_texload",
+                            skip_texload_value) > 0 &&
+      skip_texload_value[0] >= '0' && skip_texload_value[0] <= '2' &&
+      !skip_texload_value[1]) {
+    const int32_t mode = skip_texload_value[0] - '0';
+    if (cvars::vulkan_skip_gpu_written_texture_loads != mode) {
+      cvars::vulkan_skip_gpu_written_texture_loads = mode;
+      XELOGI(
+          "debug.xendroid.skip_texload: "
+          "vulkan_skip_gpu_written_texture_loads = {}",
+          mode);
+    }
+  }
+  // Resolves below this size copied whether read or not, read per resolve.
+  char uma_watch_min_value[PROP_VALUE_MAX] = {};
+  if (__system_property_get("debug.xendroid.uma_watch_min_kb",
+                            uma_watch_min_value) > 0 &&
+      uma_watch_min_value[0] >= '0' && uma_watch_min_value[0] <= '9') {
+    const int32_t min_kb = std::atoi(uma_watch_min_value);
+    if (cvars::readback_resolve_uma_read_watch_min_kb != min_kb) {
+      cvars::readback_resolve_uma_read_watch_min_kb = min_kb;
+      XELOGI(
+          "debug.xendroid.uma_watch_min_kb: "
+          "readback_resolve_uma_read_watch_min_kb = {}",
+          min_kb);
     }
   }
   // The shading rate of the multisampled scene draws, read per draw.
@@ -4157,6 +4207,12 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         XELOGI("VkBarrierSites (who:line:per frame): {}", top);
         cp_barrier_sites_.clear();
       }
+      // Resolve readback of the uma path (Xendroid+): how many resolves the CPU
+      // read straight from shared memory, first uses, ones never read.
+      XELOGI("VkReadback: per frame: uma readbacks={:.1f} first={:.1f} "
+             "unread={:.1f} kb={:.0f}",
+             s.rb_uma_direct / f, s.rb_uma_first_use / f, s.rb_uma_unread / f,
+             s.rb_uma_bytes / f / 1024.0);
       // What the replays sent to the driver per frame, and how much of the
       // state setting repeated what the command buffer already had.
       if (cvars::vulkan_replay_stats) {
@@ -4367,6 +4423,24 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 : 0.0,
             kv.second.max_ns / 1e6, kv.second.copy_ns / f / 1e6,
             kv.second.clear_ns / f / 1e6);
+      }
+      if (await_sites[0].address) {
+        Dl_info await_module;
+        const uintptr_t module_base =
+            dladdr(&await_sites, &await_module)
+                ? reinterpret_cast<uintptr_t>(await_module.dli_fbase)
+                : 0;
+        std::string sites;
+        for (AwaitSite& site : await_sites) {
+          if (!site.address) {
+            break;
+          }
+          sites += fmt::format(" +{:X} {:.2f}/fr {:.1f}ms/fr;",
+                               site.address - module_base, site.count / f,
+                               site.ns / f / 1e6);
+          site = AwaitSite();
+        }
+        XELOGI("VkAwaitSites:{}", sites);
       }
       resolve_bucket_stats_.clear();
       s = VkFrameSyncStats();
@@ -7451,12 +7525,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pending_memexport_snapshot_used_ = uint32_t(snapshot_offset);
       if (memexport_log_left_) {
         --memexport_log_left_;
+        std::string export_ranges;
+        for (const draw_util::MemExportRange& range : memexport_ranges_) {
+          export_ranges += fmt::format(" {:08X}+{:X}",
+                                       range.base_address_dwords << 2,
+                                       range.size_bytes);
+        }
         XELOGI(
             "MemexportLog: export at draw {} of frame {}, submission {}, {} "
-            "bytes, {} pending",
+            "bytes, {} pending:{}",
             frame_draw_index_ - 1, frame_current_, GetCurrentSubmission(),
             uint32_t(snapshot_offset - snapshot_start),
-            pending_memexport_readbacks_.size());
+            pending_memexport_readbacks_.size(), export_ranges);
       }
       // A fence or coherency request the guest observes awaits the GPU first
       // (command_processor_memexport.inc), which reads these back.
@@ -8255,6 +8335,23 @@ bool VulkanCommandProcessor::IssueCopy() {
       const uint64_t resolve_key =
           MakeReadbackResolveKey(written_address, written_length);
       auto& last_write = uma_readback_last_write_[resolve_key];
+      // readback_resolve_uma_read_watch: a range seeded before is copied
+      // again only once the CPU has read it.
+      if (cvars::readback_resolve_uma_read_watch &&
+          written_length >=
+              uint32_t(std::max(
+                  cvars::readback_resolve_uma_read_watch_min_kb, 0)) *
+                  1024) {
+        const bool first_watched = TryArmResolveReadWatch(
+            resolve_key, written_address, written_length);
+        if (!first_watched && last_write &&
+            !AnyResolvePageRead(written_address, written_length)) {
+          ++vk_frame_sync_stats_.rb_uma_unread;
+          last_write = resolve_submission;
+          PopDebugMarker();
+          return true;
+        }
+      }
       bool do_read;
       if (!last_write) {
         ++vk_frame_sync_stats_.rb_uma_first_use;
@@ -8304,6 +8401,7 @@ bool VulkanCommandProcessor::IssueCopy() {
         }
         InsertDebugMarker("Resolve Readback (uma): 0x%08X, %u bytes",
                           written_address, written_length);
+        vk_frame_sync_stats_.rb_uma_bytes += written_length;
         shared_memory_->ReadHostMapped(
             written_address, written_length,
             memory_->TranslatePhysical(written_address));
@@ -9238,6 +9336,7 @@ void VulkanCommandProcessor::LogRecentSubmissions(const char* context) {
 
 void VulkanCommandProcessor::CheckSubmissionCompletionAndDeviceLoss(
     uint64_t await_submission) {
+  void* const await_caller = __builtin_return_address(0);
   // Only report once, no need to retry a wait that won't succeed anyway.
   if (device_lost_) {
     return;
@@ -9272,6 +9371,16 @@ void VulkanCommandProcessor::CheckSubmissionCompletionAndDeviceLoss(
       if (await_submission > completed_before) {
         // The await actually blocked; record how far behind the GPU was.
         vk_frame_sync_stats_.blocking_awaits++;
+        const uintptr_t await_address =
+            reinterpret_cast<uintptr_t>(await_caller);
+        for (AwaitSite& site : await_sites) {
+          if (!site.address || site.address == await_address) {
+            site.address = await_address;
+            ++site.count;
+            site.ns += t1 - t0;
+            break;
+          }
+        }
         vk_frame_sync_stats_.await_delta +=
             GetCurrentSubmission() - await_submission;
       }
