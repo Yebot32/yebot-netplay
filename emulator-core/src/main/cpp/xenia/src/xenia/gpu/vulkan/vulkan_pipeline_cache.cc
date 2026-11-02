@@ -79,6 +79,18 @@ DEFINE_int32(
     "0 to disable multithreaded pipeline creation.",
     "Vulkan");
 DEFINE_bool(
+    vulkan_depth_clamp_without_depth, false,
+    "Clamp the depth of draws that neither test nor write depth or stencil "
+    "instead of clipping them to the near and far planes. The Xenos draws "
+    "them with clipping enabled even entirely outside the depth range: Rise "
+    "of the Tomb Raider builds its color grading volume from full-screen "
+    "rectangles at a normalized Z of -9, clipped away on the host (the "
+    "volume and the screen came out in false colors). Such draws are "
+    "otherwise the same, so on is safe in itself; off for the untested "
+    "titles. debug.xendroid.depth_clamp_no_depth switches it at run time on "
+    "Android (new pipelines are created on the fly).",
+    "Vulkan");
+DEFINE_bool(
     vulkan_async_skip_draws, true,
     "With asynchronous shader compilation: don't wait for pipeline creation "
     "at the submission boundary - draws whose pipeline hasn't finished "
@@ -1759,7 +1771,10 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
 
   description_out.depth_clamp_enable =
       device_properties.depthClamp &&
-      regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
+      (regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable ||
+       (cvars::vulkan_depth_clamp_without_depth &&
+        !normalized_depth_control.z_enable &&
+        !normalized_depth_control.stencil_enable));
 
   // TODO(Triang3l): Tessellation.
   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);

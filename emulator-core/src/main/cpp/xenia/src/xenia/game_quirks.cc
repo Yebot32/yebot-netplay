@@ -351,6 +351,25 @@ static const Quirk kQuirks[] = {
     // times (POCO F7, HyperOS, 2026-10-07).
     {0x4541098E, "vulkan_allow_present_mode_mailbox", false,
      "presentation stalls with the mailbox mode after minutes"},
+    // Rise of the Tomb Raider resolves its HDR scene (k_16_16_16_16 in the
+    // EDRAM) to a signed k_16_16_16_16 with exponent bias -5 and samples it
+    // signed with exponent adjustment +5: packed as an unsigned fraction, the
+    // menu's room was missing, a flat blue screen. Its half-resolution
+    // ambient occlusion reads texel offsets (0...255) from a k_8_8 texture
+    // with the integer num_format. It draws its color grading volume
+    // (32x32x32) slice by slice with full-screen rectangles at a normalized Z
+    // of -9 (no depth test or writes, clipping on), which the Xenos draws and
+    // the host clipped away: the 32 resolves copied what the EDRAM held and
+    // the screen came out in green and purple. All three: the menu's lamp-lit
+    // room (frame dumps and runtime A/B, POCO F7, 2026-10-13).
+    {0x53510823, "accurate_resolve_number_formats", true,
+     "resolve shaders that pack signed destinations"},
+    {0x53510823, "resolve_copy_dest_number_packing", true,
+     "resolves honour their signed destinations"},
+    {0x53510823, "texture_integer_num_format", true,
+     "integer texture fetches return integers"},
+    {0x53510823, "vulkan_depth_clamp_without_depth", true,
+     "draws without depth outside the depth range are drawn"},
 };
 
 // Same path/priority as a per-game config file.

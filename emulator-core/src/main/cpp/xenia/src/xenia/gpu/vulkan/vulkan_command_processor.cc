@@ -101,6 +101,7 @@ DECLARE_bool(texture_partial_reload);
 DECLARE_bool(texture_integer_num_format);
 DECLARE_bool(vulkan_direct_host_resolve);
 DECLARE_bool(vulkan_async_skip_draws);
+DECLARE_bool(vulkan_depth_clamp_without_depth);
 DECLARE_bool(merge_tiling_bands);
 DECLARE_bool(merge_tiling_bands_call_sites);
 DECLARE_bool(merge_tiling_bands_log);
@@ -665,6 +666,10 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
                             "alpha_to_coverage_as_alpha_test",
                             cvars::alpha_to_coverage_as_alpha_test);
   // Read per draw, like msaa_4x_as_2x.
+  // Read per draw (pipeline descriptions): new pipelines on the fly.
+  PollDebugPropertyOverride("debug.xendroid.depth_clamp_no_depth",
+                            "vulkan_depth_clamp_without_depth",
+                            cvars::vulkan_depth_clamp_without_depth);
   PollDebugPropertyOverride("debug.xendroid.depth_4x_as_1x",
                             "vulkan_depth_4x_as_1x",
                             cvars::vulkan_depth_4x_as_1x);
