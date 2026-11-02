@@ -166,7 +166,7 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
-    vulkan_direct_host_resolve_to_texture, false,
+    vulkan_direct_host_resolve_to_texture, true,
     "Have the direct host (compute) resolves also store their result straight "
     "into the promoted destination texture, like vulkan_resolve_to_texture "
     "does for in-pass resolves, so vulkan_resolve_to_texture_serve can skip "
@@ -176,8 +176,10 @@ DEFINE_bool(
     "fast color and depth (always 4 pixels per thread) and full color to a "
     "32bpp format. Also records the destinations of these resolves for "
     "texture promotion. Forza Horizon on an Adreno 825: texture uploads 3.0 -> "
-    "0.75 ms per frame, GPU time -1.4 ms.",
+    "0.75 ms per frame, GPU time -1.4 ms. On for every title since 2026-10-07 "
+    "(exact; Forza Horizon, Forza Horizon 2 and Crysis 3 had it as a quirk).",
     "Vulkan");
+UPDATE_from_bool(vulkan_direct_host_resolve_to_texture, 2026, 10, 7, 12, false);
 
 DEFINE_bool(
     vulkan_direct_host_resolve_4px, true,
