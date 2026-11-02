@@ -134,6 +134,21 @@ bool LoadToImageKeepsCompression(
   }
   return std::atoi(name) >= 750;
 }
+
+// vulkan_resolve_dest_diag: what last made the image of a promoted texture
+// invalid (VulkanTexture::store_invalidation).
+enum StoreInvalidation : uint32_t {
+  kStoreInvalidationNone,
+  kStoreInvalidationCpuWrite,
+  // A resolve not storing into a texture, or memexport.
+  kStoreInvalidationGpuWrite,
+  // A resolve storing into another texture over the memory.
+  kStoreInvalidationOtherTextureStore,
+  // A CPU write between the request of the memory and the upload.
+  kStoreInvalidationStaleUpload,
+  // The whole guest memory invalidated.
+  kStoreInvalidationWholesale,
+};
 }  // namespace
 
 // Generated with `xb buildshaders`.
@@ -1876,6 +1891,7 @@ void VulkanTextureCache::InvalidateResolveStoreTracking() {
   for (const auto& pair : resolve_dest_textures_) {
     if (pair.second) {
       pair.second->SetStoreTrackedValid(false);
+      pair.second->SetStoreInvalidation(kStoreInvalidationWholesale);
     }
   }
 }
@@ -1903,6 +1919,19 @@ void VulkanTextureCache::ResolveStoreWatchCallback(
   if (!invalidated_by_gpu ||
       texture_cache.resolve_store_in_flight_ != &texture) {
     texture.SetStoreTrackedValid(false);
+    if (cvars::vulkan_resolve_dest_diag) {
+      const VulkanTexture* other = texture_cache.resolve_store_in_flight_;
+      if (!invalidated_by_gpu) {
+        texture.SetStoreInvalidation(kStoreInvalidationCpuWrite);
+      } else if (other) {
+        texture.SetStoreInvalidation(kStoreInvalidationOtherTextureStore,
+                                     other->key().base_page << 12,
+                                     other->key().GetWidth(),
+                                     other->key().GetHeight());
+      } else {
+        texture.SetStoreInvalidation(kStoreInvalidationGpuWrite);
+      }
+    }
   }
 }
 
@@ -1977,9 +2006,15 @@ void VulkanTextureCache::LogResolveDestMiss(const VulkanTexture& texture,
   const uint64_t frame = command_processor_.GetCurrentFrame();
   uint32_t reason;
   uint32_t covered_rows;
+  uint32_t invalidation, invalidation_other_base, invalidation_other_width,
+      invalidation_other_height;
   {
     auto global_lock = global_critical_region::Acquire();
     covered_rows = texture.store_covered_rows();
+    invalidation = texture.store_invalidation();
+    invalidation_other_base = texture.store_invalidation_other_base();
+    invalidation_other_width = texture.store_invalidation_other_width();
+    invalidation_other_height = texture.store_invalidation_other_height();
   }
   if (!shared_memory().IsRangeGpuWritten(base, size)) {
     // Also every texture from the CPU - only the reloaded ones are logged.
@@ -2023,8 +2058,27 @@ void VulkanTextureCache::LogResolveDestMiss(const VulkanTexture& texture,
       uint32_t(key.tiled), uint32_t(key.mip_max_level),
       uint32_t(key.packed_mips), kReasons[reason], covered_rows, count,
       frame);
+  if (reason == 3) {
+    static const char* const kInvalidations[] = {
+        "none since the upload",
+        "a CPU write",
+        "a GPU write not storing into a texture (resolve or memexport)",
+        "a resolve storing into another texture",
+        "a CPU write before the upload",
+        "the whole memory invalidated",
+    };
+    XELOGI("  image made invalid last by {} (other texture {:08X} {}x{})",
+           invalidation < xe::countof(kInvalidations)
+               ? kInvalidations[invalidation]
+               : "?",
+           invalidation_other_base, invalidation_other_width,
+           invalidation_other_height);
+  }
+  // Oldest first.
   uint32_t listed = 0;
-  for (const ResolveDestDescriptor& d : resolve_dests_) {
+  for (size_t i = 0; i < kResolveDestHistory; ++i) {
+    const ResolveDestDescriptor& d =
+        resolve_dests_[(resolve_dests_next_ + i) % kResolveDestHistory];
     if ((!d.width && !d.height) || d.base < base || d.base >= base + size ||
         d.frame + 2 < frame) {
       continue;
@@ -2035,6 +2089,28 @@ void VulkanTextureCache::LogResolveDestMiss(const VulkanTexture& texture,
         d.base - base, FormatInfo::GetName(xenos::TextureFormat(d.format)),
         d.pitch_div_32, d.endian, d.is_array, d.x0, d.y0, d.width, d.height,
         d.wrote_texture, frame - d.frame);
+    if (++listed >= 12) {
+      break;
+    }
+  }
+  // Other promoted textures over the memory: a resolve stores into one of
+  // them only, the one with the closest preceding base.
+  listed = 0;
+  for (const auto& pair : resolve_dest_textures_) {
+    const VulkanTexture* other = pair.second;
+    if (!other || other == &texture) {
+      continue;
+    }
+    const uint32_t other_size =
+        std::max(other->GetGuestBaseSize(), uint32_t(1));
+    if (pair.first >= base + size || pair.first + other_size <= base) {
+      continue;
+    }
+    const TextureKey& other_key = other->key();
+    XELOGI("  promoted texture over it at {:08X}: {} {}x{} pitch {} mips {}",
+           pair.first, FormatInfo::GetName(other_key.format),
+           other_key.GetWidth(), other_key.GetHeight(),
+           uint32_t(other_key.pitch), uint32_t(other_key.mip_max_level));
     if (++listed >= 8) {
       break;
     }
@@ -2248,9 +2324,11 @@ void VulkanTextureCache::NoteResolveDestImageUpToDate(VulkanTexture& texture,
   if (!shared_memory().IsRangeValid(
           base, xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
     texture.SetStoreTrackedValid(false);
+    texture.SetStoreInvalidation(kStoreInvalidationStaleUpload);
     return;
   }
   texture.SetStoreTrackedValid(true);
+  texture.SetStoreInvalidation(kStoreInvalidationNone);
   ArmResolveStoreWatch(texture);
 }
 

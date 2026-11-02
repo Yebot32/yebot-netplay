@@ -460,6 +460,13 @@ class VulkanTextureCache final : public TextureCache {
     // invalid; revalidates it once they reach the height.
     uint32_t store_covered_rows_ = 0;
     SharedMemory::WatchHandle store_watch_handle_ = nullptr;
+    // vulkan_resolve_dest_diag: what last made the image invalid
+    // (StoreInvalidation), and with a resolve storing into another texture
+    // over the memory, that texture's base and size.
+    uint32_t store_invalidation_ = 0;
+    uint32_t store_invalidation_other_base_ = 0;
+    uint32_t store_invalidation_other_width_ = 0;
+    uint32_t store_invalidation_other_height_ = 0;
 
    public:
     // Takes ownership of the image and its memory.
@@ -502,6 +509,24 @@ class VulkanTextureCache final : public TextureCache {
     }
     uint32_t store_covered_rows() const { return store_covered_rows_; }
     void SetStoreCoveredRows(uint32_t rows) { store_covered_rows_ = rows; }
+    uint32_t store_invalidation() const { return store_invalidation_; }
+    uint32_t store_invalidation_other_base() const {
+      return store_invalidation_other_base_;
+    }
+    uint32_t store_invalidation_other_width() const {
+      return store_invalidation_other_width_;
+    }
+    uint32_t store_invalidation_other_height() const {
+      return store_invalidation_other_height_;
+    }
+    void SetStoreInvalidation(uint32_t cause, uint32_t other_base = 0,
+                              uint32_t other_width = 0,
+                              uint32_t other_height = 0) {
+      store_invalidation_ = cause;
+      store_invalidation_other_base_ = other_base;
+      store_invalidation_other_width_ = other_width;
+      store_invalidation_other_height_ = other_height;
+    }
     SharedMemory::WatchHandle store_watch_handle() const {
       return store_watch_handle_;
     }
