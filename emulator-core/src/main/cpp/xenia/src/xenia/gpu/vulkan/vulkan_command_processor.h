@@ -1755,11 +1755,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // The open submission has such exports: it ends with a barrier making the
   // shader writes visible to the host.
   bool memexport_readbacks_in_submission_ = false;
-  // Stores the changes of the pending exports whose submission has completed
-  // in guest memory - as submissions complete, and so by the time the guest
-  // can see the GPU as done (while any is pending, its fences, interrupts,
-  // coherency requests and waits on memory, and the command processor running
-  // out of commands, await the GPU - command_processor_memexport.inc).
+  // Stores the changes of the pending exports in guest memory once the
+  // submissions of all of them have completed - as submissions complete, and
+  // so by the time the guest can see the GPU as done (while any is pending,
+  // its fences, interrupts, coherency requests and waits on registers or
+  // memory, and the command processor running out of commands, await the GPU
+  // - command_processor_memexport.inc).
   void ApplyCompletedMemexportReadbacks(uint64_t completed_submission);
   // Byte-wise: the bytes of a range that differ between the snapshot taken
   // before an export and the GPU's copy after it, to guest memory. False if

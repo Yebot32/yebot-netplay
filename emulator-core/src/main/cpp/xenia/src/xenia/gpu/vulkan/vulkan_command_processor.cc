@@ -245,10 +245,10 @@ DEFINE_int32(
 DEFINE_bool(
     memexport_readback_deferred, true,
     "With memexport_enable on a host-mapped buffer (readback_resolve=uma), "
-    "read memory export output back into guest memory when the exporting "
-    "draw's submission completes, instead of awaiting the GPU after every "
-    "exporting draw. While any is pending, a fence, interrupt or coherency "
-    "request the guest observes, a wait on memory in its command stream and "
+    "read memory export output back into guest memory once the submissions "
+    "of all of it complete, instead of awaiting the GPU after every exporting "
+    "draw. While any is pending, a fence, interrupt or coherency request the "
+    "guest observes, a wait on a register or memory in its command stream and "
     "the command processor running out of commands await the GPU first (with "
     "memexport_await_fences on or off), so the output is there by then. "
     "Crysis 3 copies memory with exports thousands of times while loading and "
@@ -915,7 +915,7 @@ void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {}
 
 void VulkanCommandProcessor::PrepareForWait() {
   // Out of commands, or the guest's command stream waiting: export output read
-  // back as its submission completes would otherwise wait for a submission
+  // back once its submission completes would otherwise wait for a submission
   // nothing makes, while the guest may be waiting for it to go on.
   AwaitMemexportReadbacks("idle or register wait");
   CommandProcessor::PrepareForWait();
@@ -6159,8 +6159,13 @@ bool VulkanCommandProcessor::StoreMemexportChanges(uint32_t address,
 
 void VulkanCommandProcessor::ApplyCompletedMemexportReadbacks(
     uint64_t completed_submission) {
+  // All of them or none: storing into guest memory invalidates the pages, so
+  // their next use uploads them from there, over the output of any export
+  // still on its way that only its own readback would have stored. With every
+  // export done, the GPU's copy read below holds no partial later output
+  // either.
   if (pending_memexport_readbacks_.empty() ||
-      pending_memexport_readbacks_.front().submission > completed_submission) {
+      pending_memexport_readbacks_.back().submission > completed_submission) {
     return;
   }
   // Their submissions ended with a barrier making the writes visible to the
@@ -6178,19 +6183,13 @@ void VulkanCommandProcessor::ApplyCompletedMemexportReadbacks(
   }
   // In draw order: with the contents of the GPU's copy now, a byte several
   // exports changed ends up with the last value either way.
-  while (!pending_memexport_readbacks_.empty() &&
-         pending_memexport_readbacks_.front().submission <=
-             completed_submission) {
-    const PendingMemexportReadback& pending =
-        pending_memexport_readbacks_.front();
+  for (const PendingMemexportReadback& pending : pending_memexport_readbacks_) {
     StoreMemexportChanges(pending.address, pending.size,
                           memexport_snapshot_mapping_ + pending.snapshot_offset);
-    pending_memexport_readbacks_.pop_front();
   }
-  if (pending_memexport_readbacks_.empty()) {
-    pending_memexport_snapshot_used_ = 0;
-    memexport_readbacks_pending_ = false;
-  }
+  pending_memexport_readbacks_.clear();
+  pending_memexport_snapshot_used_ = 0;
+  memexport_readbacks_pending_ = false;
 }
 
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
@@ -7791,8 +7790,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                  memexport_range.size_bytes);
     }
   } else if (memexport_readback && !memexport_deferred) {
-    // (memexport_readback_deferred: read back when the submission completes -
-    // ApplyCompletedMemexportReadbacks.)
+    // (memexport_readback_deferred: read back once the submissions of all
+    // pending exports complete - ApplyCompletedMemexportReadbacks.)
     // Android's KGSL drivers may not expose VK_EXT_external_memory_host.
     // In that case the shader wrote the device buffer, not guest RAM. A guest
     // CPU or PM4_WAIT_REG_MEM reader must see the completed export even if no
