@@ -94,6 +94,22 @@ class VulkanTextureCache final : public TextureCache {
   // may be taken as matching the memory any more.
   void InvalidateResolveStoreTracking();
 
+  // Diagnostics: the textures waiting to be recreated for promotion at the
+  // last submission, and since the previous call, the attempts that recreated
+  // one, found no texture with the key, or found it still in use.
+  struct PromotionQueueStats {
+    uint64_t pending = 0;
+    uint64_t recreated = 0;
+    uint64_t not_found = 0;
+    uint64_t in_flight = 0;
+  };
+  PromotionQueueStats TakePromotionQueueStats() {
+    PromotionQueueStats stats = promotion_queue_stats_;
+    promotion_queue_stats_ = PromotionQueueStats();
+    stats.pending = resolve_dest_promotion_queue_.size();
+    return stats;
+  }
+
  private:
   class VulkanTexture;
   // Textures that already existed when a resolve first targeted them: they
@@ -101,6 +117,7 @@ class VulkanTextureCache final : public TextureCache {
   // they can be promoted. Without this only textures that happen to be created
   // while a matching resolve is live ever get promoted.
   std::vector<TextureKey> resolve_dest_promotion_queue_;
+  PromotionQueueStats promotion_queue_stats_;
   // Keys whose promoted image the driver refused, created unpromoted.
   std::unordered_set<TextureKey, TextureKey::Hasher>
       resolve_dest_promotion_refused_;

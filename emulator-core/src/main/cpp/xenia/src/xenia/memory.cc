@@ -2414,6 +2414,36 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
   }
 }
 
+namespace {
+std::atomic<uint64_t> access_callback_protect_calls{0};
+std::atomic<uint64_t> access_callback_protect_pages{0};
+std::atomic<uint64_t> access_callback_triggers{0};
+std::atomic<uint64_t> access_callback_unprotect_calls{0};
+std::atomic<uint64_t> access_callback_unprotect_pages{0};
+// A protection change made for the access callbacks, of `pages` system pages.
+void CountAccessCallbackProtect(bool unprotect, uint32_t pages) {
+  (unprotect ? access_callback_unprotect_calls : access_callback_protect_calls)
+      .fetch_add(1, std::memory_order_relaxed);
+  (unprotect ? access_callback_unprotect_pages : access_callback_protect_pages)
+      .fetch_add(pages, std::memory_order_relaxed);
+}
+}  // namespace
+
+AccessCallbackProtectStats TakeAccessCallbackProtectStats() {
+  AccessCallbackProtectStats stats;
+  stats.protect_calls =
+      access_callback_protect_calls.exchange(0, std::memory_order_relaxed);
+  stats.protect_pages =
+      access_callback_protect_pages.exchange(0, std::memory_order_relaxed);
+  stats.triggers =
+      access_callback_triggers.exchange(0, std::memory_order_relaxed);
+  stats.unprotect_calls =
+      access_callback_unprotect_calls.exchange(0, std::memory_order_relaxed);
+  stats.unprotect_pages =
+      access_callback_unprotect_pages.exchange(0, std::memory_order_relaxed);
+  return stats;
+}
+
 template <bool enable_invalidation_notifications, bool enable_data_providers>
 XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
     const uint32_t system_page_first, const uint32_t system_page_last,
@@ -2443,6 +2473,7 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
               protect_base + (protect_system_page_first << system_page_shift_),
               (i - protect_system_page_first) << system_page_shift_,
               protect_access);
+          CountAccessCallbackProtect(false, i - protect_system_page_first);
           protect_system_page_first = UINT32_MAX;
         }
         i += 63;
@@ -2524,6 +2555,7 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
             protect_base + (protect_system_page_first << system_page_shift_),
             (i - protect_system_page_first) << system_page_shift_,
             protect_access);
+        CountAccessCallbackProtect(false, i - protect_system_page_first);
         protect_system_page_first = UINT32_MAX;
       }
     }
@@ -2535,6 +2567,8 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
         (system_page_last + 1 - protect_system_page_first)
             << system_page_shift_,
         protect_access);
+    CountAccessCallbackProtect(false,
+                               system_page_last + 1 - protect_system_page_first);
   }
 }
 bool PhysicalHeap::TriggerCallbacks(
@@ -2631,6 +2665,7 @@ bool PhysicalHeap::TriggerCallbacks(
         }
         xe::memory::Protect(protect_base + (i << system_page_shift_),
                             system_page_size_, target);
+        CountAccessCallbackProtect(true, 1);
       }
     }
     for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
@@ -2676,6 +2711,7 @@ bool PhysicalHeap::TriggerCallbacks(
   }
 
   // Trigger callbacks.
+  access_callback_triggers.fetch_add(1, std::memory_order_relaxed);
   if (!unprotect) {
     // If not doing anything with protection, no point in unwatching excess
     // pages.
@@ -2764,6 +2800,7 @@ bool PhysicalHeap::TriggerCallbacks(
                   (unprotect_system_page_first << system_page_shift_),
               (i - unprotect_system_page_first) << system_page_shift_,
               xe::memory::PageAccess::kReadWrite);
+          CountAccessCallbackProtect(true, i - unprotect_system_page_first);
           unprotect_system_page_first = UINT32_MAX;
         }
       }
@@ -2774,6 +2811,8 @@ bool PhysicalHeap::TriggerCallbacks(
           (system_page_last + 1 - unprotect_system_page_first)
               << system_page_shift_,
           xe::memory::PageAccess::kReadWrite);
+      CountAccessCallbackProtect(
+          true, system_page_last + 1 - unprotect_system_page_first);
     }
   }
 

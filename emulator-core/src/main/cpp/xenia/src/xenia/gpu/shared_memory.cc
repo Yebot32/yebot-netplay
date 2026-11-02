@@ -762,6 +762,15 @@ void SharedMemory::TryGetNextUploadRange(
   }
 }
 
+void SharedMemory::TakeInvalidationStats(uint64_t& pages,
+                                         uint64_t& repeated_pages) {
+  auto global_lock = global_critical_region_.Acquire();
+  pages = invalidated_pages_;
+  repeated_pages = repeated_invalidated_pages_;
+  invalidated_pages_ = 0;
+  repeated_invalidated_pages_ = 0;
+}
+
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length,
     bool exact_range) {
@@ -896,6 +905,15 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
   // GPU-written flags changed due to CPU invalidation.
   gpu_written_data_dirty_ = true;
   dirty_blocks_ |= dirty_blocks_mask;
+  invalidated_pages_ += page_last - page_first + 1;
+  if (!page_history_.empty()) {
+    for (uint32_t page = page_first; page <= page_last; ++page) {
+      const uint32_t last_invalidation = page_history_[page].invalidation;
+      if (last_invalidation && last_invalidation + 1 >= history_frame_) {
+        ++repeated_invalidated_pages_;
+      }
+    }
+  }
   NotePages<&PageHistory::invalidation>(
       page_first << page_size_log2_,
       (page_last - page_first + 1) << page_size_log2_);

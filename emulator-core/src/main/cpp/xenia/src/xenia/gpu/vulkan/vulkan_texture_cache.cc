@@ -665,15 +665,18 @@ void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
     resolve_dest_promotion_queue_.clear();
     for (const TextureKey& key : pending) {
       if (RecreateTextureForHostChange(key, completed)) {
+        ++promotion_queue_stats_.recreated;
         continue;
       }
       if (!HasTexture(key)) {
         // Gone (evicted) - a new texture with the key is promoted when it is
         // created.
+        ++promotion_queue_stats_.not_found;
         continue;
       }
       // Still in flight - retry next submission.
       resolve_dest_promotion_queue_.push_back(key);
+      ++promotion_queue_stats_.in_flight;
     }
   }
   TextureCache::BeginSubmission(new_submission_index);

@@ -301,6 +301,19 @@ class VirtualHeap : public BaseHeap {
                   uint32_t heap_base, uint32_t heap_size, uint32_t page_size);
 };
 
+// Diagnostics: the page protection changes made for the physical memory
+// access callbacks since the previous call - by enabling them (the GPU side
+// watching ranges it has uploaded or written) and by access violations
+// removing them (invalidation and read callbacks).
+struct AccessCallbackProtectStats {
+  uint64_t protect_calls = 0;
+  uint64_t protect_pages = 0;
+  uint64_t triggers = 0;
+  uint64_t unprotect_calls = 0;
+  uint64_t unprotect_pages = 0;
+};
+AccessCallbackProtectStats TakeAccessCallbackProtectStats();
+
 // A heap for ranges of memory that are mapped to physical ranges.
 // Physical ranges are used by the audio and graphics subsystems representing
 // hardware wired directly to memory in the console.

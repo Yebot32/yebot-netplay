@@ -101,6 +101,10 @@ class SharedMemory {
     GuestCopySource guest_copy_source = GuestCopySource::kNone;
   };
   void SetHistoryFrame(uint32_t frame) { history_frame_ = frame + 1; }
+  // Diagnostics: the pages CPU writes made invalid since the previous call,
+  // and of them the ones invalidated in the same or the previous frame already
+  // (counted with shared_memory_page_history only).
+  void TakeInvalidationStats(uint64_t& pages, uint64_t& repeated_pages);
   bool HasPageHistory() const { return !page_history_.empty(); }
   PageHistory GetPageHistory(uint32_t address) const;
   // Records a copy of the GPU's data to guest memory made outside the shared
@@ -247,6 +251,9 @@ class SharedMemory {
   // shared_memory_page_history, empty when off.
   std::vector<PageHistory> page_history_;
   uint32_t history_frame_ = 1;
+  // TakeInvalidationStats, with the global critical region held.
+  uint64_t invalidated_pages_ = 0;
+  uint64_t repeated_invalidated_pages_ = 0;
   // Sets one field of the history of the pages of a range.
   template <uint32_t PageHistory::*field>
   void NotePages(uint32_t start, uint32_t length) {

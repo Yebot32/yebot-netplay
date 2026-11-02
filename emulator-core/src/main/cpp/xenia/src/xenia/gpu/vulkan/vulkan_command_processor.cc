@@ -137,6 +137,15 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
+    readback_resolve_uma_unread_traffic, false,
+    "Diagnostics: when readback_resolve_uma_read_watch skips the copy of a "
+    "resolve the CPU hasn't read, still read its bytes out of the GPU's "
+    "memory, into a scratch buffer rather than guest memory - the CPU memory "
+    "traffic of the copy without its effect on guest memory "
+    "(debug.xendroid.uma_traffic on Android).",
+    "GPU");
+
+DEFINE_bool(
     vulkan_texture_sign_classes, true,
     "With spirv_texture_sign_specialization: give each draw's pipeline the "
     "signs of the textures its pixel shader fetches (otherwise the shaders "
@@ -607,6 +616,9 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
   PollDebugPropertyOverride("debug.xendroid.texset_reuse",
                             "vulkan_texture_descriptor_set_frame_reuse",
                             cvars::vulkan_texture_descriptor_set_frame_reuse);
+  PollDebugPropertyOverride("debug.xendroid.uma_traffic",
+                            "readback_resolve_uma_unread_traffic",
+                            cvars::readback_resolve_uma_unread_traffic);
   PollDebugPropertyOverride("debug.xendroid.texload_levels",
                             "vulkan_texture_load_levels_to_image",
                             cvars::vulkan_texture_load_levels_to_image);
@@ -4249,9 +4261,46 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 fmt::format("(same {:.0f})", replay_stats.redundant[i] / f);
           }
         }
-        XELOGI("VkReplay: per frame: sets={:.0f} push_bytes={:.0f} |{}",
-               replay_stats.descriptor_sets / f,
-               replay_stats.push_constant_bytes / f, commands);
+        XELOGI(
+            "VkReplay: per frame: sets={:.0f} push_bytes={:.0f} "
+            "texture_set_writes={:.0f} (same content earlier in the frame "
+            "{:.0f}) texture_set_reuses={:.0f} constants_set_writes={:.0f} "
+            "|{}",
+            replay_stats.descriptor_sets / f,
+            replay_stats.push_constant_bytes / f, s.texture_set_writes / f,
+            s.texture_set_rewrites / f, s.texture_set_reuses / f,
+            s.constants_set_writes / f, commands);
+      }
+      // The page protection changes of the memory watches: enabled by the GPU
+      // side (uploads, GPU writes, resolve read watches), removed on access
+      // violations, and the pages CPU writes made invalid (repeated: in the
+      // same or the previous frame too, with shared_memory_page_history).
+      {
+        const AccessCallbackProtectStats protect =
+            TakeAccessCallbackProtectStats();
+        uint64_t invalidated_pages, repeated_invalidated_pages;
+        shared_memory_->TakeInvalidationStats(invalidated_pages,
+                                              repeated_invalidated_pages);
+        XELOGI(
+            "VkWatch: per frame: protects={:.1f} protect_pages={:.0f} "
+            "faults={:.1f} unprotects={:.1f} unprotect_pages={:.0f} "
+            "invalidated_pages={:.0f} repeated={:.0f}",
+            protect.protect_calls / f, protect.protect_pages / f,
+            protect.triggers / f, protect.unprotect_calls / f,
+            protect.unprotect_pages / f, invalidated_pages / f,
+            repeated_invalidated_pages / f);
+      }
+      // The textures waiting to be recreated for promotion to resolve
+      // destinations (the in use and not found counts with
+      // vulkan_resolve_dest_diag).
+      {
+        const VulkanTextureCache::PromotionQueueStats promotion =
+            texture_cache_->TakePromotionQueueStats();
+        XELOGI(
+            "VkPromoteQueue: pending={} | per frame: recreated={:.2f} "
+            "in_use={:.1f} not_found={:.1f}",
+            promotion.pending, promotion.recreated / f,
+            promotion.in_flight / f, promotion.not_found / f);
       }
       // Driver fence polls and waits of the submission timeline (a poll of a
       // pending fence blocks on Turnip/kgsl, see fence_collect).
@@ -8366,6 +8415,11 @@ bool VulkanCommandProcessor::IssueCopy() {
         if (!first_watched && last_write &&
             !AnyResolvePageRead(written_address, written_length)) {
           ++vk_frame_sync_stats_.rb_uma_unread;
+          if (cvars::readback_resolve_uma_unread_traffic) {
+            uma_unread_traffic_buffer_.resize(written_length);
+            shared_memory_->ReadHostMapped(written_address, written_length,
+                                           uma_unread_traffic_buffer_.data());
+          }
           last_write = resolve_submission;
           PopDebugMarker();
           return true;
@@ -12015,6 +12069,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       }
       constants_transient_descriptors_used_.emplace_back(
           frame_current_, constants_descriptor_set);
+      ++vk_frame_sync_stats_.constants_set_writes;
       // For UNIFORM_BUFFER_DYNAMIC the descriptor base offset MUST be 0: the
       // per-buffer slice offset is supplied as a dynamic offset at bind time, so
       // baking it into the descriptor as well would double-count it. The range
@@ -12100,6 +12155,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     if (!texture_descriptor_set_write_count) {
       return false;
     }
+    if (cvars::vulkan_replay_stats) {
+      CountTextureSetWrite(texture_set_hash_vertex);
+    }
     if (texture_set_frame_reuse_frame_ == frame_current_ &&
         cvars::vulkan_texture_descriptor_set_frame_reuse &&
         !cvars::vulkan_texture_descriptor_reuse_edge) {
@@ -12143,6 +12201,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         write_textures);
     if (!texture_descriptor_set_write_count) {
       return false;
+    }
+    if (cvars::vulkan_replay_stats) {
+      CountTextureSetWrite(texture_set_hash_pixel);
     }
     if (texture_set_frame_reuse_frame_ == frame_current_ &&
         cvars::vulkan_texture_descriptor_set_frame_reuse &&
@@ -12280,6 +12341,17 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   current_graphics_descriptor_sets_bound_up_to_date_ |= descriptor_sets_needed;
 
   return true;
+}
+
+void VulkanCommandProcessor::CountTextureSetWrite(uint64_t content_hash) {
+  if (replay_stats_texture_set_hashes_frame_ != frame_current_) {
+    replay_stats_texture_set_hashes_.clear();
+    replay_stats_texture_set_hashes_frame_ = frame_current_;
+  }
+  ++vk_frame_sync_stats_.texture_set_writes;
+  if (!replay_stats_texture_set_hashes_.insert(content_hash).second) {
+    ++vk_frame_sync_stats_.texture_set_rewrites;
+  }
 }
 
 uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
