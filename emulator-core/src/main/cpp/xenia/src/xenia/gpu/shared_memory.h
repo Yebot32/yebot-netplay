@@ -140,6 +140,14 @@ class SharedMemory {
 
   uint32_t page_size_log2() const { return page_size_log2_; }
 
+  // shared_memory_preserve_gpu_writes: copies a range of the host GPU memory
+  // copy to guest memory - of pages the GPU wrote last that a CPU write is
+  // invalidating, so that their reupload keeps the GPU's data. Called within
+  // the global critical region. Returns whether the range was copied.
+  virtual bool CopyToGuestMemory(uint32_t start, uint32_t length) {
+    return false;
+  }
+
   uint32_t host_gpu_memory_sparse_granularity_log2() const {
     return host_gpu_memory_sparse_granularity_log2_;
   }

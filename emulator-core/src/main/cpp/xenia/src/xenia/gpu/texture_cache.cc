@@ -68,7 +68,14 @@ DEFINE_bool(
     "for 16-bit). Costs a per-component rescale inside every texture fetch that "
     "requests it, which is measurable where fragment shading is the "
     "bottleneck. Off samples everything as normalized, which is what the "
-    "emulator did before upstream implemented this.",
+    "emulator did before upstream implemented this. Crysis 3 samples its "
+    "light and scene copies with the bit set after resolving them to "
+    "unsigned integer destinations - it needs "
+    "resolve_copy_dest_number_packing too, and turns entirely white with "
+    "this alone (2026-10-06). The shaders have the rescale only if this was "
+    "on when they were translated; "
+    "debug.xendroid.texture_integer_num_format switches the host side at run "
+    "time on Android.",
     "GPU");
 
 DEFINE_bool(tiled_shared_memory, true,
@@ -424,10 +431,17 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
     texture_bindings_in_sync_ |= index_bit;
     if (!binding.key.is_valid) {
-      if (old_key.is_valid) {
+      // An invalid fetch constant still has a destination swizzle: its
+      // constant components read as 0 or 1, the rest as the null texture's 0.
+      // Halo 4's video shader takes the frame's opacity from the constant 1
+      // of a fetch constant with no texture - 0 left the videos invisible.
+      const uint32_t constant_swizzle = GuestToHostSwizzle(
+          fetch.swizzle, xenos::XE_GPU_TEXTURE_SWIZZLE_0000);
+      if (old_key.is_valid || binding.host_swizzle != constant_swizzle) {
         bindings_changed |= index_bit;
       }
       binding.Reset();
+      binding.host_swizzle = constant_swizzle;
       continue;
     }
     uint32_t old_host_swizzle = binding.host_swizzle;
@@ -1195,7 +1209,16 @@ void TextureCache::BindingInfoFromFetchConstant(
   key_out.pitch = fetch.pitch;
   key_out.mip_max_level = mip_max_level;
   key_out.tiled = fetch.tiled;
-  key_out.packed_mips = fetch.packed_mips;
+  // With the base level alone and the packed mip tail below it (both sides
+  // over 16 texels), packing changes nothing that is loaded, so the key is the
+  // unpacked one - a game binding the same memory both ways (Forza Horizon
+  // does with a 1280x720 surface) then shares one texture instead of loading
+  // it twice.
+  key_out.packed_mips =
+      fetch.packed_mips &&
+      (mip_max_level != 0 ||
+       texture_util::GetPackedMipLevel(width_minus_1 + 1,
+                                       height_minus_1 + 1) == 0);
   key_out.format = format;
   key_out.endianness = fetch.endianness;
 

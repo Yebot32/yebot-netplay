@@ -101,6 +101,8 @@ class VulkanSharedMemory : public SharedMemory {
   bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
                                         uint32_t length_allocations) override;
 
+  bool CopyToGuestMemory(uint32_t start, uint32_t length) override;
+
   bool UploadRanges(const std::pair<uint32_t, uint32_t>* upload_page_ranges,
                     uint32_t num_ranges) override;
 

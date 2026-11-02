@@ -10,6 +10,7 @@
 #ifndef XENIA_UI_VULKAN_VULKAN_GPU_COMPLETION_TIMELINE_H_
 #define XENIA_UI_VULKAN_VULKAN_GPU_COMPLETION_TIMELINE_H_
 
+#include <atomic>
 #include <deque>
 #include <optional>
 #include <utility>
@@ -130,10 +131,46 @@ class VulkanGPUCompletionTimeline : public GPUCompletionTimeline {
 
   void UpdateCompletedSubmission() override;
 
+  // debug.xendroid.fence_collect experiment. A status poll of a still-pending
+  // fence blocks until it retires on Turnip/kgsl, so an unbounded walk over
+  // the pending fences waits for the GPU to drain completely. With bounded
+  // collection, awaits poll only up to the awaited submission, and reclaiming
+  // fences for new submissions only polls those older than the newest few.
+  static void SetBoundedCollection(bool bounded) {
+    bounded_collection_.store(bounded, std::memory_order_relaxed);
+  }
+  static bool bounded_collection() {
+    return bounded_collection_.load(std::memory_order_relaxed);
+  }
+
+  // Driver fence status polls and waits done by this timeline, and the time
+  // spent in them, since the previous call.
+  struct DriverWaitStats {
+    uint64_t polls = 0;
+    // Longer than 50 us - the fence was still pending, and the poll waited.
+    uint64_t slow_polls = 0;
+    uint64_t poll_ns = 0;
+    uint64_t waits = 0;
+    uint64_t wait_ns = 0;
+  };
+  DriverWaitStats TakeDriverWaitStats() {
+    DriverWaitStats stats = driver_wait_stats_;
+    driver_wait_stats_ = DriverWaitStats();
+    return stats;
+  }
+
  protected:
   void AwaitSubmissionImpl(uint64_t awaited_submission) override;
+  void UpdateCompletedSubmissionUpTo(uint64_t awaited_submission) override;
 
  private:
+  // Polls the pending fences in submission order, stopping at the first one
+  // that is not signaled or whose submission is past `last_submission`.
+  void PollPendingFences(uint64_t last_submission);
+
+  inline static std::atomic<bool> bounded_collection_{false};
+  DriverWaitStats driver_wait_stats_;
+
   VulkanDevice* const vulkan_device_;
   const char* const name_;
 

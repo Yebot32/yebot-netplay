@@ -85,6 +85,13 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
 
   trace_writer_.WriteIndirectBufferStart(ptr, count * sizeof(uint32_t));
   if (count != 0) {
+    // merge_tiling_bands_call_sites: where this buffer is called from (the
+    // reader is still the caller's, right past the INDIRECT_BUFFER packet).
+    const uint32_t call_depth = ib_call_depth_;
+    if (call_depth < kTilingBandMaxCallDepth) {
+      ib_call_sites_[call_depth] = COMMAND_PROCESSOR::GuestReadPtrOffset();
+    }
+    ib_call_depth_ = call_depth + 1;
     RingBuffer old_reader = reader_;
 
     // Execute commands!
@@ -109,6 +116,7 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
 
     trace_writer_.WriteIndirectBufferEnd();
     reader_ = old_reader;
+    ib_call_depth_ = call_depth;
   } else {
     // rare, but i've seen it happen! (and then a division by 0 occurs)
     return;
@@ -487,6 +495,18 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
     // We also skip predicated swaps, as they are never valid (probably?).
     if (packet & 1) {
       bool any_pass = (bin_select_ & bin_mask_) != 0;
+      if (XE_UNLIKELY(bin_trace_.frames_left)) {
+        const bool executed = any_pass && opcode != PM4_XE_SWAP;
+        COMMAND_PROCESSOR::BinTracePacket(opcode, true, executed);
+        if (!executed) {
+          if (opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2) {
+            COMMAND_PROCESSOR::BinTraceDraw(true, false);
+          } else if (opcode == PM4_INDIRECT_BUFFER ||
+                     opcode == PM4_INDIRECT_BUFFER_PFD) {
+            COMMAND_PROCESSOR::BinTraceIndirectBuffer(0, 0, true, false);
+          }
+        }
+      }
       if (!any_pass || opcode == PM4_XE_SWAP) {
         // Keep visibility into dropped synchronization packets (a fence
         // predicated to a never-passing bin executes NEVER in a single-pass
@@ -508,6 +528,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         trace_writer_.WritePacketEnd();
         return true;
       }
+    }
+
+    if (XE_UNLIKELY(bin_trace_.frames_left)) {
+      COMMAND_PROCESSOR::BinTraceOpcode(opcode);
     }
 
     bool result = false;
@@ -608,6 +632,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
                                                value);
         }
         bin_mask_ = (bin_mask_ & 0xFFFFFFFF00000000ull) | value;
+        if (XE_UNLIKELY(bin_trace_.frames_left)) {
+          COMMAND_PROCESSOR::BinTraceSetBin(
+              false, COMMAND_PROCESSOR::GuestReadPtrOffset(-8));
+        }
         result = true;
       } break;
       case PM4_SET_BIN_MASK_HI: {
@@ -618,6 +646,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         }
         bin_mask_ =
             (bin_mask_ & 0xFFFFFFFFull) | (static_cast<uint64_t>(value) << 32);
+        if (XE_UNLIKELY(bin_trace_.frames_left)) {
+          COMMAND_PROCESSOR::BinTraceSetBin(
+              false, COMMAND_PROCESSOR::GuestReadPtrOffset(-8));
+        }
         result = true;
       } break;
       case PM4_SET_BIN_SELECT_LO: {
@@ -627,6 +659,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
                                                value);
         }
         bin_select_ = (bin_select_ & 0xFFFFFFFF00000000ull) | value;
+        COMMAND_PROCESSOR::OnBinSelectWritten();
+        if (XE_UNLIKELY(bin_trace_.frames_left)) {
+          COMMAND_PROCESSOR::BinTraceSetBin(
+              true, COMMAND_PROCESSOR::GuestReadPtrOffset(-8));
+        }
         result = true;
       } break;
       case PM4_SET_BIN_SELECT_HI: {
@@ -637,6 +674,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         }
         bin_select_ = (bin_select_ & 0xFFFFFFFFull) |
                       (static_cast<uint64_t>(value) << 32);
+        if (XE_UNLIKELY(bin_trace_.frames_left)) {
+          COMMAND_PROCESSOR::BinTraceSetBin(
+              true, COMMAND_PROCESSOR::GuestReadPtrOffset(-8));
+        }
         result = true;
       } break;
       case PM4_SET_BIN_MASK: {
@@ -649,6 +690,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
                                                uint32_t(val_lo));
         }
         bin_mask_ = (val_hi << 32) | val_lo;
+        if (XE_UNLIKELY(bin_trace_.frames_left)) {
+          COMMAND_PROCESSOR::BinTraceSetBin(
+              false, COMMAND_PROCESSOR::GuestReadPtrOffset(-12));
+        }
         result = true;
       } break;
       case PM4_SET_BIN_SELECT: {
@@ -661,6 +706,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
                                                uint32_t(val_lo));
         }
         bin_select_ = (val_hi << 32) | val_lo;
+        if (XE_UNLIKELY(bin_trace_.frames_left)) {
+          COMMAND_PROCESSOR::BinTraceSetBin(
+              true, COMMAND_PROCESSOR::GuestReadPtrOffset(-12));
+        }
         result = true;
       } break;
       case PM4_CONTEXT_UPDATE: {
@@ -817,6 +866,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
 
   COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
                                frontbuffer_height);
+  COMMAND_PROCESSOR::BinTraceEndFrame();
 
   // Advance the present-frame counter shown in the log prefix.
   logging::IncrementFrameNumber();
@@ -838,6 +888,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_INDIRECT_BUFFER(
   if (COMMAND_PROCESSOR::debug_markers_enabled()) {
     COMMAND_PROCESSOR::InsertDebugMarker("PM4_INDIRECT_BUFFER: 0x%08X (%u)",
                                          list_ptr, list_length);
+  }
+  if (XE_UNLIKELY(bin_trace_.frames_left)) {
+    COMMAND_PROCESSOR::BinTraceIndirectBuffer(GpuToCpu(list_ptr), list_length,
+                                              (packet & 1) != 0, true);
   }
 
   COMMAND_PROCESSOR::ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
@@ -881,15 +935,37 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
         is_memory ? "mem" : "reg", poll_reg_addr, ref, mask);
   }
   assert_true(is_memory || poll_reg_addr < RegisterFile::kRegisterCount);
-  const volatile uint32_t& value_ref =
-      is_memory ? *reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(
-                      poll_reg_addr & ~uint32_t(0x3)))
-                : register_file_->values[poll_reg_addr];
+  // The index comes from the guest and the assert is compiled out: like
+  // WriteRegister, treat a nonexistent register as such (reading 0) instead
+  // of reading past the register file.
+  static const uint32_t kNonexistentRegisterValue = 0;
+  const uint32_t* value_ptr;
+  if (is_memory) {
+    value_ptr = reinterpret_cast<uint32_t*>(
+        memory_->TranslatePhysical(poll_reg_addr & ~uint32_t(0x3)));
+  } else if (poll_reg_addr < RegisterFile::kRegisterCount) {
+    value_ptr = &register_file_->values[poll_reg_addr];
+  } else {
+    XELOGW("PM4_WAIT_REG_MEM: register index out of bounds: {}",
+           poll_reg_addr);
+    value_ptr = &kNonexistentRegisterValue;
+  }
+  const volatile uint32_t& value_ref = *value_ptr;
 
   bool matched = false;
+  // Sleep before the next re-check with wait_reg_mem_backoff.
+  uint64_t backoff_us = 50;
+  // Time spent with the condition unmet, for the GpuFrame stats.
+  uint64_t unmet_begin_ns = 0;
+  // debug.xendroid.wrm_log: the value seen on the first check.
+  const bool log_unmet = XE_UNLIKELY(wrm_log_left_ != 0);
+  uint32_t first_value = 0;
+  uint64_t log_begin_ns = 0;
+  bool first_check = true;
+  uint32_t value;
 
   do {
-    uint32_t value = value_ref;
+    value = value_ref;
     if (is_memory) {
       trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr & ~uint32_t(0x3)),
                                     sizeof(uint32_t));
@@ -913,20 +989,42 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
+      if (!unmet_begin_ns) {
+        unmet_begin_ns = COMMAND_PROCESSOR::FrameWaitBegin();
+      }
+      if (log_unmet && first_check) {
+        first_value = value;
+        log_begin_ns = COMMAND_PROCESSOR::FrameStatsNow();
+        if (is_memory) {
+          // Catch the guest write that will satisfy the wait.
+          COMMAND_PROCESSOR::WrmWriterArm(poll_reg_addr & ~uint32_t(0x3));
+        }
+      }
+      first_check = false;
       // Wait using the duration specified by the guest.
       if (wait >= 0x100) {
         PrepareForWait();
         if (cvars::guest_display_refresh_cap) {
           // Fixed rate vblank mode - sleep since counter updates at 50/60Hz
+          const uint64_t guest_interval_us = uint64_t(wait / 0x100) * 1000;
+          if (cvars::wait_reg_mem_backoff && backoff_us < guest_interval_us) {
+            // Most of these waits are met by the guest CPU long before the
+            // guest's poll interval runs out - re-check early and often,
+            // then settle on the guest interval for genuinely long waits
+            // (vblank counters).
+            xe::threading::NanoSleep(backoff_us * 1000);
+            backoff_us *= 2;
+          } else {
 #if XE_PLATFORM_WIN32
-          // Accurate timing: 90% sleep, 10% spin
-          const uint64_t wait_ms = wait / 0x100;
-          const uint64_t sleep_ns =
-              static_cast<uint64_t>(wait_ms * 1000000 * 0.90);
-          xe::threading::NanoSleep(sleep_ns);
+            // Accurate timing: 90% sleep, 10% spin
+            const uint64_t wait_ms = wait / 0x100;
+            const uint64_t sleep_ns =
+                static_cast<uint64_t>(wait_ms * 1000000 * 0.90);
+            xe::threading::NanoSleep(sleep_ns);
 #else
-          xe::threading::Sleep(std::chrono::milliseconds(wait / 0x100));
+            xe::threading::Sleep(std::chrono::milliseconds(wait / 0x100));
 #endif
+          }
         }
         // Unlimited vblank mode (guest_display_refresh_cap=false) - spin since
         // counter updates rapidly
@@ -940,6 +1038,20 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     }
   } while (!matched);
 
+  if (unmet_begin_ns) {
+    COMMAND_PROCESSOR::FrameStatsEndWaitRegMem(unmet_begin_ns);
+  }
+  if (log_unmet && log_begin_ns && wrm_log_left_) {
+    --wrm_log_left_;
+    XELOGI(
+        "WaitRegMem: {} {:08X} func={} ref={:08X} mask={:08X} interval={} "
+        "first={:08X} final={:08X} waited={}us | rptr={} wptr={} | {}",
+        is_memory ? "mem" : "reg", poll_reg_addr, wait_info & 0x7, ref, mask,
+        wait, first_value, value,
+        (COMMAND_PROCESSOR::FrameStatsNow() - log_begin_ns) / 1000,
+        read_ptr_index_, write_ptr_index_.load(std::memory_order_relaxed),
+        is_memory ? COMMAND_PROCESSOR::WrmWriterTake() : std::string());
+  }
   return true;
 }
 XE_NOINLINE
@@ -992,7 +1104,12 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_REG_TO_MEM(
   uint32_t reg_val;
 
   assert_true(reg_addr < RegisterFile::kRegisterCount);
-  reg_val = register_file_->values[reg_addr];
+  if (reg_addr < RegisterFile::kRegisterCount) {
+    reg_val = register_file_->values[reg_addr];
+  } else {
+    XELOGW("PM4_REG_TO_MEM: register index out of bounds: {}", reg_addr);
+    reg_val = 0;
+  }
 
   auto endianness = static_cast<xenos::Endian>(mem_addr & 0x3);
   mem_addr &= ~0x3;
@@ -1022,6 +1139,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_MEM_WRITE(
     trace_writer_.WriteMemoryWrite(CpuToGpu(addr), 4);
     write_addr += 4;
   }
+  NotifyGuestGpuProgress();
 
   return true;
 }
@@ -1056,7 +1174,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_COND_WRITE(
   } else {
     // Register.
     assert_true(poll_reg_addr < RegisterFile::kRegisterCount);
-    value = register_file_->values[poll_reg_addr];
+    if (poll_reg_addr < RegisterFile::kRegisterCount) {
+      value = register_file_->values[poll_reg_addr];
+    } else {
+      XELOGW("PM4_COND_WRITE: register index out of bounds: {}",
+             poll_reg_addr);
+      value = 0;
+    }
   }
   bool matched = MatchValueAndRef(value & mask, ref, wait_info);
 
@@ -1120,6 +1244,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE(
     }
     xe::store(write_destination, data_value);
     trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
+    NotifyGuestGpuProgress();
   } else {
     // Unknown form.
     assert_always();
@@ -1177,6 +1302,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_SHD(
   }
   xe::store(write_destination, data_value);
   trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
+  NotifyGuestGpuProgress();
   return true;
 }
 
@@ -1196,6 +1322,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_EXT(
   COMMAND_PROCESSOR::WriteEventInitiator(event_type);
   auto endianness = static_cast<xenos::Endian>(address & 0x3);
   address &= ~0x3;
+  if (XE_UNLIKELY(bin_trace_.frames_left)) {
+    COMMAND_PROCESSOR::BinTraceExtents(address);
+  }
 
   // Let us hope we can fake this.
   // This callback tells the driver the xy coordinates affected by a previous
@@ -1211,6 +1340,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_EXT(
       byte_swap<unsigned short>(0),  // min z
       byte_swap<unsigned short>(1),  // max z
   };
+  // debug.xendroid.fake_extents experiment (see BinTrace): pretend every draw
+  // covers only one 256-row band, or nothing.
+  if (XE_UNLIKELY(bin_trace_.fake_extents_mode)) {
+    const uint32_t mode = bin_trace_.fake_extents_mode;
+    uint16_t min_y = uint16_t(((mode - 1) * 256) >> 3);
+    uint16_t max_y = uint16_t((((mode - 1) * 256 + 255)) >> 3);
+    if (mode >= 4) {
+      min_y = uint16_t(xenos::kTexture2DCubeMaxWidthHeight >> 3);
+      max_y = 0;
+    }
+    extents[2] = byte_swap<unsigned short>(min_y);
+    extents[3] = byte_swap<unsigned short>(max_y);
+  }
   assert_true(endianness == xenos::Endian::k8in16);
 
   uint16_t* destination = (uint16_t*)memory_->TranslatePhysical(address);
@@ -1430,6 +1572,16 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
   // Skip to the next command, for example, if there are immediate indexes that
   // we don't support yet.
   reader_.AdvanceRead(count_remaining * sizeof(uint32_t));
+
+  if (XE_UNLIKELY(bin_trace_.frames_left)) {
+    COMMAND_PROCESSOR::BinTraceDraw((packet & 1) != 0, true);
+  }
+
+  // merge_tiling_bands: draws of an earlier band aren't repeated.
+  if (draw_succeeded && XE_UNLIKELY(tiling_band_ >= 0) &&
+      !COMMAND_PROCESSOR::PrepareTilingBandDraw()) {
+    return true;
+  }
 
   if (draw_succeeded) {
     auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();

@@ -1054,6 +1054,7 @@ void ShaderInterpreter::ExecuteVertexFetchInstruction(
     }
 
     uint32_t packed_components = 0b0000;
+    // Component 0 (and 2 of 16_16_16_16, in the second dword) is at bit 0.
     uint32_t packed_widths[4] = {}, packed_offsets[4] = {};
     uint32_t packed_dwords[] = {data[0], data[0]};
     switch (instr.data_format()) {

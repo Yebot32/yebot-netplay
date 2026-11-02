@@ -37,6 +37,7 @@
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader_storage.h"
 #include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/gpu/vulkan/vulkan_pipeline_cache_file.h"
 #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
@@ -264,6 +265,16 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
       uint32_t normalized_color_mask,
       VulkanRenderTargetCache::RenderPassKey render_pass_key,
       bool use_interpreter, Pipeline** pipeline_out);
+  // The texture sign classes of the pixel shader of the next ConfigurePipeline
+  // calls (PipelineDescription::texture_sign_classes).
+  void SetTextureSignClasses(uint32_t texture_sign_classes) {
+    texture_sign_classes_ = texture_sign_classes;
+  }
+  // PipelineDescription::texture_exp_adjust_zero of the next ConfigurePipeline
+  // calls.
+  void SetTextureExpAdjustZero(bool texture_exp_adjust_zero) {
+    texture_exp_adjust_zero_ = texture_exp_adjust_zero;
+  }
 
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
@@ -384,6 +395,20 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // key when dynamic primitive topology is enabled but topology may not cross
     // classes (dynamicPrimitiveTopologyUnrestricted absent). Zero otherwise.
     uint32_t topology_class : 2;  // 11
+    // host_alpha_to_coverage: the guest's alpha to coverage done by the host's
+    // fixed function (the pixel shaders don't emulate it then). Zero in
+    // pipeline storages written before it, which is the emulated behavior.
+    uint32_t alpha_to_coverage : 1;  // 12
+    // spirv_texture_sign_specialization: the sign class
+    // (SpirvShaderTranslator::TextureSignClass) of the texture of each of the
+    // 8 slots of the pixel shader (GetTextureSignClassSlots), 2 bits each - its
+    // specialization constants. Zero (handled at runtime) in pipeline storages
+    // written before it.
+    uint32_t texture_sign_classes : 16;  // 28
+    // spirv_texture_exp_adjust_specialization: every texture the pixel shader
+    // fetches has a zero exponent adjustment (its specialization constant).
+    // Zero (handled at runtime) in pipeline storages written before it.
+    uint32_t texture_exp_adjust_zero : 1;  // 29
 
     // Filled only for the attachments present in the render pass object.
     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
@@ -540,6 +565,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   VulkanRenderTargetCache& render_target_cache_;
   VkShaderStageFlags guest_shader_vertex_stages_;
 
+  // SetTextureSignClasses.
+  uint32_t texture_sign_classes_ = 0;
+  // SetTextureExpAdjustZero.
+  bool texture_exp_adjust_zero_ = false;
+
   // Cached device features for geometry shader creation.
   unsigned int spirv_version_;
   bool signed_zero_inf_nan_preserve_float32_;
@@ -693,6 +723,9 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
 
   // VkPipelineCache persistence path.
   std::filesystem::path vk_pipeline_cache_path_;
+  // Verified, size-bounded, atomically replaced file per driver identity (see
+  // vulkan_pipeline_cache_file.h). Set while vk_pipeline_cache_path_ is.
+  std::unique_ptr<pipeline_cache_file::Store> vk_pipeline_cache_store_;
   // Saves vk_pipeline_cache_ to vk_pipeline_cache_path_ (no-op if either is
   // unset). Takes vk_pipeline_cache_access_mutex_ exclusively, so it cannot
   // run concurrently with pipeline creation.

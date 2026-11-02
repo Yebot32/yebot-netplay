@@ -41,7 +41,10 @@ def direct_host_resolve_variants():
     here because they drive the host tool xenia-shader-cc). Each entry is
     (id, entry_source_basename, [define, ...]) where id ends in "_cs" and the
     defines select one bpp/MSAA/source-uint/scaled permutation from a shared
-    .xesli body. 24 fast-color + 60 full-color + 6 depth = 90 variants.
+    .xesli body. 24 fast-color + 60 full-color + 8 in-pass + 6 depth + 18
+    4-pixel (fast 32bpp color and depth) + 18 into-texture (3 of them storing
+    the 16-bit expansion of k_10_11_11) + 6 7e3 full-color + 2 7e3 in-pass +
+    26 format-specialized = 168 variants.
     """
     variants = []
     for source_uint in (0, 1):
@@ -97,6 +100,19 @@ def direct_host_resolve_variants():
                                   "XE_RESOLVE_INPASS=1",
                                   f"XE_RESOLVE_INPASS_MSAA={ms}",
                                   f"XE_RESOLVE_INPASS_TEXTURE={tex}"]))
+    # 7e3 in the EDRAM to 2_10_10_10 from single-sampled sources
+    # (vulkan_in_pass_resolve_7e3).
+    for tex in (0, 1):
+        variants.append(("resolve_host_color_inpass_32bpp" +
+                         ("_tex" if tex else "") + "_7e3_ps",
+                         "resolve_host_color_inpass_entry.xesli",
+                         ["XE_RESOLVE_HOST_COLOR_BPP=32",
+                          "XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES=1",
+                          "XE_RESOLVE_HOST_COLOR_SOURCE_UINT=0",
+                          "XE_RESOLVE_INPASS=1",
+                          "XE_RESOLVE_INPASS_MSAA=0",
+                          f"XE_RESOLVE_INPASS_TEXTURE={tex}",
+                          "XE_RESOLVE_INPASS_7E3=1"]))
     for msaa in (1, 2, 4):
         for scaled in (0, 1):
             ident = f"resolve_host_depth_32bpp_{msaa}xmsaa"
@@ -106,6 +122,107 @@ def direct_host_resolve_variants():
                 defines.append("XE_RESOLVE_RESOLUTION_SCALED=1")
             ident += "_cs"
             variants.append((ident, "resolve_host_depth_entry.xesli", defines))
+    # 4 pixels per thread (coalesced stores) for the 8-pixel ones: 32bpp fast
+    # color and depth (vulkan_direct_host_resolve_4px).
+    for msaa in (1, 2, 4):
+        for scaled in (0, 1):
+            suffix = f"_32bpp_{msaa}xmsaa" + ("_scaled" if scaled else "")
+            scaled_defines = ["XE_RESOLVE_RESOLUTION_SCALED=1"] if scaled else []
+            for source_uint in (0, 1):
+                ident = ("resolve_host_color" + ("_uint" if source_uint else "") +
+                         suffix + "_4px_cs")
+                variants.append((ident, "resolve_host_color_entry.xesli", [
+                    "XE_RESOLVE_HOST_COLOR_BPP=32",
+                    f"XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES={msaa}",
+                    f"XE_RESOLVE_HOST_COLOR_SOURCE_UINT={source_uint}",
+                    "XE_RESOLVE_HOST_4PX=1"] + scaled_defines))
+            variants.append(("resolve_host_depth" + suffix + "_4px_cs",
+                             "resolve_host_depth_entry.xesli", [
+                                 f"XE_RESOLVE_HOST_DEPTH_MSAA_SAMPLES={msaa}",
+                                 "XE_RESOLVE_HOST_4PX=1"] + scaled_defines))
+    # Unscaled resolves that also store into the destination texture
+    # (vulkan_direct_host_resolve_to_texture): 4-pixel 32bpp fast color, full
+    # color to 32bpp and 4-pixel depth.
+    for msaa in (1, 2, 4):
+        for source_uint in (0, 1):
+            uint = "_uint" if source_uint else ""
+            color_defines = [f"XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES={msaa}",
+                             f"XE_RESOLVE_HOST_COLOR_SOURCE_UINT={source_uint}",
+                             "XE_RESOLVE_HOST_TEXTURE=1"]
+            variants.append((f"resolve_host_color{uint}_32bpp_{msaa}xmsaa_4px_tex_cs",
+                             "resolve_host_color_entry.xesli",
+                             ["XE_RESOLVE_HOST_COLOR_BPP=32",
+                              "XE_RESOLVE_HOST_4PX=1"] + color_defines))
+            variants.append((f"resolve_host_color_full{uint}_32bpp_{msaa}xmsaa_tex_cs",
+                             "resolve_host_color_full_entry.xesli",
+                             ["XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP=32"] +
+                             color_defines))
+        variants.append((f"resolve_host_depth_32bpp_{msaa}xmsaa_4px_tex_cs",
+                         "resolve_host_depth_entry.xesli",
+                         [f"XE_RESOLVE_HOST_DEPTH_MSAA_SAMPLES={msaa}",
+                          "XE_RESOLVE_HOST_4PX=1", "XE_RESOLVE_HOST_TEXTURE=1"]))
+        # Full color to k_10_11_11, storing the texture the expansion to 16
+        # bits per component its upload makes (float sources only).
+        variants.append((f"resolve_host_color_full_32bpp_{msaa}xmsaa_tex_r11g11b10_cs",
+                         "resolve_host_color_full_entry.xesli",
+                         ["XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP=32",
+                          f"XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES={msaa}",
+                          "XE_RESOLVE_HOST_COLOR_SOURCE_UINT=0",
+                          "XE_RESOLVE_HOST_TEXTURE=1",
+                          "XE_RESOLVE_HOST_TEXTURE_R11G11B10=1"]))
+    # Full color of 7e3 in the EDRAM to 2_10_10_10, unscaled, also storing into
+    # the texture (vulkan_direct_host_resolve_7e3_variant; 1x with
+    # vulkan_direct_host_resolve_format_variants).
+    for msaa in (1, 2, 4):
+        for tex in (0, 1):
+            defines = ["XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP=32",
+                       f"XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES={msaa}",
+                       "XE_RESOLVE_HOST_COLOR_SOURCE_UINT=0",
+                       "XE_RESOLVE_HOST_COLOR_FULL_7E3_TO_2_10_10_10=1"]
+            if tex:
+                defines.append("XE_RESOLVE_HOST_TEXTURE=1")
+            variants.append(
+                (f"resolve_host_color_full_7e3_32bpp_{msaa}xmsaa" +
+                 ("_tex" if tex else "") + "_cs",
+                 "resolve_host_color_full_entry.xesli", defines))
+    # One EDRAM format known when compiled, unscaled
+    # (vulkan_direct_host_resolve_format_variants): the 4-pixel 32bpp fast color
+    # (8_8_8_8 and 2_10_10_10, also storing into the texture) and depth (D24S8
+    # and D24FS8, 4 pixels, also storing into the texture, and 8 pixels at 1x).
+    color_formats = (("8888", "kXenosColorRenderTargetFormat_8_8_8_8"),
+                     ("2101010", "kXenosColorRenderTargetFormat_2_10_10_10"))
+    depth_formats = (("d24s8", "kXenosDepthRenderTargetFormat_D24S8"),
+                     ("d24fs8", "kXenosDepthRenderTargetFormat_D24FS8"))
+    for msaa in (1, 2, 4):
+        for fmt, macro in color_formats:
+            for tex in (0, 1):
+                defines = ["XE_RESOLVE_HOST_COLOR_BPP=32",
+                           f"XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES={msaa}",
+                           "XE_RESOLVE_HOST_COLOR_SOURCE_UINT=0",
+                           "XE_RESOLVE_HOST_4PX=1",
+                           f"XE_RESOLVE_HOST_COLOR_EDRAM_FORMAT={macro}"]
+                if tex:
+                    defines.append("XE_RESOLVE_HOST_TEXTURE=1")
+                variants.append(
+                    (f"resolve_host_color_32bpp_{msaa}xmsaa_4px_{fmt}" +
+                     ("_tex" if tex else "") + "_cs",
+                     "resolve_host_color_entry.xesli", defines))
+        for fmt, macro in depth_formats:
+            for tex in (0, 1):
+                defines = [f"XE_RESOLVE_HOST_DEPTH_MSAA_SAMPLES={msaa}",
+                           "XE_RESOLVE_HOST_4PX=1",
+                           f"XE_RESOLVE_HOST_DEPTH_EDRAM_FORMAT={macro}"]
+                if tex:
+                    defines.append("XE_RESOLVE_HOST_TEXTURE=1")
+                variants.append(
+                    (f"resolve_host_depth_32bpp_{msaa}xmsaa_4px_{fmt}" +
+                     ("_tex" if tex else "") + "_cs",
+                     "resolve_host_depth_entry.xesli", defines))
+    for fmt, macro in depth_formats:
+        variants.append((f"resolve_host_depth_32bpp_1xmsaa_{fmt}_cs",
+                         "resolve_host_depth_entry.xesli",
+                         ["XE_RESOLVE_HOST_DEPTH_MSAA_SAMPLES=1",
+                          f"XE_RESOLVE_HOST_DEPTH_EDRAM_FORMAT={macro}"]))
     return variants
 
 

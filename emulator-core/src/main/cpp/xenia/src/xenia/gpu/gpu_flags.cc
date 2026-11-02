@@ -51,6 +51,17 @@ DEFINE_bool(guest_display_refresh_cap, true,
             "possible.",
             "GPU");
 
+DEFINE_bool(
+    wait_reg_mem_backoff, false,
+    "Re-check an unmet PM4_WAIT_REG_MEM condition after short sleeps growing "
+    "from 50 us up to the guest-requested poll interval, instead of sleeping "
+    "the whole interval (1 ms or more) before every re-check. Only helps when "
+    "the guest satisfies such waits within a fraction of the interval. "
+    "Measured neutral on Forza Horizon (POCO F7): of ~170 waits per frame "
+    "fewer than one is unmet on the first check, and that one genuinely "
+    "lasts ~7 ms either way (see the GpuFrame wait_reg_mem stats).",
+    "GPU");
+
 DEFINE_uint32(
     framerate_limit, 60,
     "Host frame rate limit in FPS. 0 = unlimited.\n"

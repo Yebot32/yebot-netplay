@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/draw_util.h"
 
+#include <atomic>
+
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -1444,6 +1446,25 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   // reason to try to do k_8_8_8_8 packing.
   info_out.copy_dest_info.copy_dest_format = xenos::ColorFormat(dest_format);
   if (!cvars::resolve_copy_dest_number_packing) {
+    // A title asking for another number format than the one packed is told
+    // which settings would honour it - Crysis 3 lost its lighting to that,
+    // resolving 7e3 to unsigned integer destinations with exponent biases.
+    const xenos::SurfaceNumberFormat requested_number =
+        rb_copy_dest_info.copy_dest_number;
+    if (!is_depth &&
+        requested_number !=
+            xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction &&
+        requested_number != xenos::SurfaceNumberFormat::kFloat) {
+      static std::atomic<uint32_t> logged{0};
+      if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+        XELOGW(
+            "Resolve to {} with number format {} and exponent bias {} packed "
+            "as an unsigned fraction - resolve_copy_dest_number_packing and "
+            "accurate_resolve_number_formats honour it",
+            FormatInfo::GetName(xenos::TextureFormat(dest_format)),
+            uint32_t(requested_number), exp_bias);
+      }
+    }
     // Pre-upstream behaviour: the full-resolve packers assumed an unsigned
     // fraction destination. Forcing it here also feeds the fast-path number
     // format test below, so a raw copy stays eligible exactly as it used to.

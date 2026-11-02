@@ -470,7 +470,7 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
 
   uint32_t color_targets_written = current_shader().writes_color_targets();
 
-  if ((color_targets_written & 0b1) && !IsExecutionModeEarlyFragmentTests()) {
+  if ((color_targets_written & 0b1) && !IsAlphaTestAndCoverageDisabled()) {
     spv::Id fsi_sample_mask_in_rt_0_alpha_tests = spv::NoResult;
     spv::Block* block_rt_0_alpha_tests_rt_written_head = nullptr;
     spv::Block* block_rt_0_alpha_tests_rt_written_merge = nullptr;

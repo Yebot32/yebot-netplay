@@ -10,6 +10,7 @@
 #include "xenia/ui/vulkan/vulkan_gpu_completion_timeline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 
 #include "xenia/base/assert.h"
@@ -18,6 +19,17 @@
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+namespace {
+uint64_t TimelineNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+constexpr uint64_t kSlowFencePollNs = 50000;
+// Bounded collection: submissions this new are left alone when reclaiming.
+constexpr size_t kReclaimKeepNewest = 4;
+}  // namespace
 
 VulkanGPUCompletionTimeline::~VulkanGPUCompletionTimeline() {
 #ifndef NDEBUG
@@ -66,9 +78,19 @@ VulkanGPUCompletionTimeline::AcquireFenceForSubmission(
   // submissions are pending, the oldest one has long retired, so the poll
   // reclaims it without a meaningful wait.
   constexpr size_t kMaxPendingBeforeReclaimPoll = 8;
+  static_assert(kMaxPendingBeforeReclaimPoll > kReclaimKeepNewest);
   if (free_fences_.empty() &&
       pending_submission_fences_.size() >= kMaxPendingBeforeReclaimPoll) {
-    UpdateCompletedSubmission();
+    if (bounded_collection()) {
+      // Only the older submissions: polling the newest ones too would wait
+      // for the whole queue to drain (see SetBoundedCollection).
+      PollPendingFences(
+          pending_submission_fences_[pending_submission_fences_.size() -
+                                     kReclaimKeepNewest - 1]
+              .first);
+    } else {
+      UpdateCompletedSubmission();
+    }
   }
 
   VkFence fence = VK_NULL_HANDLE;
@@ -137,9 +159,27 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
 }
 
 void VulkanGPUCompletionTimeline::UpdateCompletedSubmission() {
-  while (!pending_submission_fences_.empty()) {
+  PollPendingFences(UINT64_MAX);
+}
+
+void VulkanGPUCompletionTimeline::UpdateCompletedSubmissionUpTo(
+    const uint64_t awaited_submission) {
+  PollPendingFences(bounded_collection() ? awaited_submission : UINT64_MAX);
+}
+
+void VulkanGPUCompletionTimeline::PollPendingFences(
+    const uint64_t last_submission) {
+  while (!pending_submission_fences_.empty() &&
+         pending_submission_fences_.front().first <= last_submission) {
+    const uint64_t poll_begin_ns = TimelineNowNs();
     const VkResult fence_status = vulkan_device_->functions().vkGetFenceStatus(
         vulkan_device_->device(), pending_submission_fences_.front().second);
+    const uint64_t poll_ns = TimelineNowNs() - poll_begin_ns;
+    ++driver_wait_stats_.polls;
+    driver_wait_stats_.poll_ns += poll_ns;
+    if (poll_ns > kSlowFencePollNs) {
+      ++driver_wait_stats_.slow_polls;
+    }
     if (fence_status != VK_SUCCESS) {
       // Not ready, or an error.
       if (fence_status == VK_ERROR_DEVICE_LOST) {
@@ -177,10 +217,13 @@ void VulkanGPUCompletionTimeline::AwaitSubmissionImpl(
     submission_end_iterator = std::next(submission_end_iterator);
   }
   if (submission_end_iterator != pending_submission_fences_.cbegin()) {
+    const uint64_t wait_begin_ns = TimelineNowNs();
     const VkResult fence_wait_result =
         vulkan_device_->functions().vkWaitForFences(
             vulkan_device_->device(), 1,
             &std::prev(submission_end_iterator)->second, VK_TRUE, UINT64_MAX);
+    ++driver_wait_stats_.waits;
+    driver_wait_stats_.wait_ns += TimelineNowNs() - wait_begin_ns;
     if (fence_wait_result != VK_SUCCESS) {
       XELOGE(
           "VulkanGPUCompletionTimeline[{}]: vkWaitForFences -> {} (awaited "

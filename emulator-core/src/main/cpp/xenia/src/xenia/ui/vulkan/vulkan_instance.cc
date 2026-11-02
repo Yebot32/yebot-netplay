@@ -9,6 +9,8 @@
 
 #include "xenia/ui/vulkan/vulkan_instance.h"
 
+#include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -108,6 +110,17 @@ DEFINE_bool(
         adrenotools_force_max_clocks, false,
         "Custom Driver Force Max Clocks",
         "Vulkan");
+DEFINE_int32(
+    adrenotools_turbo_reassert_seconds, 5,
+    "With a custom driver: request the KGSL GPU power control state (Custom "
+    "Driver Force Max Clocks) again after the emulator resumes from a pause "
+    "and every this many seconds while it runs, instead of only when the "
+    "Vulkan instance is created (0). The forced state does not survive the app "
+    "losing focus: on a POCO F7 (Adreno 825), after opening the notification "
+    "shade Forza Horizon ran at half its frame rate (GPU 48 -> 101 ms per "
+    "frame) until restarted; requesting it again restores it at once. Read at "
+    "run time (debug.xendroid.turbo_reassert on Android).",
+    "Vulkan");
 DEFINE_string(
         turnip_debug, "sysmem",
         "TU_DEBUG flags passed to the Turnip (Mesa freedreno) Vulkan driver, "
@@ -127,11 +140,16 @@ DEFINE_string(
     "Vulkan");
 
 DEFINE_string(
-    ir3_debug, "",
-    "Comma-separated IR3_DEBUG flags for the Turnip shader compiler, e.g. "
-    "nopreamble or noearlypreamble to keep uniform math out of the shader "
-    "preamble. Empty leaves IR3_DEBUG unset.",
+    ir3_debug, "noearlypreamble",
+    "Comma-separated IR3_SHADER_DEBUG flags for the Turnip shader compiler, "
+    "e.g. nopreamble or noearlypreamble to keep uniform math out of the shader "
+    "preamble, nouboopt, nocache. Each value has its own Vulkan pipeline "
+    "cache file. Empty leaves the variable unset. noearlypreamble by default "
+    "since 2026-10-05: Turnip's early preamble costs every small draw ~1.6 us "
+    "of GPU time (Forza Horizon -0.8 ms a frame without it); other drivers "
+    "ignore the variable.",
     "Vulkan");
+UPDATE_from_string(ir3_debug, 2026, 10, 5, 11, "");
 
 DEFINE_string(
     turnip_perf_sampler, "",
@@ -165,6 +183,34 @@ DEFINE_bool(
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
+namespace {
+// Set once the custom driver path has made the first request.
+std::atomic<bool> gpu_power_control_in_use{false};
+}  // namespace
+
+bool RequestGpuPowerControl(const char* reason) {
+  if (!gpu_power_control_in_use.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  // Made either way: KGSL power control is device-wide state, which a request
+  // with the option off returns to the governor.
+  // This libadrenotools' adrenotools_set_turbo reports no result, so a refused
+  // request cannot be told apart from a granted one here.
+  adrenotools_set_turbo(cvars::adrenotools_force_max_clocks);
+  if (reason) {
+    XELOGI("GPU clocks: KGSL power control {} requested ({})",
+           cvars::adrenotools_force_max_clocks
+               ? "at the maximum clock"
+               : "returned to the kernel governor",
+           reason);
+  }
+  return true;
+}
+#else
+bool RequestGpuPowerControl(const char* reason) { return false; }
+#endif
 
 std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     const bool with_surface, const int validation_level) {
@@ -214,9 +260,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
       XELOGI("Set FD_DEV_FEATURES={} for the Turnip Vulkan driver", fd_features);
     }
     // Read when the compiler is created, so set it before the driver loads.
+    // Mesa's ir3 reads IR3_SHADER_DEBUG (IR3_DEBUG alone had no effect with
+    // Mesa 26); both are set for older or modified builds.
     if (!std::string(cvars::ir3_debug).empty()) {
+      setenv("IR3_SHADER_DEBUG", cvars::ir3_debug.c_str(), 1);
       setenv("IR3_DEBUG", cvars::ir3_debug.c_str(), 1);
-      XELOGI("Set IR3_DEBUG={} for the Turnip shader compiler",
+      XELOGI("Set IR3_SHADER_DEBUG={} for the Turnip shader compiler",
              cvars::ir3_debug);
     }
     // Whole-GPU hardware counter sampler in the instrumented Turnip build.
@@ -254,9 +303,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
         if (!vulkan_instance->loader_) {
           XELOGE("adrenotools failed to load custom Vulkan driver '{}': {}",
                  custom_lib_path, dlerror());
+        } else {
+          vulkan_instance->custom_driver_path_ = custom_lib_path;
         }
 
-        adrenotools_set_turbo(cvars::adrenotools_force_max_clocks);
+        gpu_power_control_in_use.store(true, std::memory_order_relaxed);
+        RequestGpuPowerControl("startup");
     }
     else {
         if (!custom_lib_path.empty()) {

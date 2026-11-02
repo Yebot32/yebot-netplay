@@ -65,6 +65,7 @@ void main() {
   float4_xe color = subpassLoad(xe_resolve_inpass_source);
 #endif
 
+#ifndef XE_RESOLVE_INPASS_7E3
   // Parity with XeResolveLoad2RGBAColors: the destination exponent-bias factor
   // is applied after sample averaging (the averaging 0.5 is explicit above,
   // where the full path folds it into the factor instead). RGB-only for
@@ -81,6 +82,7 @@ void main() {
   } else {
     color *= resolve_info.dest_exp_bias_factor;
   }
+#endif
 #if XE_RESOLVE_HOST_COLOR_BPP == 64
   uint2_xe packed_pixel =
       XeResolveHostColorPack64Float(color, resolve_info.edram_format);
@@ -102,6 +104,31 @@ void main() {
   byte_buffer_align8_store8_xe(
       xe_resolve_dest, dest_address,
       XeEndianSwap64(packed_pixel, resolve_info.dest_endian_128));
+#elif defined(XE_RESOLVE_INPASS_7E3)
+  // 7e3 in the EDRAM resolved to 2_10_10_10 (vulkan_in_pass_resolve_7e3), as
+  // the full color direct path converts it: the sample packed to the EDRAM
+  // format and back, the exponent bias on RGB, the red/blue swap, then the
+  // destination format.
+  float4_xe dest_color = XeUnpackR10G10B10A2Float(
+      XeResolveHostColorPack32Float(
+          color, kXenosColorRenderTargetFormat_2_10_10_10_FLOAT));
+  dest_color.xyz *= resolve_info.dest_exp_bias_factor;
+  if (resolve_info.dest_swap) {
+    dest_color = dest_color.bgra;
+  }
+  uint packed_pixel =
+      XePackR10G10B10A2(dest_color, resolve_info.dest_num_format);
+#if XE_RESOLVE_INPASS_TEXTURE
+  imageStore(xe_resolve_inpass_texture,
+             int2_xe(pixel_index) +
+                 int2_xe(push_const_xe(xe_resolve_inpass_texture_x0),
+                         push_const_xe(xe_resolve_inpass_texture_y0)),
+             uint4_xe(packed_pixel, 0u, 0u, 0u));
+#endif
+  uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 2u);
+  byte_buffer_align4_store4_xe(
+      xe_resolve_dest, dest_address,
+      XeEndianSwap32(packed_pixel, resolve_info.dest_endian_128));
 #else
   uint packed_pixel =
       XeResolveHostColorPack32Float(color, resolve_info.edram_format);

@@ -40,6 +40,23 @@ DEFINE_int32(
     "normal use; there is no reason to lower it except for frame capture.",
     "Vulkan");
 
+DEFINE_bool(
+    vulkan_pipeline_statistics, false,
+    "Diagnostics: enable VK_KHR_pipeline_executable_properties when the "
+    "driver has it and log the driver's statistics (instruction counts, "
+    "registers, occupancy...) of every guest graphics pipeline as it is "
+    "created (PipeStats lines). Takes effect at startup.",
+    "Vulkan");
+
+DEFINE_bool(
+    vulkan_fragment_shading_rate, false,
+    "Enable VK_KHR_fragment_shading_rate when the driver has it, with the "
+    "shading rate of the guest draws made dynamic, so vulkan_shading_rate can "
+    "shade multisampled scene draws once per 2x1 or 2x2 pixels. Changes every "
+    "pipeline (they are compiled again the first time). Takes effect at "
+    "startup.",
+    "Vulkan");
+
 namespace xe {
 namespace ui {
 namespace vulkan {
@@ -515,6 +532,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;
   bool ext_1_2_EXT_host_query_reset = false;
   bool ext_1_2_KHR_shader_float16_int8 = false;
+  bool ext_EXT_robustness2 = false;
   bool ext_1_1_KHR_maintenance1 = false;
   bool ext_1_2_KHR_shader_float_controls = false;
   bool ext_EXT_fragment_shader_interlock = false;
@@ -543,6 +561,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(EXT_host_query_reset, 1, 2)
       // #83. Float16 and Int16 capabilities are declared by system shaders.
       XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION(KHR_shader_float16_int8, 1, 2)
+      XE_UI_VULKAN_LOCAL_EXTENSION(EXT_robustness2)
       // #252.
       XE_UI_VULKAN_LOCAL_EXTENSION(EXT_fragment_shader_interlock)
       // #55.
@@ -580,6 +599,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (get_physical_device_properties2_supported) {
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_external_memory_host)
     }
+    // #270. Only for the pipeline statistics diagnostics.
+    if (get_physical_device_properties2_supported &&
+        cvars::vulkan_pipeline_statistics) {
+      XE_UI_VULKAN_STRUCT_EXTENSION(KHR_pipeline_executable_properties)
+    }
+    // #227. Only for the coarse shading option.
+    if (get_physical_device_properties2_supported &&
+        properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0) &&
+        cvars::vulkan_fragment_shading_rate) {
+      XE_UI_VULKAN_STRUCT_EXTENSION(KHR_fragment_shading_rate)
+    }
   }
 
 #undef XE_UI_VULKAN_STRUCT_EXTENSION
@@ -610,6 +640,16 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         return nullptr;
       }
       assert_true(supported_extension_count == supported_extensions.size());
+      // All of them, to see what a driver offers beyond what's requested.
+      std::string supported_line;
+      for (size_t i = 0; i < supported_extensions.size(); ++i) {
+        supported_line += ' ';
+        supported_line += supported_extensions[i].extensionName;
+        if (i % 12 == 11 || i + 1 == supported_extensions.size()) {
+          XELOGI("Supported Vulkan device extensions:{}", supported_line);
+          supported_line.clear();
+        }
+      }
       for (const VkExtensionProperties& supported_extension :
            supported_extensions) {
         const auto requested_extension_it =
@@ -670,6 +710,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VulkanFeatures<VkPhysicalDeviceShaderFloat16Int8Features,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES>
       features_KHR_shader_float16_int8;
+  VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT> features_EXT_robustness2;
   VulkanFeatures<VkPhysicalDeviceVulkan13Features,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES>
       features_1_3;
@@ -740,8 +782,20 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VkPhysicalDeviceExternalMemoryHostPropertiesEXT
       properties_EXT_external_memory_host = {
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+  VulkanFeatures<
+      VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR,
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR>
+      features_KHR_pipeline_executable_properties;
+  VulkanFeatures<
+      VkPhysicalDeviceFragmentShadingRateFeaturesKHR,
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR>
+      features_KHR_fragment_shading_rate;
+  VkPhysicalDeviceFragmentShadingRatePropertiesKHR
+      properties_KHR_fragment_shading_rate = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR};
 
   if (get_physical_device_properties2_supported) {
+    if (ext_EXT_robustness2) features_EXT_robustness2.Link(supported_features_2, device_create_info);
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
       features_1_1.Link(supported_features_2, device_create_info);
     }
@@ -832,8 +886,60 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       properties_EXT_external_memory_host.pNext = properties_2.pNext;
       properties_2.pNext = &properties_EXT_external_memory_host;
     }
+    if (device->extensions_.ext_KHR_pipeline_executable_properties) {
+      features_KHR_pipeline_executable_properties.Link(supported_features_2,
+                                                       device_create_info);
+    }
+    if (device->extensions_.ext_KHR_fragment_shading_rate) {
+      features_KHR_fragment_shading_rate.Link(supported_features_2,
+                                              device_create_info);
+      properties_KHR_fragment_shading_rate.pNext = properties_2.pNext;
+      properties_2.pNext = &properties_KHR_fragment_shading_rate;
+    }
     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
+    if (device->extensions_.ext_KHR_fragment_shading_rate) {
+      // Only the rate of the pipeline - not per primitive or from an
+      // attachment.
+      features_KHR_fragment_shading_rate.enabled.pipelineFragmentShadingRate =
+          features_KHR_fragment_shading_rate.supported
+              .pipelineFragmentShadingRate;
+      if (features_KHR_fragment_shading_rate.supported
+              .pipelineFragmentShadingRate) {
+        const VkPhysicalDeviceFragmentShadingRatePropertiesKHR& fsr =
+            properties_KHR_fragment_shading_rate;
+        device->properties_.pipelineFragmentShadingRate = true;
+        device->properties_.fragmentShadingRateWithShaderDepthStencilWrites =
+            fsr.fragmentShadingRateWithShaderDepthStencilWrites != VK_FALSE;
+        device->properties_.fragmentShadingRateWithSampleMask =
+            fsr.fragmentShadingRateWithSampleMask != VK_FALSE;
+        device->properties_.fragmentShadingRateWithShaderSampleMask =
+            fsr.fragmentShadingRateWithShaderSampleMask != VK_FALSE;
+        device->properties_.maxFragmentShadingRateRasterizationSamples =
+            fsr.maxFragmentShadingRateRasterizationSamples;
+        XELOGI(
+            "Vulkan fragment shading rate: max fragment size {}x{}, max "
+            "samples {}, with shader depth/stencil writes {}, with sample mask "
+            "{}, with shader sample mask {}, non-trivial combiners {}",
+            fsr.maxFragmentSize.width, fsr.maxFragmentSize.height,
+            uint32_t(fsr.maxFragmentShadingRateRasterizationSamples),
+            fsr.fragmentShadingRateWithShaderDepthStencilWrites,
+            fsr.fragmentShadingRateWithSampleMask,
+            fsr.fragmentShadingRateWithShaderSampleMask,
+            fsr.fragmentShadingRateNonTrivialCombinerOps);
+      } else {
+        device->extensions_.ext_KHR_fragment_shading_rate = false;
+      }
+    }
+    if (device->extensions_.ext_KHR_pipeline_executable_properties) {
+      features_KHR_pipeline_executable_properties.enabled
+          .pipelineExecutableInfo = features_KHR_pipeline_executable_properties
+                                        .supported.pipelineExecutableInfo;
+      if (!features_KHR_pipeline_executable_properties.supported
+               .pipelineExecutableInfo) {
+        device->extensions_.ext_KHR_pipeline_executable_properties = false;
+      }
+    }
     // Mirror supported deviceFault into the enabled struct so the driver
     // collects fault info during normal execution. Disable the extension flag
     // if the feature wasn't actually supported - vkGetDeviceFaultInfoEXT is
@@ -1034,6 +1140,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   std::memcpy(device->properties_.pipelineCacheUUID,
               properties.pipelineCacheUUID, VK_UUID_SIZE);
   std::strcpy(device->properties_.deviceName, properties.deviceName);
+  std::memcpy(device->properties_.pipelineCacheUUID, properties.pipelineCacheUUID,
+              VK_UUID_SIZE);
 
   XELOGI(
       "Vulkan device '{}': API {}.{}.{} ({}.{} used), vendor 0x{:04X}, device "
@@ -1164,6 +1272,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     XE_UI_VULKAN_FEATURE(shaderClipDistance)
     XE_UI_VULKAN_FEATURE(shaderCullDistance)
     XE_UI_VULKAN_FEATURE(shaderInt16)
+    XE_UI_VULKAN_FEATURE(shaderStorageImageExtendedFormats)
+    XE_UI_VULKAN_FEATURE(shaderStorageImageReadWithoutFormat)
+    XE_UI_VULKAN_FEATURE(shaderStorageImageWriteWithoutFormat)
     XE_UI_VULKAN_FEATURE(sparseBinding)
     XE_UI_VULKAN_FEATURE(sparseResidencyBuffer)
   }
@@ -1175,6 +1286,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_FEATURE_2(features_1_2, scalarBlockLayout);
       XE_UI_VULKAN_FEATURE_2(features_1_2, hostQueryReset);
       XE_UI_VULKAN_FEATURE_2(features_1_2, shaderFloat16);
+      XE_UI_VULKAN_FEATURE_2(features_1_2, vulkanMemoryModel);
+      XE_UI_VULKAN_FEATURE_2(features_1_2, vulkanMemoryModelDeviceScope);
     }
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {
@@ -1189,6 +1302,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   }
   device->extensions_.ext_1_2_EXT_host_query_reset =
       ext_1_2_EXT_host_query_reset;
+  if (ext_EXT_robustness2 && with_gpu_emulation) {
+    XE_UI_VULKAN_FEATURE_2(features_EXT_robustness2, nullDescriptor);
+  }
 
   // shaderDrawParameters (Vulkan 1.1). Needed by shaders reading SV_VertexID
   // with Direct3D semantics, which are compiled to VertexIndex minus BaseVertex
@@ -1523,6 +1639,40 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
   }
 
+  // Optional coarse shading - failing to load is not fatal.
+  if (device->properties_.pipelineFragmentShadingRate) {
+    device->vkCmdSetFragmentShadingRateKHR_ =
+        PFN_vkCmdSetFragmentShadingRateKHR(ifn.vkGetDeviceProcAddr(
+            device->device_, "vkCmdSetFragmentShadingRateKHR"));
+    if (!device->vkCmdSetFragmentShadingRateKHR_) {
+      device->properties_.pipelineFragmentShadingRate = false;
+      device->extensions_.ext_KHR_fragment_shading_rate = false;
+    }
+  }
+
+  // Optional pipeline statistics queries - failing to load is not fatal.
+  if (device->extensions_.ext_KHR_pipeline_executable_properties) {
+    device->vkGetPipelineExecutablePropertiesKHR_ =
+        PFN_vkGetPipelineExecutablePropertiesKHR(ifn.vkGetDeviceProcAddr(
+            device->device_, "vkGetPipelineExecutablePropertiesKHR"));
+    device->vkGetPipelineExecutableStatisticsKHR_ =
+        PFN_vkGetPipelineExecutableStatisticsKHR(ifn.vkGetDeviceProcAddr(
+            device->device_, "vkGetPipelineExecutableStatisticsKHR"));
+    device->vkGetPipelineExecutableInternalRepresentationsKHR_ =
+        PFN_vkGetPipelineExecutableInternalRepresentationsKHR(
+            ifn.vkGetDeviceProcAddr(
+                device->device_,
+                "vkGetPipelineExecutableInternalRepresentationsKHR"));
+    if (!device->vkGetPipelineExecutablePropertiesKHR_ ||
+        !device->vkGetPipelineExecutableStatisticsKHR_) {
+      device->extensions_.ext_KHR_pipeline_executable_properties = false;
+    }
+    XELOGI("Vulkan pipeline statistics {}",
+           device->extensions_.ext_KHR_pipeline_executable_properties
+               ? "enabled"
+               : "unavailable");
+  }
+
   // Optional host-pointer import function - failing to load disables zero-copy.
   if (device->extensions_.ext_EXT_external_memory_host) {
     device->vkGetMemoryHostPointerPropertiesEXT_ =
@@ -1657,9 +1807,12 @@ void VulkanDevice::LogFaultInfo() {
   VkDeviceFaultInfoEXT info = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
   info.pAddressInfos = address_infos.empty() ? nullptr : address_infos.data();
   info.pVendorInfos = vendor_infos.empty() ? nullptr : vendor_infos.data();
-  // Skip vendor binary - we don't have a place to dump it anyway.
+  // Skip vendor binary - we don't have a place to dump it anyway. A driver
+  // that has one reports VK_INCOMPLETE for the rest, which is still valid.
   counts.vendorBinarySize = 0;
-  if (vkGetDeviceFaultInfoEXT_(device_, &counts, &info) != VK_SUCCESS) {
+  const VkResult fault_info_result =
+      vkGetDeviceFaultInfoEXT_(device_, &counts, &info);
+  if (fault_info_result != VK_SUCCESS && fault_info_result != VK_INCOMPLETE) {
     XELOGE("VK_EXT_device_fault: failed to query fault info");
     return;
   }

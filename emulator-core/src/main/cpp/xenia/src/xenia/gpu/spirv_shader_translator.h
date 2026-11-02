@@ -66,8 +66,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
       kPolygonOffset,
       kFloat24TruncatingPolygonOffset,
       kFloat24RoundingPolygonOffset,
+      // No alpha test or alpha-to-coverage for this draw, but retain normal
+      // depth/stencil ordering. In particular, this is NOT kEarlyHint: guest
+      // kill, depth output and memexport must retain their original semantics.
+      // Uses the final value in the 3-bit field, keeping the cache key 64-bit.
+      kNoAlphaTests,
       // TODO(Triang3l): Unorm24 (rounding) output mode.
     };
+    static_assert(uint32_t(DepthStencilMode::kNoAlphaTests) < (1u << 3));
 
     struct {
       // uint32_t 0.
@@ -544,6 +550,96 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // Piecewise-linear gamma conversions for k_8_8_8_8_GAMMA values stored as
   // linear UNORM16. Values may be scalars or vectors of up to 3 components.
   // Unless pre_saturated is true, inputs are clamped to [0, 1] (NaN to 0).
+  // Bits of spirv_ps_relaxed_math and the math experiment options.
+  enum MathRelaxation : uint32_t {
+    // No Shader Model 3 "0 * anything = 0" in multiplications.
+    kMathRelaxationMultiplyZero = 1,
+    // No rounding to 21 mantissa bits after exp, log, sqrt, rsq and rcp.
+    kMathRelaxationPrecision = 2,
+    // Texture fetches ignore the component signs (experiment, wrong colors).
+    kMathRelaxationTextureSigns = 4,
+    // Floating-point contraction (fused multiply-add) allowed.
+    kMathRelaxationContraction = 8,
+    // Texture fetches read 0 for the fetch constant words they decode (size,
+    // LOD bias, exponent bias, dimensions) - experiment, WRONG textures.
+    kMathRelaxationTextureFetchConstants = 16,
+  };
+
+  // spirv_texture_sign_specialization: the swizzled signs (2 bits for each of
+  // the 4 result components) of the textures a pixel shader fetches, known per
+  // pipeline as specialization constants (SpecId kSpecIdTextureSignClassFirst
+  // + slot), so the host compiler folds the branches and selects handling the
+  // signs at runtime. A slot is the fetch constant itself (0-7), or with
+  // spirv_texture_sign_specialization_used the index of the fetch constant
+  // among the distinct ones of the shader in ascending order (the first 8 of
+  // them, whichever they are). Patterns other than these are left to the
+  // runtime handling.
+  static constexpr uint32_t kTextureSignClassFetchConstantCount = 8;
+  static constexpr uint32_t kSpecIdTextureSignClassFirst = 1000;
+  // spirv_texture_exp_adjust_specialization: whether every texture the pixel
+  // shader fetches has a zero exponent adjustment (word 3 bits 13:18), known
+  // per pipeline (a boolean specialization constant, false by default), so
+  // the host compiler drops the multiplication of every fetched component by
+  // 2^0.
+  static constexpr uint32_t kSpecIdTextureExpAdjustZero = 1010;
+  enum TextureSignClass : uint32_t {
+    kTextureSignClassRuntime,
+    // All components unsigned.
+    kTextureSignClassUnsigned,
+    // X, Y and Z gamma, W unsigned (gamma color with linear alpha).
+    kTextureSignClassGammaXYZ,
+    // All components gamma.
+    kTextureSignClassGamma,
+  };
+  static uint32_t GetTextureSignClassSwizzledSigns(uint32_t sign_class) {
+    switch (sign_class) {
+      case kTextureSignClassGammaXYZ:
+        return uint32_t(xenos::TextureSign::kGamma) * 0b00010101;
+      case kTextureSignClassGamma:
+        return uint32_t(xenos::TextureSign::kGamma) * 0b01010101;
+      default:
+        return uint32_t(xenos::TextureSign::kUnsigned) * 0b01010101;
+    }
+  }
+  static uint32_t GetTextureSignClass(uint32_t swizzled_signs) {
+    for (uint32_t sign_class = kTextureSignClassUnsigned;
+         sign_class <= kTextureSignClassGamma; ++sign_class) {
+      if ((swizzled_signs & 0xFF) ==
+          GetTextureSignClassSwizzledSigns(sign_class)) {
+        return sign_class;
+      }
+    }
+    return kTextureSignClassRuntime;
+  }
+  // The slot of each fetch constant (kTextureSignClassFetchConstantCount if it
+  // has none).
+  static void GetTextureSignClassSlots(const Shader& shader, bool by_use,
+                                       std::array<uint8_t, 32>& slots_out);
+
+  // spirv_texture_fetch_constants_decoded: after the 32 x 6 words of the fetch
+  // constants, the values texture fetches derive from them, decoded on the CPU
+  // (kFetchConstantsDecodedVec4PerFetch uvec4 per fetch constant), so shaders
+  // load them instead of extracting and converting bit fields in the preamble
+  // of every draw.
+  static constexpr uint32_t kFetchConstantsRawVec4Count = 32 * 6 / 4;
+  static constexpr uint32_t kFetchConstantsDecodedVec4PerFetch = 2;
+  struct DecodedTextureFetchConstant {
+    // 2D and cube: the width and the height.
+    float size_2d[2];
+    // 2^exp_adjust (word 3 bits 13:18), the factor of the fetched values.
+    float result_exponent_factor;
+    // The fetch constant's LOD bias (word 4 bits 12:21, in 1/32).
+    float lod_bias;
+    // 3D or 2D stacked, as the data dimension says: width, height, depth.
+    float size_3d_or_stacked[3];
+    // 1 if the data dimension is 3D, 0 otherwise.
+    uint32_t data_is_3d;
+  };
+  static_assert(sizeof(DecodedTextureFetchConstant) ==
+                sizeof(uint32_t) * 4 * kFetchConstantsDecodedVec4PerFetch);
+  static void DecodeTextureFetchConstant(const uint32_t* words,
+                                         DecodedTextureFetchConstant& decoded);
+
   static spv::Id PWLGammaToLinear(SpirvBuilder* builder_, spv::Id value,
                                   bool pre_saturated,
                                   spv::Id ext_inst_glsl_std_450);
@@ -636,6 +732,22 @@ class SpirvShaderTranslator : public ShaderTranslator {
                Modification::DepthStencilMode::kEarlyHint &&
            !edram_fragment_shader_interlock_ &&
            current_shader().implicit_early_z_write_allowed();
+  }
+
+  bool IsAlphaTestAndCoverageDisabled() const {
+    return IsExecutionModeEarlyFragmentTests() ||
+           (!edram_fragment_shader_interlock_ &&
+            GetSpirvShaderModification().pixel.depth_stencil_mode ==
+                Modification::DepthStencilMode::kNoAlphaTests);
+  }
+
+  // Whether the pixel shader has the color output 0 that the host's fixed
+  // function alpha to coverage takes the alpha from (host_alpha_to_coverage;
+  // VulkanPipelineCache enables it under the same condition). Without it -
+  // depth-only passes - the alpha to coverage stays emulated.
+  bool IsColorOutput0ForHostAlphaToCoverage() const {
+    return (current_shader().writes_color_targets() &
+            GetSpirvShaderModification().pixel.color_targets_used & 0b1) != 0;
   }
 
   // Whether the current non-FSI pixel shader should convert the depth to 20e4.
@@ -948,6 +1060,33 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // Is currently writing the empty depth-only pixel shader, such as for depth
   // and stencil testing with fragment shader interlock.
   bool is_depth_only_fragment_shader_ = false;
+
+  // Xenos math emulation skipped in the shader being translated
+  // (MathRelaxation bits from spirv_ps_relaxed_math, spirv_ps_math_experiment
+  // and spirv_vs_math_experiment), set in StartTranslation.
+  uint32_t math_relaxations_ = 0;
+
+  // spirv_texture_sign_specialization: the slots of the fetch constants of
+  // the shader being translated, and the specialization constant of the
+  // texture sign class of each slot, created on first use.
+  std::array<uint8_t, 32> texture_sign_class_slots_;
+  std::array<spv::Id, kTextureSignClassFetchConstantCount>
+      texture_sign_class_spec_constants_;
+  spv::Id GetTextureSignClassSpecConstant(uint32_t slot);
+  // spirv_texture_exp_adjust_specialization, created on first use.
+  spv::Id texture_exp_adjust_zero_spec_constant_;
+  spv::Id GetTextureExpAdjustZeroSpecConstant();
+  // A texture fetch's fetch constant word whose access chain indices are in
+  // id_vector_temp_, or 0 with kMathRelaxationTextureFetchConstants.
+  spv::Id LoadTextureFetchConstantWordFromTemp();
+  // spirv_texture_fetch_constants_decoded, read when the translation starts.
+  bool texture_fetch_constants_decoded_ = false;
+  // A word (0-7, see DecodedTextureFetchConstant) of the decoded values of a
+  // fetch constant, as a uint or as a float.
+  spv::Id LoadDecodedTextureFetchConstantWord(uint32_t fetch_constant_index,
+                                              uint32_t word);
+  spv::Id LoadDecodedTextureFetchConstantFloat(uint32_t fetch_constant_index,
+                                               uint32_t word);
 
   std::unique_ptr<SpirvBuilder> builder_;
 

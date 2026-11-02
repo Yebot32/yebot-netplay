@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -42,6 +44,8 @@ namespace gpu {
 
 class RenderTargetCache {
  public:
+  // merge_tiling_bands: multisampled render targets are at least this tall.
+  static constexpr uint32_t kMergedTilingBandsHeight = 720;
   // High-level emulation logic implementation path.
   enum class Path {
     // Approximate method using conventional host render targets and copying
@@ -197,10 +201,80 @@ class RenderTargetCache {
   // Quietly assuming the global scale all but promises a bunch of mixed-
   // space artifacts (trust me).
   uint32_t GetDrawScaleX() const {
-    return IsDrawScaleNative() ? 1 : draw_resolution_scale_x();
+    return (IsDrawScaleNative() ? 1 : draw_resolution_scale_x())
+           << uint32_t(draw_samples_as_pixels_);
   }
   uint32_t GetDrawScaleY() const {
-    return IsDrawScaleNative() ? 1 : draw_resolution_scale_y();
+    return (IsDrawScaleNative() ? 1 : draw_resolution_scale_y())
+           << uint32_t(draw_samples_as_pixels_ &&
+                       !draw_samples_as_pixels_keep_vertical_);
+  }
+  // For the current draw only: it renders into the EDRAM of a 4x MSAA surface
+  // as the 1x surface twice as wide and tall that the same tiles hold (the 2x2
+  // samples of a pixel are laid out like 2x2 pixels), with the surface info
+  // rewritten to that 1x surface - the draw's scale and its estimated extent
+  // (in the guest's 4x pixels) double. Keeping the vertical samples, as the 2x
+  // surface twice as wide instead (the 2 columns of samples of a 4x pixel are
+  // 2 pixels there) - only the horizontal scale and extent double.
+  void SetDrawSamplesAsPixels(bool samples_as_pixels,
+                              bool keep_vertical_samples = false) {
+    draw_samples_as_pixels_ = samples_as_pixels;
+    draw_samples_as_pixels_keep_vertical_ =
+        samples_as_pixels && keep_vertical_samples;
+  }
+  bool draw_samples_as_pixels() const { return draw_samples_as_pixels_; }
+  bool draw_samples_as_pixels_keep_vertical() const {
+    return draw_samples_as_pixels_keep_vertical_;
+  }
+  // The sample count and the pitch (in tiles at 32bpp) of the render target
+  // owning an EDRAM tile now - false if none does.
+  bool GetEdramTileOwner(uint32_t tile, xenos::MsaaSamples& msaa_samples_out,
+                         uint32_t& pitch_tiles_at_32bpp_out) const;
+  // For the current draw only: whether its pixel shader may leave covered
+  // pixels unwritten (kill) - such a draw never overwrites a whole area
+  // (skip_overwritten_transfers).
+  void SetDrawPixelShaderKills(bool kills) { draw_pixel_shader_kills_ = kills; }
+  // For the current draw only: whether it has a pixel shader - without one,
+  // there's no alpha to test or to convert to coverage, whatever the state
+  // says (skip_overwritten_transfers).
+  void SetDrawHasPixelShader(bool has_pixel_shader) {
+    draw_has_pixel_shader_ = has_pixel_shader;
+  }
+  // EdramTrace: whether frames are being traced, and what the backend knows
+  // about the current draw (shaders, state) to append to the line of the first
+  // draw of a binding.
+  bool IsEdramTraceActive() const { return edram_trace_frames_left_ != 0; }
+  void SetEdramTraceDrawInfo(std::string info) {
+    edram_trace_draw_info_ = std::move(info);
+  }
+  // Whether the host clamps the depth of draws without clipping rather than
+  // clipping it (a rectangle at any depth then covers its whole area).
+  void SetUnclippedDepthClamped(bool clamped) {
+    draw_extent_estimator_.SetUnclippedDepthClamped(clamped);
+  }
+  // Ownership transfers skipped because the first draw of their destination
+  // overwrites what they would have copied (skip_overwritten_transfers),
+  // since the last call.
+  void TakeOverwrittenTransferSkips(uint64_t& transfers_out,
+                                    uint64_t& tiles_out,
+                                    uint64_t* cut_transfers_out = nullptr) {
+    transfers_out = overwritten_transfers_skipped_;
+    tiles_out = overwritten_tiles_skipped_;
+    if (cut_transfers_out) {
+      *cut_transfers_out = overwritten_transfers_cut_;
+    }
+    overwritten_transfers_skipped_ = 0;
+    overwritten_tiles_skipped_ = 0;
+    overwritten_transfers_cut_ = 0;
+  }
+  // Whether the 4x MSAA render targets now created are stored with 2 samples
+  // per pixel (RenderTargetKey::host_2x, msaa_4x_as_2x).
+  virtual bool IsMsaa4xHost2x() const { return false; }
+  // The sample count of the host images of a guest surface with this count.
+  xenos::MsaaSamples GetHostMsaaSamples(xenos::MsaaSamples msaa_samples) const {
+    return (msaa_samples == xenos::MsaaSamples::k4X && IsMsaa4xHost2x())
+               ? xenos::MsaaSamples::k2X
+               : msaa_samples;
   }
 
   // Virtual (both the common code and the implementation may do something
@@ -241,6 +315,8 @@ class RenderTargetCache {
   bool diagnostic_log_window_open() const {
     return diagnostic_log_window_open_;
   }
+  // The frame boundary of the EDRAM usage trace (edram_trace_frames).
+  void EdramTraceBeginFrame();
 
   virtual bool Update(bool is_rasterization_done,
                       reg::RB_DEPTHCONTROL normalized_depth_control,
@@ -314,6 +390,11 @@ class RenderTargetCache {
       // enough. The only classes are the global scale and 1x1. Keys never
       // carry arbitrary scales.
       uint32_t scale_native : 1;  // 27
+      // A 4x MSAA surface - the guest's 4x EDRAM layout, for ownership and
+      // resolves - stored with 2 samples per pixel on the host (msaa_4x_as_2x):
+      // guest sample s (horizontal | vertical << 1) is host sample
+      // (s >> 1) ^ 1, the host's top sample being 1, like for native 2x.
+      uint32_t host_2x : 1;  // 28
     };
 
     RenderTargetKey() : key(0) { static_assert_size(*this, sizeof(key)); }
@@ -369,9 +450,14 @@ class RenderTargetCache {
     }
 
     std::string GetDebugName() const {
-      return fmt::format("RT @ {}t, <{}t>, {}xMSAA, {}{}", base_tiles,
+      return fmt::format("RT @ {}t, <{}t>, {}xMSAA{}, {}{}", base_tiles,
                          GetPitchTiles(), uint32_t(1) << uint32_t(msaa_samples),
-                         GetFormatName(), scale_native ? ", native" : "");
+                         host_2x ? " as 2x" : "", GetFormatName(),
+                         scale_native ? ", native" : "");
+    }
+    // The sample count of the host image.
+    xenos::MsaaSamples GetHostMsaaSamples() const {
+      return host_2x ? xenos::MsaaSamples::k2X : msaa_samples;
     }
   };
 
@@ -448,6 +534,15 @@ class RenderTargetCache {
       return source == other_transfer.source &&
              host_depth_source == other_transfer.host_depth_source;
     }
+    // The area of the destination the draw the transfer is made for
+    // overwrites (skip_overwritten_transfers), not to transfer - a transfer
+    // only partly covered by it. The cutout of the transfer's rectangles: this
+    // one if there is, otherwise the one for the call (a resolve clear's).
+    const Rectangle* GetCutout(const Rectangle* call_cutout) const {
+      return has_draw_cutout ? &draw_cutout : call_cutout;
+    }
+    Rectangle draw_cutout = {};
+    bool has_draw_cutout = false;
 
    private:
     static uint32_t AddRectangle(const Rectangle& rectangle,
@@ -649,6 +744,26 @@ class RenderTargetCache {
   bool IsResolveSourceNativeOnly(uint32_t base, uint32_t row_length,
                                  uint32_t rows, uint32_t pitch) const;
 
+  // EDRAM usage trace (edram_trace_frames) - a line of it, after the draw
+  // count of the binding before (IsEdramTraceActive says whether it is on).
+  void EdramTraceNote(std::string_view text);
+
+  // The last resolve clear of a render target - its value in the guest's
+  // EDRAM encoding and the cleared rectangle, in the render target's pixels -
+  // kept until anything else writes the render target (a draw binding it).
+  // A transfer copying only that is a clear of its destination with the same
+  // EDRAM bits reinterpreted (transfer_cleared_sources_as_clears).
+  void RecordResolveClear(const RenderTarget* render_target, uint64_t value,
+                          const Transfer::Rectangle& rectangle);
+  // Whether all the transfer copies from its source is what its last resolve
+  // clear left there, and that value.
+  bool IsTransferSourceResolveCleared(const Transfer& transfer,
+                                      uint64_t& value_out) const;
+  // The transfers of the last Update for a backend to take some out of.
+  std::vector<Transfer>* last_update_transfers_mutable() {
+    return last_update_transfers_;
+  }
+
   // Sets up the needed render targets and transfers to perform a clear in a
   // resolve operation via a host render target clear. resolve_info is expected
   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
@@ -698,11 +813,34 @@ class RenderTargetCache {
   uint32_t host_depth_planned_none_ = 0;
   uint32_t host_depth_planned_is_source_ = 0;
   uint32_t host_depth_planned_separate_ = 0;
+  // merge_tiling_bands: whether the draw just updated replaces the depth and
+  // stencil (depth) or the color of render target 0 everywhere in
+  // [0, width) x [0, height) before the scissor - a clear by a quad.
+  bool DrawReplacesArea(bool depth,
+                        reg::RB_DEPTHCONTROL normalized_depth_control,
+                        uint32_t normalized_color_mask,
+                        const Shader& vertex_shader, uint32_t width,
+                        uint32_t height);
 
  private:
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
+  bool draw_samples_as_pixels_ = false;
+  bool draw_samples_as_pixels_keep_vertical_ = false;
+  bool draw_pixel_shader_kills_ = false;
+  bool draw_has_pixel_shader_ = true;
+  uint64_t overwritten_transfers_cut_ = 0;
+  uint64_t overwritten_transfers_skipped_ = 0;
+  uint64_t overwritten_tiles_skipped_ = 0;
+
+  // skip_overwritten_transfers: drops the transfers of the draw's targets
+  // that its first draw - a single rectangle covering them, writing every
+  // pixel and sample unconditionally - would overwrite anyway.
+  void SkipTransfersOverwrittenByDraw(
+      reg::RB_DEPTHCONTROL normalized_depth_control,
+      uint32_t normalized_color_mask, const Shader& vertex_shader,
+      const RenderTargetKey* rt_keys);
 
   DrawExtentEstimator draw_extent_estimator_;
 
@@ -928,6 +1066,28 @@ class RenderTargetCache {
   // consecutive in the array.
   std::vector<Transfer>
       last_update_transfers_[1 + xenos::kMaxColorRenderTargets];
+
+  // EDRAM usage trace (edram_trace_frames): frames left, the last requested
+  // value, the binding being drawn with and its draw count, and per render
+  // target key the sequence number of its last resolve clear and last draw.
+  void EdramTraceFlushBinding();
+  void EdramTraceTransfers(RenderTargetKey dest,
+                           const std::vector<Transfer>& transfers);
+  uint32_t edram_trace_frames_left_ = 0;
+  int32_t edram_trace_requested_ = 0;
+  uint32_t edram_trace_draws_ = 0;
+  RenderTargetKey edram_trace_binding_[1 + xenos::kMaxColorRenderTargets];
+  uint64_t edram_trace_seq_ = 0;
+  std::unordered_map<uint32_t, uint64_t> edram_trace_last_clear_;
+  std::unordered_map<uint32_t, uint64_t> edram_trace_last_draw_;
+  std::string edram_trace_draw_info_;
+
+  // RecordResolveClear, by render target key.
+  struct ResolveClearState {
+    uint64_t value;
+    Transfer::Rectangle rectangle;
+  };
+  std::unordered_map<uint32_t, ResolveClearState> resolve_cleared_render_targets_;
 };
 
 }  // namespace gpu

@@ -1889,6 +1889,61 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   return true;
 }
 
+bool BaseHeap::QueryRegionInfoUpTo(uint32_t base_address, uint32_t max_size,
+                                   HeapAllocationInfo* out_info) {
+  uint32_t start_page_number = (base_address - heap_base_) >> page_size_shift_;
+  if (start_page_number >= page_table_.size()) {
+    XELOGE("BaseHeap::QueryRegionInfoUpTo base page out of range");
+    return false;
+  }
+  const uint32_t max_pages = uint32_t(
+      (uint64_t(max_size) + page_size_ - 1) >> page_size_shift_);
+  auto global_lock = global_critical_region_.Acquire();
+  auto start_page_entry = page_table_[start_page_number];
+  out_info->base_address = base_address;
+  out_info->allocation_base = 0;
+  out_info->allocation_protect = 0;
+  out_info->allocation_size = 0;
+  out_info->region_size = 0;
+  out_info->state = 0;
+  out_info->protect = 0;
+  uint32_t region_pages = 0;
+  if (start_page_entry.state) {
+    out_info->allocation_base =
+        heap_base_ + (start_page_entry.base_address << page_size_shift_);
+    out_info->allocation_protect = start_page_entry.allocation_protect;
+    out_info->allocation_size = start_page_entry.region_page_count
+                                << page_size_shift_;
+    out_info->state = start_page_entry.state;
+    out_info->protect = start_page_entry.current_protect;
+    for (uint32_t page_number = start_page_number;
+         page_number <
+             start_page_entry.base_address +
+                 start_page_entry.region_page_count &&
+         region_pages < max_pages;
+         ++page_number) {
+      auto page_entry = page_table_[page_number];
+      if (page_entry.base_address != start_page_entry.base_address ||
+          page_entry.state != start_page_entry.state ||
+          page_entry.current_protect != start_page_entry.current_protect) {
+        break;
+      }
+      ++region_pages;
+    }
+  } else {
+    for (uint32_t page_number = start_page_number;
+         page_number < page_table_.size() && region_pages < max_pages;
+         ++page_number) {
+      if (page_table_[page_number].state) {
+        break;
+      }
+      ++region_pages;
+    }
+  }
+  out_info->region_size = region_pages * page_size_;
+  return true;
+}
+
 bool BaseHeap::QueryRegionInfo(uint32_t base_address,
                                HeapAllocationInfo* out_info) {
   uint32_t start_page_number = (base_address - heap_base_) >> page_size_shift_;
@@ -2000,6 +2055,17 @@ bool BaseHeap::IsRangeUnallocated(uint32_t address, uint32_t size) {
       return false;
     }
   }
+  return true;
+}
+
+bool BaseHeap::QueryProtectUnlocked(uint32_t address,
+                                    uint32_t* out_protect) const {
+  uint32_t page_number = (address - heap_base_) >> page_size_shift_;
+  if (address < heap_base_ || page_number >= page_table_.size()) {
+    *out_protect = 0;
+    return false;
+  }
+  *out_protect = page_table_[page_number].current_protect;
   return true;
 }
 
@@ -2362,6 +2428,27 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
   // in this loop, but very little spent actually calling Protect
   uint32_t i = system_page_first;
   for (; i <= system_page_last; ++i) {
+    // A whole block of 64 pages already watched for everything requested
+    // needs nothing per page (the GPU re-enables the callbacks of the ranges
+    // it uses after every resolve and upload; most are still watched): close
+    // the pending protection run and skip it.
+    if (!(i & 63) && system_page_last - i >= 63) {
+      const SystemPageFlagsBlock& whole_block = sys_page_flags[i >> 6];
+      if ((!enable_invalidation_notifications ||
+           whole_block.notify_on_invalidation == UINT64_MAX) &&
+          (!enable_data_providers ||
+           whole_block.notify_on_read == UINT64_MAX)) {
+        if (protect_system_page_first != UINT32_MAX) {
+          xe::memory::Protect(
+              protect_base + (protect_system_page_first << system_page_shift_),
+              (i - protect_system_page_first) << system_page_shift_,
+              protect_access);
+          protect_system_page_first = UINT32_MAX;
+        }
+        i += 63;
+        continue;
+      }
+    }
     // Check if need to enable callbacks for the page and raise its protection.
     //
     // If enabling invalidation notifications:

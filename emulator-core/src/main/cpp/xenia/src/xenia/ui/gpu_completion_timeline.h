@@ -63,11 +63,13 @@ class GPUCompletionTimeline {
     if (GetCompletedSubmissionFromLastUpdate() >= awaited_submission) {
       return true;
     }
-    if (UpdateAndGetCompletedSubmission() < awaited_submission) {
+    UpdateCompletedSubmissionUpTo(awaited_submission);
+    if (GetCompletedSubmissionFromLastUpdate() < awaited_submission) {
       AwaitSubmissionImpl(awaited_submission);
     }
     // Recheck, the wait might have been incomplete if there was an error.
-    return UpdateAndGetCompletedSubmission() >= awaited_submission;
+    UpdateCompletedSubmissionUpTo(awaited_submission);
+    return GetCompletedSubmissionFromLastUpdate() >= awaited_submission;
   }
 
   bool AwaitMaxSubmissionsPendingAndUpdateCompleted(
@@ -97,6 +99,13 @@ class GPUCompletionTimeline {
   // The implementation may call `SetCompletedSubmission`, but is not required
   // to.
   virtual void AwaitSubmissionImpl(uint64_t awaited_submission) = 0;
+
+  // The completion update done while awaiting a submission. The implementation
+  // may stop polling past the awaited submission; by default everything
+  // pending is polled.
+  virtual void UpdateCompletedSubmissionUpTo(uint64_t awaited_submission) {
+    UpdateCompletedSubmission();
+  }
 
  private:
   uint64_t upcoming_submission_ = 1;

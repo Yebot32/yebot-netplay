@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "xenia/base/assert.h"
@@ -370,6 +371,32 @@ class DeferredCommandBuffer {
                 regions, sizeof(VkBufferImageCopy) * region_count);
   }
 
+  VkImageCopy* CmdCopyImageEmplace(VkImage src_image,
+                                   VkImageLayout src_image_layout,
+                                   VkImage dst_image,
+                                   VkImageLayout dst_image_layout,
+                                   uint32_t region_count) {
+    const size_t header_size =
+        xe::align(sizeof(ArgsVkCopyImage), alignof(VkImageCopy));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kVkCopyImage,
+                     header_size + sizeof(VkImageCopy) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkCopyImage*>(args_ptr);
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_image = dst_image;
+    args.dst_image_layout = dst_image_layout;
+    args.region_count = region_count;
+    return reinterpret_cast<VkImageCopy*>(args_ptr + header_size);
+  }
+  void CmdVkCopyImage(VkImage src_image, VkImageLayout src_image_layout,
+                      VkImage dst_image, VkImageLayout dst_image_layout,
+                      uint32_t region_count, const VkImageCopy* regions) {
+    std::memcpy(CmdCopyImageEmplace(src_image, src_image_layout, dst_image,
+                                    dst_image_layout, region_count),
+                regions, sizeof(VkImageCopy) * region_count);
+  }
+
   void CmdVkFillBuffer(VkBuffer dst_buffer, VkDeviceSize dst_offset,
                        VkDeviceSize size, uint32_t data) {
     auto& args = *reinterpret_cast<ArgsVkFillBuffer*>(
@@ -695,6 +722,17 @@ class DeferredCommandBuffer {
                 sizeof(VkColorComponentFlags) * attachment_count);
   }
 
+  // VK_KHR_fragment_shading_rate: the rate of the pipeline, with the
+  // per-primitive and attachment rates (unused) not combined in. Only recorded
+  // with the pipeline shading rate enabled.
+  void CmdVkSetFragmentShadingRateKHR(uint32_t width, uint32_t height) {
+    auto& args = *reinterpret_cast<ArgsVkSetFragmentShadingRateKHR*>(
+        WriteCommand(Command::kVkSetFragmentShadingRateKHR,
+                     sizeof(ArgsVkSetFragmentShadingRateKHR)));
+    args.width = width;
+    args.height = height;
+  }
+
   // Debug marker support for RenderDoc/debug tools annotation.
   void CmdVkBeginDebugUtilsLabelEXT(const char* label_name) {
     size_t label_len = std::strlen(label_name);
@@ -742,6 +780,7 @@ class DeferredCommandBuffer {
     kVkCopyImageToBuffer,
     kVkFillBuffer,
     kVkBlitImage,
+    kVkCopyImage,
     kVkDispatch,
     kVkDraw,
     kVkDrawIndexed,
@@ -772,9 +811,11 @@ class DeferredCommandBuffer {
     kVkSetColorBlendEnableEXT,
     kVkSetColorBlendEquationEXT,
     kVkSetColorWriteMaskEXT,
+    kVkSetFragmentShadingRateKHR,
     kVkBeginDebugUtilsLabelEXT,
     kVkEndDebugUtilsLabelEXT,
     kVkInsertDebugUtilsLabelEXT,
+    kCount,
   };
 
   struct CommandHeader {
@@ -942,6 +983,16 @@ class DeferredCommandBuffer {
     static_assert(alignof(VkImageBlit) <= alignof(uintmax_t));
   };
 
+  struct ArgsVkCopyImage {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkImage dst_image;
+    VkImageLayout dst_image_layout;
+    uint32_t region_count;
+    // Followed by aligned VkImageCopy[].
+    static_assert(alignof(VkImageCopy) <= alignof(uintmax_t));
+  };
+
   struct ArgsVkDispatch {
     uint32_t group_count_x;
     uint32_t group_count_y;
@@ -1052,6 +1103,11 @@ class DeferredCommandBuffer {
     VkPolygonMode polygon_mode;
   };
 
+  struct ArgsVkSetFragmentShadingRateKHR {
+    uint32_t width;
+    uint32_t height;
+  };
+
   struct ArgsVkSetColorBlendEnableEXT {
     uint32_t first_attachment;
     uint32_t attachment_count;
@@ -1122,6 +1178,27 @@ class DeferredCommandBuffer {
   uint32_t pass_draw_viewport_height() const {
     return pass_draw_viewport_height_;
   }
+  // vulkan_replay_stats: what the replays sent to the driver, and how much of
+  // it repeated the state already set in the same command buffer (the same
+  // pipeline, descriptor sets, push constant bytes or dynamic state value).
+  static constexpr size_t kReplayStatCommandCount = 53;
+  struct ReplayStats {
+    uint64_t commands[kReplayStatCommandCount] = {};
+    uint64_t redundant[kReplayStatCommandCount] = {};
+    uint64_t descriptor_sets = 0;
+    uint64_t push_constant_bytes = 0;
+  };
+  // Adds the counts since the last call to `stats` and restarts them.
+  void TakeReplayStats(ReplayStats& stats);
+  static const char* GetReplayStatCommandName(size_t index);
+
+ private:
+  ReplayStats replay_stats_;
+  // The last arguments replayed per command and state key, for the redundancy
+  // counts (cleared at the start of every replayed command buffer).
+  std::unordered_map<uint64_t, std::vector<uint8_t>> replay_last_args_;
+  void CountReplayedCommand(uint32_t command, const void* args,
+                            size_t args_size, uint64_t key);
 
  private:
   // Offset of the last recorded begin-pass argument struct, in stream elements

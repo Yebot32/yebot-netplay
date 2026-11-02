@@ -56,12 +56,42 @@ class VulkanTextureCache final : public TextureCache {
   // starts - the caller converts it to a row offset.
   struct ResolveDestTextureInfo {
     uint32_t width = 0, height = 0, pitch = 0, format = 0;
+    // The texture itself, for the calls below (opaque to the caller).
+    void* texture = nullptr;
   };
   VkImageView GetResolveDestStorageView(
       uint32_t base, uint32_t* base_delta_out,
       ResolveDestTextureInfo* info_out) const;
+  // The same for a resolve done by a compute dispatch outside render passes,
+  // whatever the texture's usage - BeginResolveDestComputeStore transitions it.
+  // Memory reused across passes holds textures of several formats at once, so
+  // only a texture whose pitch, format and endianness are the ones the resolve
+  // writes qualifies (for depth, only k_24_8 and k_24_8_FLOAT, which the store
+  // decodes like the upload does, and with depth_into_8888 also k_8_8_8_8,
+  // which gets the packed words).
+  VkImageView GetResolveDestStorageViewForCompute(
+      uint32_t base, uint32_t pitch_div_32, xenos::TextureFormat format,
+      bool is_depth, uint32_t endian, uint32_t* base_delta_out,
+      ResolveDestTextureInfo* info_out, bool depth_into_8888 = false) const;
+  // Makes the texture writable by the compute resolve about to be recorded
+  // (the barrier is pushed, not submitted).
+  void BeginResolveDestComputeStore(const ResolveDestTextureInfo& info);
   // Stamps the promoted texture at `base` as filled by a resolve this frame.
   void MarkResolveDestWritten(uint32_t base, uint64_t frame);
+  void MarkResolveDestWritten(const ResolveDestTextureInfo& info,
+                              uint64_t frame);
+  // Around the resolve's MarkRangeAsResolved when it also stored the texels
+  // into the texture: its write then keeps the texture's image valid instead
+  // of invalidating it. The rectangle is where the texels landed, in texels of
+  // the texture - stores that together cover every row revalidate an image
+  // that other writes had invalidated.
+  void BeginResolveStoreRangeWrite(const ResolveDestTextureInfo& info,
+                                   int32_t x0, int32_t y0, uint32_t width,
+                                   uint32_t height);
+  void EndResolveStoreRangeWrite();
+  // With the whole guest memory invalidated (no watch fires then): no image
+  // may be taken as matching the memory any more.
+  void InvalidateResolveStoreTracking();
 
  private:
   class VulkanTexture;
@@ -71,8 +101,22 @@ class VulkanTextureCache final : public TextureCache {
   // while a matching resolve is live ever get promoted.
   std::vector<TextureKey> resolve_dest_promotion_queue_;
   // Promoted textures by guest base address, so an in-pass resolve can find
-  // the image it is about to fill. Entries are removed by ~VulkanTexture.
-  std::unordered_map<uint32_t, VulkanTexture*> resolve_dest_textures_;
+  // the image it is about to fill. Several textures of different formats can
+  // share a base. Entries are removed by ~VulkanTexture.
+  std::unordered_multimap<uint32_t, VulkanTexture*> resolve_dest_textures_;
+
+  // Store tracking of the images of promoted textures (see VulkanTexture's
+  // store_tracked_valid): the texture a direct host resolve stored into, while
+  // its write to the memory is being marked, and the rectangle it stored.
+  VulkanTexture* resolve_store_in_flight_ = nullptr;
+  int32_t resolve_store_x0_ = 0, resolve_store_y0_ = 0;
+  uint32_t resolve_store_width_ = 0, resolve_store_height_ = 0;
+  // Watches the base level memory of a texture for writes other than its own
+  // stores (with the global critical region held).
+  void ArmResolveStoreWatch(VulkanTexture& texture);
+  static void ResolveStoreWatchCallback(
+      const global_unique_lock_type& global_lock, void* context, void* data,
+      uint64_t argument, bool invalidated_by_gpu);
 
   // Sized well above the per-frame resolve count so a frame stays visible.
   static constexpr size_t kResolveDestHistory = 256;
@@ -93,6 +137,24 @@ class VulkanTextureCache final : public TextureCache {
   // Whether the texture can be served from its resolve instead of uploaded.
   bool TryServeFromResolveDest(const VulkanTexture& texture, bool load_base,
                                bool load_mips) const;
+  // The upload itself (LoadTextureDataFromResidentMemoryImpl minus serving).
+  bool LoadTextureDataFromResidentMemoryUpload(VulkanTexture& vulkan_texture,
+                                               bool load_base, bool load_mips);
+  // After an upload or a serve of the base level of a promoted texture: the
+  // image matches the memory, and store tracking watches it from now on.
+  void NoteResolveDestImageUpToDate(VulkanTexture& texture, bool load_base);
+  // vulkan_resolve_dest_diag: why an upload of GPU-written memory was not
+  // served - the reason and the misses for it, per texture.
+  void LogResolveDestMiss(const VulkanTexture& texture, bool load_mips);
+  std::unordered_map<TextureKey, std::pair<uint32_t, uint32_t>,
+                     TextureKey::Hasher>
+      resolve_dest_diag_reasons_;
+  // The load shader of the host format a texture with the key is loaded to.
+  LoadShaderIndex GetLoadShaderForKey(const TextureKey& key) const;
+  // Whether textures with the key are created with the R32_UINT storage alias
+  // for loads straight into the image (vulkan_texture_load_to_image) - the
+  // host format is checked by the caller.
+  bool IsLoadToImageCandidate(const TextureKey& key) const;
 
  public:
   // Sampler parameters that can be directly converted to a host sampler or used
@@ -168,6 +230,10 @@ class VulkanTextureCache final : public TextureCache {
   VkImageView GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
                                               xenos::FetchOpDimension dimension,
                                               bool is_signed);
+  // The null image view for the dimension, with the components the host
+  // swizzle makes constant 1 mapped to 1.
+  VkImageView GetNullImageView(xenos::FetchOpDimension dimension,
+                               uint32_t host_swizzle);
 
   // Descriptor set (kStorageBufferCompute layout) binding the whole shared
   // memory buffer for compute load/store, or VK_NULL_HANDLE if the buffer
@@ -365,12 +431,29 @@ class VulkanTextureCache final : public TextureCache {
       // transition. STORAGE usage already forfeits UBWC on Adreno, so
       // sampling from GENERAL costs these images nothing extra.
       kResolveDestStorage,
+      // Written by a texture load compute shader through load_storage_view()
+      // (GENERAL).
+      kLoadStorageWrite,
     };
 
    private:
     VkImageView resolve_dest_storage_view_ = VK_NULL_HANDLE;
+    // R32_UINT alias of the base level for texture loads straight into the
+    // image (vulkan_texture_load_to_image); may be resolve_dest_storage_view_.
+    VkImageView load_storage_view_ = VK_NULL_HANDLE;
     uint64_t resolve_dest_written_frame_ = 0;
     bool pending_storage_write_ = false;
+    // Whether the image still holds what the guest memory of the base level
+    // holds, as this key reads it - so a reload can be skipped. Set by an
+    // upload, kept by the direct host resolves that store the same texels into
+    // the image, cleared by any other write to the memory (seen through
+    // store_watch_handle_, as the base watch is gone once outdated). Accessed
+    // with the global critical region held.
+    bool store_tracked_valid_ = false;
+    // Rows [0, store_covered_rows_) rewritten by stores since the image became
+    // invalid; revalidates it once they reach the height.
+    uint32_t store_covered_rows_ = 0;
+    SharedMemory::WatchHandle store_watch_handle_ = nullptr;
 
    public:
     // Takes ownership of the image and its memory.
@@ -390,11 +473,28 @@ class VulkanTextureCache final : public TextureCache {
     void SetResolveDestStorageView(VkImageView view) {
       resolve_dest_storage_view_ = view;
     }
+    VkImageView load_storage_view() const { return load_storage_view_; }
+    void SetLoadStorageView(VkImageView view) { load_storage_view_ = view; }
     uint64_t resolve_dest_written_frame() const {
       return resolve_dest_written_frame_;
     }
     void SetResolveDestWrittenFrame(uint64_t frame) {
       resolve_dest_written_frame_ = frame;
+    }
+    bool store_tracked_valid() const { return store_tracked_valid_; }
+    void SetStoreTrackedValid(bool valid) {
+      store_tracked_valid_ = valid;
+      if (!valid) {
+        store_covered_rows_ = 0;
+      }
+    }
+    uint32_t store_covered_rows() const { return store_covered_rows_; }
+    void SetStoreCoveredRows(uint32_t rows) { store_covered_rows_ = rows; }
+    SharedMemory::WatchHandle store_watch_handle() const {
+      return store_watch_handle_;
+    }
+    void SetStoreWatchHandle(SharedMemory::WatchHandle handle) {
+      store_watch_handle_ = handle;
     }
     Usage usage() const { return usage_; }
     // An in-pass store happened and no barrier has covered it yet; the next
@@ -578,6 +678,18 @@ class VulkanTextureCache final : public TextureCache {
   VkPipelineLayout load_pipeline_layout_ = VK_NULL_HANDLE;
   std::array<VkPipeline, kLoadShaderCount> load_pipelines_{};
   std::array<VkPipeline, kLoadShaderCount> load_pipelines_scaled_{};
+  // Unscaled variants with whole-cache-line accesses per instruction, for the
+  // load shaders that have one (vulkan_texture_load_coalesced).
+  std::array<VkPipeline, kLoadShaderCount> load_pipelines_coalesced_{};
+  // Variants storing straight into the texture's R32_UINT alias instead of a
+  // buffer to copy to the image (vulkan_texture_load_to_image), with a storage
+  // image destination descriptor set.
+  VkPipelineLayout load_pipeline_layout_image_ = VK_NULL_HANDLE;
+  std::array<VkPipeline, kLoadShaderCount> load_pipelines_image_{};
+  // vulkan_texture_load_to_image at startup: eligible textures are created
+  // with the R32_UINT storage alias (the cvar itself can be switched later to
+  // compare the load paths on the same images).
+  bool load_to_image_storage_ = false;
 
   // Persistent descriptor binding the whole shared memory buffer
   // (kStorageBufferCompute layout) for compute load/store, so per-operation
@@ -601,6 +713,9 @@ class VulkanTextureCache final : public TextureCache {
   VkImageView null_image_view_2d_array_ = VK_NULL_HANDLE;
   VkImageView null_image_view_cube_ = VK_NULL_HANDLE;
   VkImageView null_image_view_3d_ = VK_NULL_HANDLE;
+  // Null views per dimension (2D array, cube, 3D) and per mask of components
+  // that are constant 1, created on first use (GetNullImageView).
+  std::array<std::array<VkImageView, 16>, 3> null_image_views_ones_{};
   bool null_images_cleared_ = false;
 
   std::array<VulkanTextureBinding, xenos::kTextureFetchConstantCount>

@@ -18,9 +18,13 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <tuple>
 #include <unordered_map>
+#include <unordered_set>
+#include <array>
 #include <vector>
 
+#include "xenia/base/guest_gpu_progress.h"
 #include "xenia/base/math.h"
 #include "xenia/base/ring_buffer.h"
 #include "xenia/gpu/register_file.h"
@@ -129,6 +133,84 @@ class CommandProcessor {
   // Converts the reader's host pointer (+ offset) to a guest physical address.
   uint32_t GuestReadPtrOffset(int32_t offset = 0) const;
 
+  // merge_tiling_bands: the bands of predicated tiling (bin selects other than
+  // all ones between all-ones ones) drawn as one. Every draw (resolves aside)
+  // is executed in the first band it's predicated into - draws of later bands
+  // repeating one of an earlier band (the same command buffer replayed) are
+  // skipped, and the backend draws the first band's into render targets as
+  // tall as the screen and resolves each band from its rows.
+  void OnBinSelectWritten();
+  // Whether to issue the draw packet just read (false - drawn in an earlier
+  // band).
+  bool PrepareTilingBandDraw();
+  // The band being executed: 0 for the first, -1 outside the bands.
+  int32_t tiling_band_ = -1;
+  uint32_t tiling_band_select_ = 0;
+  // Incremented when the first band starts.
+  uint32_t tiling_band_sequence_ = 0;
+  // Cleared by the backend (DisableTilingBandMerge) when the bands of this
+  // frame can't be merged.
+  bool tiling_band_merge_ok_ = false;
+  // The current draw is first executed in tiling_band_ > 0.
+  bool tiling_band_draw_from_later_band_ = false;
+  // The draws of the current band sequence: open addressing with the
+  // sequence's epoch beside each key, so a new sequence clears it in O(1) (an
+  // unordered_set allocated a node per draw, ~2% of this thread's instructions
+  // at ~2900 draws per frame).
+  struct TilingBandDrawSet {
+    std::vector<uint64_t> keys;
+    std::vector<uint32_t> epochs;
+    uint32_t count = 0;
+    uint32_t epoch = 0;
+    // Returns whether the key wasn't in the current sequence yet.
+    bool Insert(uint64_t key);
+    void Clear();
+  };
+  // By the guest address right past each draw packet, and with
+  // merge_tiling_bands_call_sites the indirect buffer calls made inside the
+  // replayed scene on the way to it.
+  TilingBandDrawSet tiling_band_draws_;
+  // merge_tiling_bands_log: by the key the setting doesn't use (the address
+  // alone, or with the calls), to count where the two differ.
+  TilingBandDrawSet tiling_band_draw_other_keys_;
+  void ClearTilingBandDraws();
+  // The indirect buffer calls being executed, outermost first: the guest
+  // address right past each INDIRECT_BUFFER packet. A draw packet in a buffer
+  // called from several places draws a different object from each place (a
+  // routine the game runs per object, each call predicated into its own
+  // bands) - with the address alone, an object only in a later band was taken
+  // for one drawn in an earlier band and never drawn (whole blocks of scenery
+  // missing in Forza Horizon 2 until they came close). The calls made at the
+  // depth the first band's bin select was written at - each band calling the
+  // scene again - are left out, so a band still matches the earlier ones.
+  static constexpr uint32_t kTilingBandMaxCallDepth = 16;
+  std::array<uint32_t, kTilingBandMaxCallDepth> ib_call_sites_{};
+  uint32_t ib_call_depth_ = 0;
+  uint32_t tiling_band_call_depth_ = 0;
+  // merge_tiling_bands_log: per band sequence, the draws looked at, the ones
+  // skipped as drawn in an earlier band, and the ones in a later band the
+  // address alone takes for an earlier band's draw while the calls tell apart
+  // (drawn with merge_tiling_bands_call_sites, lost without); and their sums
+  // over the sequences since the last report.
+  uint32_t tiling_band_stat_draws_ = 0;
+  uint32_t tiling_band_stat_skipped_ = 0;
+  uint32_t tiling_band_stat_rescued_ = 0;
+  uint64_t tiling_band_stat_sum_draws_ = 0;
+  uint64_t tiling_band_stat_sum_skipped_ = 0;
+  uint64_t tiling_band_stat_sum_rescued_ = 0;
+  uint32_t tiling_band_stat_sequences_ = 0;
+
+ public:
+  bool tiling_band_merge_active() const {
+    return tiling_band_ >= 0 && tiling_band_merge_ok_;
+  }
+  int32_t tiling_band() const { return tiling_band_; }
+  uint32_t tiling_band_sequence() const { return tiling_band_sequence_; }
+  bool tiling_band_draw_from_later_band() const {
+    return tiling_band_draw_from_later_band_;
+  }
+  void DisableTilingBandMerge() { tiling_band_merge_ok_ = false; }
+
  public:
   enum class SwapPostEffect {
     kNone,
@@ -164,8 +246,10 @@ class CommandProcessor {
     return cached_readback_resolve_mode_;
   }
 
-  // Set readback resolve mode (updates both cvar and cached value)
-  void SetReadbackResolveMode(ReadbackResolveMode mode);
+  // Set readback resolve mode (updates both cvar and cached value). With
+  // persist, also saved to the per-game config of the running title (a user
+  // choice); run-time debug overrides pass false.
+  void SetReadbackResolveMode(ReadbackResolveMode mode, bool persist = true);
 
   // Get cached ZPD mode (avoids string parsing every frame).
   ZPDMode GetZPDMode() const { return cached_zpd_mode_; }
@@ -236,6 +320,10 @@ class CommandProcessor {
   bool is_paused() const { return paused_; }
   void Pause();
   void Resume();
+  // Times Resume() ended a pause, for state to restore after one.
+  uint32_t resume_count() const {
+    return resume_count_.load(std::memory_order_relaxed);
+  }
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
@@ -278,8 +366,14 @@ class CommandProcessor {
     uint64_t swap_ns = 0;
     uint64_t exec_ns = 0;      // ExecutePrimaryBuffer total
     uint64_t stall_ns = 0;     // worker idle, waiting for ring writes
+    // PM4_WAIT_REG_MEM found unmet on the first check, and the time until met.
+    uint64_t wait_reg_mem_unmet = 0;
+    uint64_t wait_reg_mem_ns = 0;
     uint64_t interval_ns = 0;  // sum of swap-to-swap intervals
     uint64_t interval_max_ns = 0;
+    // Intervals over 37, 50 and 70 ms (1.1x, 1.5x and 2.1x the 33.3 ms of a
+    // 30 fps frame): the stutter an average hides.
+    uint64_t long_intervals[3] = {};
     uint64_t last_swap_ns = 0;
     uint64_t last_report_ns = 0;
   };
@@ -287,8 +381,97 @@ class CommandProcessor {
   static uint64_t FrameStatsNow();
   // Returns 0 (and skips the clock read) when the breakdown is disabled.
   uint64_t FrameStatsBegin();
+  // The same for the waits (for ring writes and WAIT_REG_MEM), also timed for
+  // gpu_performance_hint.
+  uint64_t FrameWaitBegin();
   void FrameStatsEndDraw(uint64_t begin_ns);
+  void FrameStatsEndWaitRegMem(uint64_t begin_ns);
   void FrameStatsEndSwap(uint64_t begin_ns);
+
+  // gpu_performance_hint (Android ADPF): the command thread's work per guest
+  // frame - the frame interval minus its waits - reported at each swap.
+  void FrameHintEndFrame();
+  uint64_t frame_hint_wait_ns_ = 0;
+  uint64_t frame_hint_last_swap_ns_ = 0;
+  uint64_t frame_hint_interval_sum_ns_ = 0;
+  uint32_t frame_hint_interval_count_ = 0;
+  void* frame_hint_session_ = nullptr;
+  bool frame_hint_failed_ = false;
+  int (*frame_hint_report_)(void*, int64_t) = nullptr;
+  int (*frame_hint_update_target_)(void*, int64_t) = nullptr;
+
+  // Predicated tiling diagnostics: `adb shell setprop debug.xendroid.
+  // pm4_bin_trace N` logs how the next N guest frames use bin select / bin
+  // mask predication, screen extent events and indirect buffers (set a
+  // different N to trigger again). Worker thread only; a single branch per
+  // hooked packet when idle.
+  struct BinTrace {
+    uint32_t frames_left = 0;
+    uint32_t frame_number = 0;
+    int32_t last_property_value = -1;
+    uint32_t frames_since_poll = 0;
+    // debug.xendroid.fake_extents experiment: 0 - the usual full-screen
+    // screen extents, 1..3 - report every draw as covering only the rows of
+    // band 1..3 (256 each), 4 - an empty extent.
+    uint32_t fake_extents_mode = 0;
+    uint32_t interrupts = 0;
+    uint32_t wait_reg_mems = 0;
+    // <packet address, bin select, mask> for masks set this frame.
+    std::vector<std::tuple<uint32_t, uint64_t, uint64_t>> mask_writes;
+    uint32_t draws = 0;
+    uint32_t draws_predicated = 0;
+    uint32_t draws_predicated_skipped = 0;
+    uint32_t draws_since_select = 0;
+    uint32_t packets_predicated = 0;
+    uint32_t packets_predicated_skipped = 0;
+    uint32_t indirect_buffers = 0;
+    uint32_t indirect_buffers_predicated = 0;
+    uint32_t indirect_buffers_predicated_skipped = 0;
+    uint64_t indirect_buffer_dwords = 0;
+    uint32_t bin_mask_writes = 0;
+    uint32_t bin_select_writes = 0;
+    std::vector<uint32_t> extent_addresses;
+    std::vector<std::pair<uint32_t, uint32_t>> indirect_buffer_ranges;
+    // <bin select, executed draws> and <bin mask, executed predicated draws>.
+    std::vector<std::pair<uint64_t, uint32_t>> draws_by_select;
+    std::vector<std::pair<uint64_t, uint32_t>> draws_by_mask;
+    std::string sequence;
+  };
+  BinTrace bin_trace_;
+  // debug.xendroid.wrm_log: unmet PM4_WAIT_REG_MEM waits still to be logged.
+  uint32_t wrm_log_left_ = 0;
+  int32_t wrm_log_last_property_ = -1;
+  // debug.xendroid.wrm_log: for a logged memory wait, the guest write that
+  // satisfied it, caught by a physical write watch armed on the waited page
+  // (the callback runs in the writing guest thread's fault handler, so it only
+  // stores what it saw; the command processor maps it to guest code).
+  struct WrmWriterEvent {
+    uint64_t host_pc;
+    uint32_t guest_thread;
+    uint64_t time_ns;
+  };
+  static std::pair<uint32_t, uint32_t> WrmWriterWatchCallback(
+      void* context_ptr, uint32_t physical_address_start, uint32_t length,
+      bool exact_range);
+  void WrmWriterArm(uint32_t physical_address);
+  // Disarms and describes the write (who, where in guest code, how long
+  // before the wait noticed it).
+  std::string WrmWriterTake();
+  void* wrm_writer_callback_handle_ = nullptr;
+  std::atomic<uint32_t> wrm_writer_address_{UINT32_MAX};
+  std::atomic<bool> wrm_writer_hit_{false};
+  WrmWriterEvent wrm_writer_event_ = {};
+  void BinTracePoll();
+  void BinTraceOpcode(uint32_t opcode);
+  void BinTraceSetBin(bool is_select, uint32_t packet_guest_address);
+  void BinTracePacket(uint32_t opcode, bool predicated, bool executed);
+  void BinTraceDraw(bool predicated, bool executed);
+  void BinTraceIndirectBuffer(uint32_t address, uint32_t dwords,
+                              bool predicated, bool executed);
+  void BinTraceExtents(uint32_t address);
+  // Appends "<tag><a>x<b>" to the first traced frame's sequence.
+  void BinTraceNote(const char* tag, uint32_t a, uint32_t b);
+  void BinTraceEndFrame();
 
   // Constants for the shared resolve-downscale compute shader (used by the
   // D3D12 and Vulkan backends to downscale a scaled resolve back to 1x).
@@ -488,6 +671,9 @@ class CommandProcessor {
   // Splits the open segment when the draw scale changes so each segment
   // normalizes with one scale.
   void UpdateZPDScale(uint32_t scale_area);
+  // Or-ed into the scale area: the host passes half the samples the guest
+  // would (4x MSAA stored at 2x) - the count is doubled before the division.
+  static constexpr uint32_t kZPDScaleHalfSamples = UINT32_C(1) << 31;
 
   // Called by backends when a host query resolve completes.  Accumulates
   // the normalized sample count, and if all segments are done, commits the
@@ -653,6 +839,7 @@ class CommandProcessor {
   uint32_t active_vertex_shader_ucode_address_ = 0;
 
   std::atomic<bool> paused_{false};
+  std::atomic<uint32_t> resume_count_{0};
   std::unique_ptr<xe::threading::Event> pause_resume_event_;
 
   // By default (such as for tools), post-processing is disabled.

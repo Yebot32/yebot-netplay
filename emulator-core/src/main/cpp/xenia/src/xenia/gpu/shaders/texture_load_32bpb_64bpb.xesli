@@ -9,12 +9,118 @@
 
 #include "texture_load.xesli"
 
+#ifdef XE_TEXTURE_LOAD_32BPB_TO_64BPB_IMAGE
+  #if !SHADING_LANGUAGE_GLSL_XE || defined(XE_TEXTURE_LOAD_RESOLUTION_SCALED)
+    #error Texture loads into images are unscaled SPIR-V (GLSL flavor) only.
+  #endif
+// The host texels go straight to the image (one 2D level) through its
+// R32G32_UINT alias instead of a buffer copied to it afterwards: the same
+// bytes, as the conversion returns each texel as its RG and BA dwords.
+layout(set = 0, binding = 0, rg32ui) uniform writeonly uimage2D
+    xe_texture_load_dest_image;
+byte_buffer_align16_declare_xe(xe_texture_load_source, 1, 0, t0, space0, 2)
+
+// Stores 4 host texels (RG0, BA0, RG1, BA1 and RG2, BA2, RG3, BA3) from (x, y)
+// to the right, not past the width.
+void XeTextureLoadStore4Texels64(uint2_xe position, uint width,
+                                 uint4_xe texels_01, uint4_xe texels_23) {
+  int2_xe coords = int2_xe(position);
+  imageStore(xe_texture_load_dest_image, coords,
+             uint4_xe(texels_01.xy, 0u, 0u));
+  dont_flatten_xe if (position.x + 3u < width) {
+    imageStore(xe_texture_load_dest_image, coords + int2_xe(1, 0),
+               uint4_xe(texels_01.zw, 0u, 0u));
+    imageStore(xe_texture_load_dest_image, coords + int2_xe(2, 0),
+               uint4_xe(texels_23.xy, 0u, 0u));
+    imageStore(xe_texture_load_dest_image, coords + int2_xe(3, 0),
+               uint4_xe(texels_23.zw, 0u, 0u));
+  } else {
+    if (position.x + 1u < width) {
+      imageStore(xe_texture_load_dest_image, coords + int2_xe(1, 0),
+                 uint4_xe(texels_01.zw, 0u, 0u));
+    }
+    if (position.x + 2u < width) {
+      imageStore(xe_texture_load_dest_image, coords + int2_xe(2, 0),
+                 uint4_xe(texels_23.xy, 0u, 0u));
+    }
+  }
+}
+
+entry_bindings_begin_compute_xe
+  XE_TEXTURE_LOAD_PUSH_CONST_BINDING
+  entry_binding_next_xe
+  byte_buffer_binding_xe(xe_texture_load_source, buffer(2))
+entry_bindings_end_inputs_begin_compute_xe
+  entry_in_global_thread_id_xe
+entry_inputs_end_code_begin_compute_xe
+#else
 XE_TEXTURE_LOAD_ENTRY(16)
+#endif
 {
   // 1 thread = 8 packed 32-bit texels with the externally provided uint4 -> 2x
   // uint4 function (XE_TEXTURE_LOAD_32BPB_TO_64BPB) for converting to 64bpb -
   // useful for expansion of hendeca (10:11:11 or 11:11:10) to unorm16/snorm16.
   XeTextureLoadInfo load_info = XeTextureLoadGetInfo(pass_push_consts_xe);
+  uint4_xe block_0, block_1;
+#if defined(XE_TEXTURE_LOAD_32BPB_TO_64BPB_IMAGE) || \
+    (defined(XE_TEXTURE_LOAD_32BPB_TO_64BPB_COALESCED) && \
+     !defined(XE_TEXTURE_LOAD_RESOLUTION_SCALED))
+  // texture_load_32bpb's coalesced mapping: the 4 threads along X of a group
+  // take blocks 4t...4t+3 and 16+4t...19+4t of the group's 32 rather than
+  // 8t...8t+7, so each 16-byte load of a wave covers whole 128-byte guest row
+  // pairs instead of every other 16 bytes of them, and the 4 threads store
+  // contiguous host texels.
+  uint3_xe block_index = in_global_thread_id_xe;
+  block_index.x =
+      ((block_index.x & ~3u) << 3u) | ((block_index.x & 3u) << 2u);
+  dont_flatten_xe
+  if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
+    return;
+  }
+  #ifndef XE_TEXTURE_LOAD_32BPB_TO_64BPB_IMAGE
+  uint block_offset_host =
+      load_info.host_offset +
+      uint(XeTextureHostLinearOffset(int3_xe(block_index), load_info.host_pitch,
+                                     load_info.size_blocks.y, 8u));
+  #endif
+  uint block_offset_guest =
+      XeTextureLoadSourceAddress(load_info, block_index, 2u);
+  uint4_xe guest_blocks = XeEndianSwap32(
+      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  XE_TEXTURE_LOAD_32BPB_TO_64BPB(guest_blocks, block_0, block_1);
+  #ifdef XE_TEXTURE_LOAD_32BPB_TO_64BPB_IMAGE
+  XeTextureLoadStore4Texels64(block_index.xy, load_info.size_blocks.x, block_0,
+                              block_1);
+  #else
+  byte_buffer_align16_store16_xe(xe_texture_load_dest, block_offset_host,
+                                 block_0);
+  byte_buffer_align16_store16_xe(xe_texture_load_dest,
+                                 block_offset_host + 0x10u, block_1);
+  #endif
+  dont_flatten_xe
+  if (block_index.x + 16u >= load_info.size_blocks.x) {
+    return;
+  }
+  // X[4] is tiled address bit 7 together with Y[3] (or the bank), so it is
+  // flipped, not added.
+  block_offset_guest ^=
+      XeTextureLoadLocalXAddressXor(16u, 2u, load_info.is_tiled);
+  guest_blocks = XeEndianSwap32(
+      byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
+      load_info.endian_32);
+  XE_TEXTURE_LOAD_32BPB_TO_64BPB(guest_blocks, block_0, block_1);
+  #ifdef XE_TEXTURE_LOAD_32BPB_TO_64BPB_IMAGE
+  XeTextureLoadStore4Texels64(block_index.xy + uint2_xe(16u, 0u),
+                              load_info.size_blocks.x, block_0, block_1);
+  #else
+  // 16 host blocks of 8 bytes further along the row.
+  byte_buffer_align16_store16_xe(xe_texture_load_dest,
+                                 block_offset_host + 0x80u, block_0);
+  byte_buffer_align16_store16_xe(xe_texture_load_dest,
+                                 block_offset_host + 0x90u, block_1);
+  #endif
+#else
   uint3_xe block_index = in_global_thread_id_xe << uint3_xe(3u, 0u, 0u);
   dont_flatten_xe
   if (any(greater_than_equal_xe(block_index.xy, load_info.size_blocks.xy))) {
@@ -29,7 +135,6 @@ XE_TEXTURE_LOAD_ENTRY(16)
   uint4_xe guest_blocks = XeEndianSwap32(
       byte_buffer_align16_load16_xe(xe_texture_load_source, block_offset_guest),
       load_info.endian_32);
-  uint4_xe block_0, block_1;
   XE_TEXTURE_LOAD_32BPB_TO_64BPB(guest_blocks, block_0, block_1);
   byte_buffer_align16_store16_xe(xe_texture_load_dest, block_offset_host,
                                  block_0);
@@ -45,5 +150,6 @@ XE_TEXTURE_LOAD_ENTRY(16)
                                  block_offset_host + 0x20u, block_0);
   byte_buffer_align16_store16_xe(xe_texture_load_dest,
                                  block_offset_host + 0x30u, block_1);
+#endif
 }
 entry_code_end_compute_xe

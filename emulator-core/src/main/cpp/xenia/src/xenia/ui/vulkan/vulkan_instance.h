@@ -11,6 +11,7 @@
 #define XENIA_UI_VULKAN_VULKAN_INSTANCE_H_
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "xenia/base/platform.h"
@@ -24,6 +25,12 @@
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+// Requests the KGSL GPU power control state (Custom Driver Force Max Clocks)
+// again, once the custom driver path made the first request at instance
+// creation; logs with the reason if one is given, failures always. False
+// where it is not in use or the kernel refuses.
+bool RequestGpuPowerControl(const char* reason);
 
 class VulkanInstance {
  public:
@@ -123,6 +130,10 @@ class VulkanInstance {
 
   VkInstance instance() const { return instance_; }
 
+  // The custom driver library actually loaded through adrenotools
+  // (vulkan_lib_path), or empty when the system loader is in use.
+  const std::string& custom_driver_path() const { return custom_driver_path_; }
+
   void EnumeratePhysicalDevices(
       std::vector<VkPhysicalDevice>& physical_devices_out) const;
 
@@ -136,6 +147,7 @@ class VulkanInstance {
 #elif XE_PLATFORM_WIN32
   HMODULE loader_ = nullptr;
 #endif
+  std::string custom_driver_path_;
 
   Functions functions_;
 

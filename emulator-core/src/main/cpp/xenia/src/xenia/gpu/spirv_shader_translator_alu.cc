@@ -21,6 +21,7 @@
 #include "xenia/gpu/spirv_compatibility.h"
 
 DECLARE_bool(spirv_multiply_zero_test_on_bits);
+DECLARE_bool(spirv_fast_precision_rounding);
 
 // Measured on Halo 3's main menu (Tab S9, stock Adreno driver): the
 // min(|a|, |b|) == 0 test costs about half the GPU frame time, because the
@@ -43,6 +44,9 @@ namespace gpu {
 spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value,
                                                       spv::Id operand_0_abs,
                                                       spv::Id operand_1_abs) {
+  if (math_relaxations_ & kMathRelaxationMultiplyZero) {
+    return value;
+  }
   EnsureBuildPointAvailable();
   int num_components = builder_->getNumComponents(value);
   assert_true(builder_->getNumComponents(operand_0_abs) == num_components);
@@ -104,6 +108,9 @@ spv::Id SpirvShaderTranslator::ReduceFloatPrecision(spv::Id value,
   // Denormals may be flushed to zero, closer approximating Xbox 360
   // hardware behavior.
   assert_true(mantissa_bits > 0 && mantissa_bits < 23);
+  if (math_relaxations_ & kMathRelaxationPrecision) {
+    return value;
+  }
 
   EnsureBuildPointAvailable();
 
@@ -117,6 +124,32 @@ spv::Id SpirvShaderTranslator::ReduceFloatPrecision(spv::Id value,
   // Create a mask that keeps the sign, exponent, and desired mantissa bits
   uint32_t truncate_mask = ~((1u << truncate_bits) - 1);
   uint32_t round_bit = 1u << (truncate_bits - 1);
+
+  if (cvars::spirv_fast_precision_rounding) {
+    // Same results as below. Adding the round bit carries into the kept bits
+    // exactly when the discarded ones are at least half the kept ULP - the
+    // truncated value plus one ULP, including the carry into the exponent.
+    // A result that became infinity can only come from a finite value that
+    // must not round up (an infinity or NaN input can't end up as exactly
+    // infinity this way), so it takes the truncated value instead.
+    spv::Id rounded_bits = builder_->createBinOp(
+        spv::OpBitwiseAnd, type_uint_,
+        builder_->createBinOp(spv::OpIAdd, type_uint_, value_bits,
+                              builder_->makeUintConstant(round_bit)),
+        builder_->makeUintConstant(truncate_mask));
+    spv::Id rounded_to_infinity = builder_->createBinOp(
+        spv::OpIEqual, type_bool_,
+        builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, rounded_bits,
+                              builder_->makeUintConstant(0x7FFFFFFF)),
+        builder_->makeUintConstant(0x7F800000));
+    return builder_->createUnaryOp(
+        spv::OpBitcast, type_float_,
+        builder_->createTriOp(
+            spv::OpSelect, type_uint_, rounded_to_infinity,
+            builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, value_bits,
+                                  builder_->makeUintConstant(truncate_mask)),
+            rounded_bits));
+  }
 
   // Truncate to get the base value
   spv::Id truncated_bits =
@@ -335,7 +368,9 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
           used_result_components &
           ~instr.vector_operands[0].GetIdenticalComponents(
               instr.vector_operands[1]);
-      if (multiplicands_different) {
+      // Like ZeroIfAnyOperandIsZero, skipped with the multiply-zero relaxation.
+      if (multiplicands_different &&
+          !(math_relaxations_ & kMathRelaxationMultiplyZero)) {
         // Shader Model 3: +0 or denormal * anything = +-0.
         spv::Id different_operands[2] = {multiplicands[0], multiplicands[1]};
         spv::Id different_result = result;

@@ -28,6 +28,18 @@
 
 #define XE_RESOLVE_HOST_DEPTH_FLAG_HAS_STENCIL (1u << 0u)
 #define XE_RESOLVE_HOST_DEPTH_FLAG_ROUND_DEPTH (1u << 1u)
+// XE_RESOLVE_HOST_TEXTURE: the texture is k_24_8_FLOAT (20e4 depth) rather
+// than k_24_8 - both hold the depth as a 32-bit float on the host.
+#define XE_RESOLVE_HOST_DEPTH_FLAG_TEXTURE_FLOAT24 (1u << 2u)
+// XE_RESOLVE_HOST_TEXTURE, diagnostics (vulkan_debug_gpu_probe): store into the
+// texture only, not into guest memory - what the memory store costs.
+#define XE_RESOLVE_HOST_DEPTH_FLAG_TEXTURE_ONLY (1u << 3u)
+// A 4x MSAA source stored with 2 samples per pixel (msaa_4x_as_2x): guest
+// sample s is host sample (s >> 1) ^ 1.
+#define XE_RESOLVE_HOST_DEPTH_FLAG_SOURCE_HOST_2X (1u << 4u)
+// XE_RESOLVE_HOST_TEXTURE: the texture reads the memory as k_8_8_8_8 - it gets
+// the packed depth and stencil words themselves.
+#define XE_RESOLVE_HOST_DEPTH_FLAG_TEXTURE_RAW (1u << 5u)
 
 const_buffer_begin_xe(xe_resolve_host_depth, 0, 1, b1, space0)
   uint xe_resolve_host_depth_dispatch_offset;
@@ -41,7 +53,13 @@ const_buffer_begin_xe(xe_resolve_host_depth, 0, 1, b1, space0)
   uint xe_resolve_host_depth_msaa_2x_sample_0;
   uint xe_resolve_host_depth_msaa_2x_sample_1;
   uint xe_resolve_host_depth_flags;
+  // XE_RESOLVE_HOST_TEXTURE: texel of the destination texture at pixel (0, 0)
+  // of the resolve (signed).
+  uint xe_resolve_host_depth_texture_origin_x;
+  uint xe_resolve_host_depth_texture_origin_y;
 const_buffer_end_xe(xe_resolve_host_depth)
+
+#include "resolve_host_texture.xesli"
 
 #define XE_RESOLVE_HOST_DEPTH_CONSTANTS_BINDING \
     const_buffer_binding_xe(xe_resolve_host_depth, buffer(2))
@@ -143,7 +161,16 @@ uint XeResolveHostDepthTilePixelSizeY(XeResolveInfo resolve_info) {
   #endif
 }
 
-uint XeResolveHostDepthPixelsPerThread() { return 8u; }
+// XE_RESOLVE_HOST_4PX: 4 pixels per thread, so the one 16-byte store of each
+// thread of a wave lands next to its neighbors' and covers whole cache lines
+// (with 8, every store instruction covers half of each line).
+uint XeResolveHostDepthPixelsPerThread() {
+  #ifdef XE_RESOLVE_HOST_4PX
+    return 4u;
+  #else
+    return 8u;
+  #endif
+}
 
 uint XeResolveHostDepthRoundToNearestEven(float value) {
   float floor_value = floor(value);
@@ -232,6 +259,10 @@ float XeResolveHostDepthFetchDepth(
         int2_xe(source_texel.x, source_texel.y >> 1u), int(sample_id)).r;
   #else
     uint sample_id = (source_texel.x & 1u) | ((source_texel.y & 1u) << 1u);
+    if ((constant_xe(xe_resolve_host_depth, xe_resolve_host_depth_flags) &
+         XE_RESOLVE_HOST_DEPTH_FLAG_SOURCE_HOST_2X) != 0u) {
+      sample_id = (sample_id >> 1u) ^ 1u;
+    }
     return texel_fetch_2d_ms_xe(
         xe_resolve_host_depth_source,
         int2_xe(source_texel.x >> 1u, source_texel.y >> 1u),
@@ -268,6 +299,10 @@ uint XeResolveHostDepthFetchStencil(
         0xFFu;
   #else
     uint sample_id = (source_texel.x & 1u) | ((source_texel.y & 1u) << 1u);
+    if ((constant_xe(xe_resolve_host_depth, xe_resolve_host_depth_flags) &
+         XE_RESOLVE_HOST_DEPTH_FLAG_SOURCE_HOST_2X) != 0u) {
+      sample_id = (sample_id >> 1u) ^ 1u;
+    }
     return texel_fetch_2d_ms_xe(
         xe_resolve_host_depth_stencil,
         int2_xe(source_texel.x >> 1u, source_texel.y >> 1u),
@@ -417,6 +452,11 @@ void XeResolveHostDepthMain(
     param_next_after_stencil_texture_xe
     param_stencil_texture_xe(xe_resolve_host_depth_stencil)) {
   XeResolveInfo resolve_info = XeResolveGetInfo(pass_push_consts_xe);
+  #ifdef XE_RESOLVE_HOST_DEPTH_EDRAM_FORMAT
+    // A variant for one depth format: the conversion of every sample without
+    // the format branches between the fetches.
+    resolve_info.edram_format = XE_RESOLVE_HOST_DEPTH_EDRAM_FORMAT;
+  #endif
   uint2_xe pixel_index;
   if (!XeResolveHostDepthGetPixelIndex(
           resolve_info, thread_index, pixel_index
@@ -463,6 +503,9 @@ void XeResolveHostDepthMain(
       pass_depth_texture_xe(xe_resolve_host_depth_source)
       pass_next_after_stencil_texture_xe
       pass_stencil_texture_xe(xe_resolve_host_depth_stencil));
+#ifdef XE_RESOLVE_HOST_4PX
+  pixels_4567 = uint4_xe(0u, 0u, 0u, 0u);
+#else
   pixels_4567.x = XeResolveHostDepthPack(
       resolve_info,
       XeResolveHostDepthSourceSampleForLane(resolve_info, pixel_index, 4u)
@@ -499,18 +542,47 @@ void XeResolveHostDepthMain(
       pass_depth_texture_xe(xe_resolve_host_depth_source)
       pass_next_after_stencil_texture_xe
       pass_stencil_texture_xe(xe_resolve_host_depth_stencil));
+#endif
 
   XeResolveHostDepthApplyHalfPixelOffset32(resolve_info, pixel_index,
                                            pixels_0123, pixels_4567);
   XeResolveSwap8PixelsRedBlue32bpp(resolve_info, pixels_0123, pixels_4567);
+#if XE_RESOLVE_HOST_TEXTURE
+  #ifndef XE_RESOLVE_HOST_4PX
+    #error Depth resolves into textures take 4 pixels per thread.
+  #endif
+  // What the texture upload makes of the 24-bit depth (the stencil dropped),
+  // or of the words of memory read as k_8_8_8_8.
+  uint depth_texture_flags =
+      constant_xe(xe_resolve_host_depth, xe_resolve_host_depth_flags);
+  uint4_xe depth_texels =
+      (depth_texture_flags & XE_RESOLVE_HOST_DEPTH_FLAG_TEXTURE_RAW) != 0u
+          ? pixels_0123
+          : ((depth_texture_flags &
+              XE_RESOLVE_HOST_DEPTH_FLAG_TEXTURE_FLOAT24) != 0u
+                 ? XeFloat20e4To32(pixels_0123 >> 8u)
+                 : float_bits_to_uint_xe(XeUNorm24To32(pixels_0123 >> 8u)));
+  XeResolveHostTextureStore4(
+      int2_xe(int(constant_xe(xe_resolve_host_depth,
+                              xe_resolve_host_depth_texture_origin_x)),
+              int(constant_xe(xe_resolve_host_depth,
+                              xe_resolve_host_depth_texture_origin_y))),
+      pixel_index, depth_texels);
+  if ((constant_xe(xe_resolve_host_depth, xe_resolve_host_depth_flags) &
+       XE_RESOLVE_HOST_DEPTH_FLAG_TEXTURE_ONLY) != 0u) {
+    return;
+  }
+#endif
   uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index, 2u);
   byte_buffer_align16_store16_xe(
       xe_resolve_dest, dest_address,
       XeEndianSwap32(pixels_0123, resolve_info.dest_endian_128));
+#ifndef XE_RESOLVE_HOST_4PX
   dest_address += XeResolveLocalXAddressXor(4u, 2u);
   byte_buffer_align16_store16_xe(
       xe_resolve_dest, dest_address,
       XeEndianSwap32(pixels_4567, resolve_info.dest_endian_128));
+#endif
 }
 
 #endif  // XENIA_GPU_SHADERS_RESOLVE_HOST_DEPTH_XESLI_

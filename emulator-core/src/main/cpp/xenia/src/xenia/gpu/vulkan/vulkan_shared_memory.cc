@@ -477,11 +477,13 @@ void VulkanSharedMemory::TryInitializeHostBuffer() {
   // draws while the main buffer stays fast device-local. Non-sparse, so it can
   // accept host memory where the sparse buffer can't.
   if (!CreateImportedGuestRamBuffer(host_buffer_, host_buffer_memory_)) {
-    // Without it memexport output stays device-local and the CPU never sees it.
-    XELOGW(
-        "Shared memory: no host buffer for memexport - memexport_enable is set "
-        "but the import failed, games reading exported data on the CPU will "
-        "misbehave");
+    if (IsHostMapped()) {
+      XELOGI("Shared memory: guest RAM import unavailable - memexport uses "
+             "synchronous host-mapped readback");
+    } else {
+      XELOGW("Shared memory: memexport needs guest RAM import or a host-mapped "
+             "buffer (readback_resolve=uma)");
+    }
     host_buffer_ = VK_NULL_HANDLE;
     host_buffer_memory_ = VK_NULL_HANDLE;
     return;
@@ -578,6 +580,14 @@ void VulkanSharedMemory::Use(Usage usage,
     }
   }
   last_written_range_ = written_range;
+}
+
+bool VulkanSharedMemory::CopyToGuestMemory(uint32_t start, uint32_t length) {
+  // Zero-copy: the GPU wrote guest memory itself.
+  if (zero_copy_ || host_mapped_data_ == nullptr) {
+    return false;
+  }
+  return ReadHostMapped(start, length, memory().TranslatePhysical(start));
 }
 
 bool VulkanSharedMemory::ReadHostMapped(uint32_t guest_address, uint32_t length,
@@ -846,6 +856,7 @@ bool VulkanSharedMemory::UploadRanges(
       }
       MakeRangeValid(upload_range_start << page_size_log2(),
                      uint32_t(upload_buffer_size), false);
+      command_processor_.NoteSharedMemoryUpload(upload_buffer_size);
 
       if (upload_buffer_size < (1ULL << 32) && upload_buffer_size > 8192) {
         memory::vastcpy(

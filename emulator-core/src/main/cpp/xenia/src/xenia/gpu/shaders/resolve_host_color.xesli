@@ -40,7 +40,20 @@ const_buffer_begin_xe(xe_resolve_host_color, 0, 1, b1, space0)
   uint xe_resolve_host_color_msaa_2x_sample_0;
   uint xe_resolve_host_color_msaa_2x_sample_1;
   uint xe_resolve_host_color_flags;
+  // XE_RESOLVE_HOST_TEXTURE: texel of the destination texture at pixel (0, 0)
+  // of the resolve (signed).
+  uint xe_resolve_host_color_texture_origin_x;
+  uint xe_resolve_host_color_texture_origin_y;
 const_buffer_end_xe(xe_resolve_host_color)
+
+// XE_RESOLVE_HOST_TEXTURE, diagnostics (vulkan_debug_gpu_probe): store into the
+// texture only, not into guest memory - what the memory store costs.
+#define XE_RESOLVE_HOST_COLOR_FLAG_TEXTURE_ONLY (1u << 0u)
+// A 4x MSAA source stored with 2 samples per pixel (msaa_4x_as_2x): guest
+// sample s is host sample (s >> 1) ^ 1.
+#define XE_RESOLVE_HOST_COLOR_FLAG_SOURCE_HOST_2X (1u << 1u)
+
+#include "resolve_host_texture.xesli"
 
 #define XE_RESOLVE_HOST_COLOR_CONSTANTS_BINDING \
     const_buffer_binding_xe(xe_resolve_host_color, buffer(2))
@@ -169,7 +182,9 @@ uint XeResolveHostColorPixelsPerThread() {
       return 4u;
     #endif
   #else
-    #if XE_RESOLVE_HOST_COLOR_BPP == 64
+    // XE_RESOLVE_HOST_4PX: one 16-byte store per thread, next to its
+    // neighbors', so each store instruction of a wave covers whole cache lines.
+    #if XE_RESOLVE_HOST_COLOR_BPP == 64 || defined(XE_RESOLVE_HOST_4PX)
       return 4u;
     #else
       return 8u;
@@ -255,6 +270,10 @@ uint4_xe XeResolveHostColorFetchUint(
         int2_xe(source_texel.x, source_texel.y >> 1u), int(sample_id));
   #else
     uint sample_id = (source_texel.x & 1u) | ((source_texel.y & 1u) << 1u);
+    if ((constant_xe(xe_resolve_host_color, xe_resolve_host_color_flags) &
+         XE_RESOLVE_HOST_COLOR_FLAG_SOURCE_HOST_2X) != 0u) {
+      sample_id = (sample_id >> 1u) ^ 1u;
+    }
     return texel_fetch_2d_ms_xe(
         xe_resolve_host_color_source,
         int2_xe(source_texel.x >> 1u, source_texel.y >> 1u), int(sample_id));
@@ -284,6 +303,10 @@ float4_xe XeResolveHostColorFetchFloat(
         int2_xe(source_texel.x, source_texel.y >> 1u), int(sample_id));
   #else
     uint sample_id = (source_texel.x & 1u) | ((source_texel.y & 1u) << 1u);
+    if ((constant_xe(xe_resolve_host_color, xe_resolve_host_color_flags) &
+         XE_RESOLVE_HOST_COLOR_FLAG_SOURCE_HOST_2X) != 0u) {
+      sample_id = (sample_id >> 1u) ^ 1u;
+    }
     return texel_fetch_2d_ms_xe(
         xe_resolve_host_color_source,
         int2_xe(source_texel.x >> 1u, source_texel.y >> 1u), int(sample_id));
@@ -980,6 +1003,15 @@ void XeResolveHostColorFullMain(
     param_next_after_texture_xe
     param_texture_xe(xe_resolve_host_color_source)) {
   XeResolveInfo resolve_info = XeResolveGetInfo(pass_push_consts_xe);
+  #ifdef XE_RESOLVE_HOST_COLOR_FULL_7E3_TO_2_10_10_10
+    // The variant for 7e3 in the EDRAM (either of its formats, handled alike)
+    // resolved to 2_10_10_10: the same packing of every sample to the EDRAM
+    // format and back, and of the result, without the format switches between
+    // the sample fetches.
+    resolve_info.edram_format = kXenosColorRenderTargetFormat_2_10_10_10_FLOAT;
+    resolve_info.edram_format_ints_log2 = 0u;
+    resolve_info.dest_format = kXenosFormat_2_10_10_10;
+  #endif
   uint2_xe pixel_index;
   if (!XeResolveHostColorGetPixelIndex(
           resolve_info, thread_index, pixel_index
@@ -1077,6 +1109,18 @@ void XeResolveHostColorFullMain(
                                          resolve_info.dest_format,
                                          resolve_info.dest_num_format);
     XeResolveHostColorApplyHalfPixelOffset32(resolve_info, pixel_index, packed);
+    #if XE_RESOLVE_HOST_TEXTURE
+      XeResolveHostTextureStore4(
+          int2_xe(int(constant_xe(xe_resolve_host_color,
+                                  xe_resolve_host_color_texture_origin_x)),
+                  int(constant_xe(xe_resolve_host_color,
+                                  xe_resolve_host_color_texture_origin_y))),
+          pixel_index, packed);
+      if ((constant_xe(xe_resolve_host_color, xe_resolve_host_color_flags) &
+           XE_RESOLVE_HOST_COLOR_FLAG_TEXTURE_ONLY) != 0u) {
+        return;
+      }
+    #endif
     byte_buffer_align16_store16_xe(
         xe_resolve_dest,
         XeResolveDestPixelAddress(resolve_info, pixel_index, 2u),
@@ -1146,6 +1190,12 @@ void XeResolveHostColorMain(
     param_next_after_texture_xe
     param_texture_xe(xe_resolve_host_color_source)) {
   XeResolveInfo resolve_info = XeResolveGetInfo(pass_push_consts_xe);
+  #ifdef XE_RESOLVE_HOST_COLOR_EDRAM_FORMAT
+    // A variant for one 32bpp EDRAM format: the packing of every pixel to it
+    // without the format switches between the fetches.
+    resolve_info.edram_format = XE_RESOLVE_HOST_COLOR_EDRAM_FORMAT;
+    resolve_info.edram_format_ints_log2 = 0u;
+  #endif
   uint2_xe pixel_index;
   if (!XeResolveHostColorGetPixelIndex(
           resolve_info, thread_index, pixel_index
@@ -1299,6 +1349,9 @@ void XeResolveHostColorMain(
               pass_next_after_texture_xe
               pass_texture_xe(xe_resolve_host_color_source)),
           resolve_info.edram_format);
+      #ifdef XE_RESOLVE_HOST_4PX
+      pixels_4567 = uint4_xe(0u, 0u, 0u, 0u);
+      #else
       pixels_4567.x = XeResolveHostColorPack32Uint(
           XeResolveHostColorFetchUint(
               resolve_info,
@@ -1339,6 +1392,7 @@ void XeResolveHostColorMain(
               pass_next_after_texture_xe
               pass_texture_xe(xe_resolve_host_color_source)),
           resolve_info.edram_format);
+      #endif
     #else
       pixels_0123.x = XeResolveHostColorPack32Float(
           XeResolveHostColorFetchFloat(
@@ -1380,6 +1434,9 @@ void XeResolveHostColorMain(
               pass_next_after_texture_xe
               pass_texture_xe(xe_resolve_host_color_source)),
           resolve_info.edram_format);
+      #ifdef XE_RESOLVE_HOST_4PX
+      pixels_4567 = uint4_xe(0u, 0u, 0u, 0u);
+      #else
       pixels_4567.x = XeResolveHostColorPack32Float(
           XeResolveHostColorFetchFloat(
               resolve_info,
@@ -1420,19 +1477,37 @@ void XeResolveHostColorMain(
               pass_next_after_texture_xe
               pass_texture_xe(xe_resolve_host_color_source)),
           resolve_info.edram_format);
+      #endif
     #endif
     XeResolveHostColorApplyHalfPixelOffset32(resolve_info, pixel_index,
                                              pixels_0123);
     XeResolveSwap8PixelsRedBlue32bpp(resolve_info, pixels_0123, pixels_4567);
+    #if XE_RESOLVE_HOST_TEXTURE
+      #ifndef XE_RESOLVE_HOST_4PX
+        #error Fast color resolves into textures take 4 pixels per thread.
+      #endif
+      XeResolveHostTextureStore4(
+          int2_xe(int(constant_xe(xe_resolve_host_color,
+                                  xe_resolve_host_color_texture_origin_x)),
+                  int(constant_xe(xe_resolve_host_color,
+                                  xe_resolve_host_color_texture_origin_y))),
+          pixel_index, pixels_0123);
+      if ((constant_xe(xe_resolve_host_color, xe_resolve_host_color_flags) &
+           XE_RESOLVE_HOST_COLOR_FLAG_TEXTURE_ONLY) != 0u) {
+        return;
+      }
+    #endif
     uint dest_address = XeResolveDestPixelAddress(resolve_info, pixel_index,
                                                   2u);
     byte_buffer_align16_store16_xe(
         xe_resolve_dest, dest_address,
         XeEndianSwap32(pixels_0123, resolve_info.dest_endian_128));
+    #ifndef XE_RESOLVE_HOST_4PX
     dest_address += XeResolveLocalXAddressXor(4u, 2u);
     byte_buffer_align16_store16_xe(
         xe_resolve_dest, dest_address,
         XeEndianSwap32(pixels_4567, resolve_info.dest_endian_128));
+    #endif
   #endif
 }
 

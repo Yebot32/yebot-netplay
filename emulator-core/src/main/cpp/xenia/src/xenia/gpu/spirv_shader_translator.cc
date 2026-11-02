@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/spirv_shader_translator.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -19,6 +20,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/base/threading.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/spirv_compatibility.h"
 #include "xenia/gpu/spirv_shader.h"
@@ -62,6 +64,163 @@ DEFINE_bool(
     "iteration and a switch dispatch at every block boundary a shader used to "
     "run straight through, which is expensive where fragment shading is the "
     "bottleneck.",
+    "GPU");
+
+DEFINE_int32(
+    spirv_ps_math_experiment, 0,
+    "Diagnostics - measures how much GPU time the emulation of Xenos math and "
+    "texture semantics costs in pixel shaders. Bit mask, pixel shaders only, "
+    "read when shaders are translated (startup): 1 - no Shader Model 3 "
+    "'0 * anything = 0' multiplication emulation; 2 - no 21-bit precision "
+    "rounding after exp/log/sqrt/rsq/rcp; 4 - texture fetches ignore the "
+    "signed/biased/gamma component signs (WRONG COLORS, measurement only); 8 - "
+    "allow floating-point contraction (fused multiply-add).",
+    "GPU");
+
+DEFINE_int32(
+    spirv_ps_relaxed_math, 0,
+    "Skip parts of the Xenos math emulation in pixel shaders that cost GPU "
+    "time. Bit mask, read when shaders are translated (startup): 1 - no "
+    "Shader Model 3 '0 * anything = 0' in multiplications (titles relying on "
+    "0 * infinity or 0 * NaN giving 0 may show black or white pixels, and "
+    "zero products keep their IEEE sign); 2 - no rounding to the 21 mantissa "
+    "bits of the Xenos after exp, log, sqrt, rsq and rcp; 8 - allow fused "
+    "multiply-add (results may differ in the last bits between shaders, so "
+    "multipass effects repeating a calculation may not match exactly; no "
+    "change in the code Turnip generates). 11 (all) measured -6% GPU time in "
+    "the Forza Horizon main pass on Adreno 825 with no visible difference. "
+    "The same bits as spirv_ps_math_experiment, without its texture sign bit "
+    "(4).",
+    "GPU");
+
+DEFINE_int32(
+    spirv_vs_math_experiment, 0,
+    "Diagnostics - measures how much GPU time the emulation of Xenos math "
+    "costs in vertex shaders. Bit mask like spirv_ps_relaxed_math (1, 2, 8), "
+    "vertex shaders only, read when shaders are translated (startup). Only "
+    "for measurement: vertex positions computed by different shaders may "
+    "stop matching exactly between passes (depth fighting).",
+    "GPU");
+
+DEFINE_int32(
+    spirv_vs_relaxed_math, 0,
+    "Skip parts of the Xenos math emulation in vertex shaders, like "
+    "spirv_ps_relaxed_math in pixel shaders. Bit mask, read when shaders are "
+    "translated (startup): 1 - no Shader Model 3 '0 * anything = 0' in "
+    "multiplications (the same results for finite operands, only the sign of "
+    "a zero product may differ - positions computed by different shaders "
+    "still match); 2 - no rounding to the 21 mantissa bits of the Xenos after "
+    "exp, log, sqrt, rsq and rcp; 8 - allow fused multiply-add. 2 and 8 change "
+    "results, so the same position computed by different shaders may stop "
+    "matching between passes (depth fighting).",
+    "GPU");
+
+DEFINE_bool(
+    spirv_fast_precision_rounding, true,
+    "Round results of exp, log, sqrt, rsq and rcp to the 21 mantissa bits of "
+    "the Xenos with an add of half the kept unit in the last place and a "
+    "mask, instead of computing both roundings and selecting (5 instead of 12 "
+    "Adreno instructions each, -6% pixel shader instructions on the Forza "
+    "Horizon shaders). Same results for every input, including infinity, NaN "
+    "and the finite values that must not round up to infinity; read when "
+    "shaders are translated (startup). On for every title since 2026-10-05.",
+    "GPU");
+UPDATE_from_bool(spirv_fast_precision_rounding, 2026, 10, 5, 12, false);
+
+DEFINE_bool(
+    spirv_texture_sign_branch, true,
+    "Convert gamma texture components to linear only inside a branch on "
+    "whether any component of the fetch is gamma (a uniform condition), "
+    "marked DontFlatten, with selects for the cheap signed and biased "
+    "components, instead of a switch per component. Mesa lowers such a "
+    "switch to ifs that it flattens, so the piecewise linear gamma conversion "
+    "runs for every component of every texture fetch and is discarded unless "
+    "the texture is gamma (texture sign handling took ~12% of the Forza "
+    "Horizon main pass on Adreno 825). The branch costs a few instructions "
+    "per fetch, so this pays off unless most fetched textures are gamma (see "
+    "the TexSigns lines of pm4_bin_trace). Same results; read when shaders "
+    "are translated (startup). On for every title since 2026-10-05 (exact; "
+    "Forza Horizon +3% fps with spirv_fast_precision_rounding).",
+    "GPU");
+UPDATE_from_bool(spirv_texture_sign_branch, 2026, 10, 5, 11, false);
+
+DEFINE_bool(
+    spirv_texture_sign_specialization, true,
+    "Pixel shaders take the signs of the textures of fetch constants 0-7 "
+    "(all unsigned, gamma color with linear alpha, all gamma) from "
+    "specialization constants their pipelines set from the fetch constants "
+    "of the draw, so the host compiler drops the runtime sign handling - the "
+    "branches around the unsigned and signed samples, the selects and the "
+    "branch on gamma - leaving one sample and the gamma conversion where "
+    "needed. Same results; more pipelines where a shader is used with "
+    "textures of different signs. Read when shaders are translated (startup); "
+    "vulkan_texture_sign_classes switches the specialization per draw. On for "
+    "every title since 2026-10-05 (exact; Forza Horizon GPU time -1.9 ms); "
+    "the first launch after the change compiles the pixel shader pipelines "
+    "again.",
+    "GPU");
+UPDATE_from_bool(spirv_texture_sign_specialization, 2026, 10, 5, 10, false);
+
+DEFINE_bool(
+    spirv_texture_sign_specialization_used, true,
+    "With spirv_texture_sign_specialization: specialize the signs of the "
+    "first 8 distinct fetch constants each pixel shader fetches, whichever "
+    "they are - false: those of fetch constants 0-7 (Forza Horizon's big "
+    "shaders also read fetch constant 13; GPU time -0.4 ms on the POCO F7, "
+    "S44). Read when shaders are translated (startup).",
+    "GPU");
+
+DEFINE_bool(
+    spirv_texture_implicit_lod, false,
+    "Sample 2D textures with the LOD the host computes (implicit LOD plus "
+    "the guest's LOD bias) instead of passing coarse derivatives scaled by "
+    "2^bias as explicit gradients - the same LOD where the derivatives are "
+    "defined, but on Adreno each explicit-gradient fetch is 4 derivative "
+    "instructions plus a quad gradient sample (samgq), all on the texture "
+    "pipe, instead of one sample. Fetches with register gradients or per-axis "
+    "gradient exponent biases (texture_gradient_exp_bias) keep the "
+    "gradients. Read when shaders are translated (startup).",
+    "GPU");
+
+DEFINE_bool(
+    spirv_texture_exp_adjust_specialization, true,
+    "Pixel shaders know per pipeline (a specialization constant) whether "
+    "every texture they fetch has a zero exponent adjustment in its fetch "
+    "constant - then the multiplication of each fetched component by 2^0 is "
+    "folded away by the host compiler; otherwise it's done as before (GPU "
+    "time -0.2 ms in Forza Horizon on an Adreno 825). Read when shaders are "
+    "translated (startup).",
+    "GPU");
+
+DEFINE_bool(
+    spirv_texture_fetch_constants_decoded, false,
+    "Texture fetches load the sizes, the dimensionality, the result exponent "
+    "factor and the LOD bias of their fetch constants decoded on the CPU "
+    "(appended to the fetch constant buffer) instead of extracting and "
+    "converting the bit fields in the shader - on Adreno that work lands in "
+    "the preamble each draw runs serially before its first pixel. The same "
+    "values. Read when shaders are translated (startup).",
+    "GPU");
+
+DEFINE_bool(
+    host_alpha_to_coverage, false,
+    "Host render target path: do the guest's alpha to coverage with the "
+    "host's fixed function (Vulkan alphaToCoverageEnable) instead of "
+    "emulating it in the pixel shaders, which write gl_SampleMask for it "
+    "(Forza Horizon on an Adreno 825: main pass -7.5%, about half of what "
+    "alpha to coverage costs there at all). The host applies its own dither "
+    "pattern instead of the Xenos threshold offsets. Draws without color "
+    "output 0 (depth-only passes) keep the emulation. Read when shaders are "
+    "translated (startup).",
+    "GPU");
+
+DEFINE_bool(
+    spirv_ps_no_alpha_to_coverage_experiment, false,
+    "Diagnostics - measures what the alpha to coverage emulation of the host "
+    "render target path costs: pixel shaders with the alpha test or alpha to "
+    "coverage don't write gl_SampleMask (WRONG for draws with alpha to "
+    "coverage, measurement only). Read when shaders are translated "
+    "(startup).",
     "GPU");
 
 DEFINE_bool(
@@ -288,6 +447,9 @@ void SpirvShaderTranslator::Reset() {
 
   sampler_bindings_.clear();
   texture_bindings_.clear();
+  texture_sign_class_slots_.fill(uint8_t(kTextureSignClassFetchConstantCount));
+  texture_sign_class_spec_constants_.fill(spv::NoResult);
+  texture_exp_adjust_zero_spec_constant_ = spv::NoResult;
 
   main_interface_.clear();
   var_main_registers_ = spv::NoResult;
@@ -336,7 +498,27 @@ void SpirvShaderTranslator::StartTranslation() {
   // TODO(Triang3l): Logger.
   builder_ = std::make_unique<SpirvBuilder>(
       features_.spirv_version, (kSpirvMagicToolId << 16) | 1, nullptr);
-  builder_->SetAllowContraction(features_.allow_float_contraction);
+  // Texture signs are only skipped by the pixel shader experiment.
+  math_relaxations_ =
+      is_pixel_shader()
+          ? (uint32_t(cvars::spirv_ps_relaxed_math) &
+             ~uint32_t(kMathRelaxationTextureSigns)) |
+                uint32_t(cvars::spirv_ps_math_experiment)
+          : (uint32_t(cvars::spirv_vs_relaxed_math) |
+             uint32_t(cvars::spirv_vs_math_experiment)) &
+                ~uint32_t(kMathRelaxationTextureSigns);
+  texture_fetch_constants_decoded_ =
+      cvars::spirv_texture_fetch_constants_decoded;
+  builder_->SetAllowContraction(
+      features_.allow_float_contraction ||
+      (math_relaxations_ & kMathRelaxationContraction));
+  // The texture sign class slot of each fetch constant
+  // (spirv_texture_sign_specialization).
+  if (is_pixel_shader() && cvars::spirv_texture_sign_specialization) {
+    GetTextureSignClassSlots(current_shader(),
+                             cvars::spirv_texture_sign_specialization_used,
+                             texture_sign_class_slots_);
+  }
 
   builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
                                                   : spv::CapabilityShader);
@@ -616,10 +798,16 @@ void SpirvShaderTranslator::StartTranslation() {
     }
 
     // Common uniform buffer - fetch constants (32 x 6 uints packed in std140 as
-    // 4-component vectors).
+    // 4-component vectors), then, with spirv_texture_fetch_constants_decoded,
+    // the values decoded from them (DecodedTextureFetchConstant).
     id_vector_temp_.clear();
     id_vector_temp_.push_back(builder_->makeArrayType(
-        type_uint4_, builder_->makeUintConstant(32 * 6 / 4),
+        type_uint4_,
+        builder_->makeUintConstant(
+            kFetchConstantsRawVec4Count +
+            (texture_fetch_constants_decoded_
+                 ? 32 * kFetchConstantsDecodedVec4PerFetch
+                 : 0)),
         sizeof(uint32_t) * 4));
     builder_->addDecoration(id_vector_temp_.back(), spv::DecorationArrayStride,
                             sizeof(uint32_t) * 4);
@@ -1187,8 +1375,18 @@ void SpirvShaderTranslator::PostTranslation() {
     return;
   }
   SpirvShader* spirv_shader = dynamic_cast<SpirvShader*>(&translation.shader());
-  if (spirv_shader && !spirv_shader->bindings_setup_entered_.test_and_set(
-                          std::memory_order_relaxed)) {
+  if (!spirv_shader) {
+    return;
+  }
+  if (spirv_shader->bindings_setup_entered_.test_and_set(
+          std::memory_order_relaxed)) {
+    // The first valid modification of the shader gathers the bindings, maybe
+    // on another creation thread right now - don't publish this translation
+    // (is_translated) before they're complete.
+    while (!spirv_shader->bindings_ready()) {
+      xe::threading::MaybeYield();
+    }
+  } else {
     spirv_shader->texture_bindings_.clear();
     spirv_shader->texture_bindings_.reserve(texture_bindings_.size());
     for (const TextureBinding& translator_binding : texture_bindings_) {
@@ -3259,7 +3457,7 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
       DSV_IsApplyingPolygonOffset() ||
       (!edram_fragment_shader_interlock_ && !is_depth_only_fragment_shader_ &&
        current_shader().writes_color_target(0) &&
-       !IsExecutionModeEarlyFragmentTests());
+       !IsAlphaTestAndCoverageDisabled());
   if (need_frag_coord) {
     input_fragment_coordinates_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_float4_, "gl_FragCoord");
@@ -3357,7 +3555,14 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
   // Sample mask output for alpha-to-coverage.
   // Only needed for non-FSI mode. FSI uses main_fsi_sample_mask_ instead.
   output_fragment_sample_mask_ = spv::NoResult;
-  if (!edram_fragment_shader_interlock_ && !is_depth_only_fragment_shader_) {
+  // With host_alpha_to_coverage the pipeline does it from the alpha of color
+  // output 0 (the sample mask output only serves the emulation) - when there
+  // is that output. Depth-only passes (shadow maps) keep the emulation.
+  if (!edram_fragment_shader_interlock_ && !is_depth_only_fragment_shader_ &&
+      !IsAlphaTestAndCoverageDisabled() &&
+      !(cvars::host_alpha_to_coverage &&
+        IsColorOutput0ForHostAlphaToCoverage()) &&
+      !cvars::spirv_ps_no_alpha_to_coverage_experiment) {
     // gl_SampleMask is an array of int in SPIR-V.
     spv::Id type_sample_mask_array =
         builder_->makeArrayType(type_int_, builder_->makeUintConstant(1), 0);
@@ -4737,6 +4942,130 @@ void SpirvShaderTranslator::StoreUint32ToSharedMemory(
   }
 
   binding_switch.makeEndSwitch();
+}
+
+void SpirvShaderTranslator::GetTextureSignClassSlots(
+    const Shader& shader, bool by_use, std::array<uint8_t, 32>& slots_out) {
+  slots_out.fill(uint8_t(kTextureSignClassFetchConstantCount));
+  if (!by_use) {
+    for (uint32_t i = 0; i < kTextureSignClassFetchConstantCount; ++i) {
+      slots_out[i] = uint8_t(i);
+    }
+    return;
+  }
+  uint32_t fetch_constants_remaining = 0;
+  for (const Shader::TextureBinding& texture_binding :
+       shader.texture_bindings()) {
+    fetch_constants_remaining |= uint32_t(1) << texture_binding.fetch_constant;
+  }
+  uint32_t slot = 0;
+  uint32_t fetch_constant;
+  while (slot < kTextureSignClassFetchConstantCount &&
+         xe::bit_scan_forward(fetch_constants_remaining, &fetch_constant)) {
+    fetch_constants_remaining &= ~(uint32_t(1) << fetch_constant);
+    slots_out[fetch_constant] = uint8_t(slot++);
+  }
+}
+
+spv::Id SpirvShaderTranslator::LoadTextureFetchConstantWordFromTemp() {
+  if (math_relaxations_ & kMathRelaxationTextureFetchConstants) {
+    return const_uint_0_;
+  }
+  return builder_->createLoad(
+      builder_->createAccessChain(spv::StorageClassUniform,
+                                  uniform_fetch_constants_, id_vector_temp_),
+      spv::NoPrecision);
+}
+
+void SpirvShaderTranslator::DecodeTextureFetchConstant(
+    const uint32_t* words, DecodedTextureFetchConstant& decoded) {
+  // The same bit fields the shaders extracted (sizes minus 1 in word 2).
+  uint32_t size_word = words[2];
+  uint32_t size_2d_mask =
+      (UINT32_C(1) << xenos::kTexture2DCubeMaxWidthHeightLog2) - 1;
+  decoded.size_2d[0] = float((size_word & size_2d_mask) + 1);
+  decoded.size_2d[1] = float(
+      ((size_word >> xenos::kTexture2DCubeMaxWidthHeightLog2) & size_2d_mask) +
+      1);
+  // Word 3 bits 13:18 and word 4 bits 12:21, signed.
+  decoded.result_exponent_factor =
+      std::ldexp(1.0f, int32_t(words[3] << 13) >> 26);
+  decoded.lod_bias = float(int32_t(words[4] << 10) >> 22) * (1.0f / 32.0f);
+  bool data_is_3d = xenos::DataDimension((words[5] >> 9) & 3) ==
+                    xenos::DataDimension::k3D;
+  if (data_is_3d) {
+    uint32_t size_3d_mask =
+        (UINT32_C(1) << xenos::kTexture3DMaxWidthHeightLog2) - 1;
+    decoded.size_3d_or_stacked[0] = float((size_word & size_3d_mask) + 1);
+    decoded.size_3d_or_stacked[1] = float(
+        ((size_word >> xenos::kTexture3DMaxWidthHeightLog2) & size_3d_mask) +
+        1);
+    decoded.size_3d_or_stacked[2] = float(
+        ((size_word >> (xenos::kTexture3DMaxWidthHeightLog2 * 2)) &
+         ((UINT32_C(1) << xenos::kTexture3DMaxDepthLog2) - 1)) +
+        1);
+  } else {
+    decoded.size_3d_or_stacked[0] = decoded.size_2d[0];
+    decoded.size_3d_or_stacked[1] = decoded.size_2d[1];
+    decoded.size_3d_or_stacked[2] = float(
+        ((size_word >> (xenos::kTexture2DCubeMaxWidthHeightLog2 * 2)) &
+         ((UINT32_C(1) << xenos::kTexture2DMaxStackDepthLog2) - 1)) +
+        1);
+  }
+  decoded.data_is_3d = data_is_3d ? 1 : 0;
+}
+
+spv::Id SpirvShaderTranslator::LoadDecodedTextureFetchConstantFloat(
+    uint32_t fetch_constant_index, uint32_t word) {
+  return builder_->createUnaryOp(
+      spv::OpBitcast, type_float_,
+      LoadDecodedTextureFetchConstantWord(fetch_constant_index, word));
+}
+
+spv::Id SpirvShaderTranslator::LoadDecodedTextureFetchConstantWord(
+    uint32_t fetch_constant_index, uint32_t word) {
+  assert_true(texture_fetch_constants_decoded_);
+  assert_true(fetch_constant_index < 32);
+  assert_true(word < 4 * kFetchConstantsDecodedVec4PerFetch);
+  uint32_t vec4_index = kFetchConstantsRawVec4Count +
+                        fetch_constant_index *
+                            kFetchConstantsDecodedVec4PerFetch +
+                        (word >> 2);
+  id_vector_temp_.clear();
+  id_vector_temp_.push_back(const_int_0_);
+  id_vector_temp_.push_back(builder_->makeIntConstant(int(vec4_index)));
+  id_vector_temp_.push_back(builder_->makeIntConstant(int(word & 3)));
+  return builder_->createLoad(
+      builder_->createAccessChain(spv::StorageClassUniform,
+                                  uniform_fetch_constants_, id_vector_temp_),
+      spv::NoPrecision);
+}
+
+spv::Id SpirvShaderTranslator::GetTextureExpAdjustZeroSpecConstant() {
+  if (texture_exp_adjust_zero_spec_constant_ == spv::NoResult) {
+    texture_exp_adjust_zero_spec_constant_ =
+        builder_->makeBoolConstant(false, true);
+    builder_->addName(texture_exp_adjust_zero_spec_constant_,
+                      "xe_texture_exp_adjust_zero");
+    builder_->addDecoration(texture_exp_adjust_zero_spec_constant_,
+                            spv::DecorationSpecId,
+                            int(kSpecIdTextureExpAdjustZero));
+  }
+  return texture_exp_adjust_zero_spec_constant_;
+}
+
+spv::Id SpirvShaderTranslator::GetTextureSignClassSpecConstant(uint32_t slot) {
+  assert_true(slot < kTextureSignClassFetchConstantCount);
+  spv::Id& spec_constant = texture_sign_class_spec_constants_[slot];
+  if (spec_constant == spv::NoResult) {
+    spec_constant =
+        builder_->makeUintConstant(uint32_t(kTextureSignClassRuntime), true);
+    builder_->addName(spec_constant,
+                      fmt::format("xe_texture_sign_class_{}", slot).c_str());
+    builder_->addDecoration(spec_constant, spv::DecorationSpecId,
+                            int(kSpecIdTextureSignClassFirst + slot));
+  }
+  return spec_constant;
 }
 
 spv::Id SpirvShaderTranslator::PWLGammaToLinear(

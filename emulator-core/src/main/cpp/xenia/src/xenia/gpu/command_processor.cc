@@ -11,8 +11,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
 #include <set>
+
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#include <sys/system_properties.h>
+#include <unistd.h>
+#endif
+
+#include "xenia/base/cvar.h"
+
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
@@ -22,6 +32,11 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
+#include "xenia/cpu/function.h"
+#include "xenia/cpu/mmio_handler.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -72,6 +87,43 @@ DEFINE_bool(clear_memory_page_state, false,
 UPDATE_from_bool(clear_memory_page_state, 2026, 8, 1, 12, true);
 
 DEFINE_bool(
+    merge_tiling_bands_call_sites, true,
+    "With merge_tiling_bands: tell the draws apart by the indirect buffer calls "
+    "made inside the replayed scene on the way to the draw packet as well as "
+    "by its address, so the objects a game draws by calling one routine each "
+    "are not taken for each other - one only in a later band was skipped as "
+    "drawn in an earlier band. Read per draw (debug.xendroid.band_call_sites).",
+    "GPU");
+
+DEFINE_bool(
+    merge_tiling_bands_log, false,
+    "With merge_tiling_bands: log every 150 band sequences the draws per "
+    "sequence, the ones skipped as drawn in an earlier band, and the ones "
+    "telling the draws apart by the address alone would have skipped "
+    "(debug.xendroid.band_log).",
+    "GPU");
+
+DEFINE_bool(
+    merge_tiling_bands, false,
+    "Draw the bands of predicated tiling (the scene split into horizontal "
+    "bands that fit the EDRAM, each drawn by replaying the same command "
+    "buffer) as one: every draw is executed only in the first band it's "
+    "predicated into, into render targets as tall as the screen, and each "
+    "band is resolved from its rows - the vertex work and the fixed cost of "
+    "the repeated draws are done once. Host render target path; read per "
+    "frame.",
+    "GPU");
+
+DEFINE_bool(
+    gpu_performance_hint, false,
+    "Android: an ADPF performance hint session for the GPU command processor "
+    "thread, reporting each guest frame the time the thread worked (the frame "
+    "interval minus its waits for ring writes and WAIT_REG_MEM) against the "
+    "average frame interval as the target, so the platform can raise the "
+    "thread's clock when a frame runs late. Takes effect at startup.",
+    "GPU");
+
+DEFINE_bool(
     log_gpu_frame_time_breakdown, false,
     "Log a once-per-second breakdown of where the GPU command processor "
     "thread spends each guest frame (swap-to-swap): PM4 execution, draw "
@@ -115,9 +167,10 @@ DEFINE_bool(
     "write it to a buffer aliasing guest RAM. Needed by games that read "
     "exported data on the CPU. Disabling it keeps the output in device-local "
     "memory, which is faster for the draws that consume it on the GPU. Applies "
-    "at title launch. Off by default here: the host buffer needs "
-    "VK_EXT_external_memory_host, which Turnip does not expose, so the import "
-    "fails and the output stays device-local either way.",
+    "at title launch. Vulkan falls back to synchronous readback from the "
+    "host-mapped buffer (readback_resolve=uma) if guest RAM import is "
+    "unavailable. Off by default because CPU visibility may require a GPU "
+    "stall for each exporting draw.",
     "GPU");
 
 DEFINE_bool(
@@ -338,6 +391,12 @@ void CommandProcessor::Shutdown() {
   write_ptr_index_event_->Set();
   worker_thread_->Wait(0, 0, 0, nullptr);
   worker_thread_.reset();
+
+  if (wrm_writer_callback_handle_) {
+    memory_->UnregisterPhysicalMemoryInvalidationCallback(
+        wrm_writer_callback_handle_);
+    wrm_writer_callback_handle_ = nullptr;
+  }
 }
 
 void CommandProcessor::InitializeShaderStorage(
@@ -442,7 +501,8 @@ void CommandProcessor::InvalidateGpuMemory() {}
 
 void CommandProcessor::ClearReadbackBuffers() {}
 
-void CommandProcessor::SetReadbackResolveMode(ReadbackResolveMode mode) {
+void CommandProcessor::SetReadbackResolveMode(ReadbackResolveMode mode,
+                                              bool persist) {
   if (cached_readback_resolve_mode_ == mode) {
     return;
   }
@@ -467,7 +527,7 @@ void CommandProcessor::SetReadbackResolveMode(ReadbackResolveMode mode) {
 
   // Save to per-game config if a title is loaded
   uint32_t title_id = kernel_state_ ? kernel_state_->title_id() : 0;
-  if (title_id != 0) {
+  if (persist && title_id != 0) {
     toml::table config_table = config::LoadGameConfig(title_id);
 
     if (!config_table.contains("GPU")) {
@@ -540,6 +600,66 @@ void CommandProcessor::SetDesiredSwapPostEffect(
   });
 }
 
+std::pair<uint32_t, uint32_t> CommandProcessor::WrmWriterWatchCallback(
+    void* context_ptr, uint32_t physical_address_start, uint32_t length,
+    bool exact_range) {
+  // In the writing thread's fault handler, under the global critical region:
+  // only record, and cheaply - this is called for every watched CPU write.
+  auto& command_processor = *static_cast<CommandProcessor*>(context_ptr);
+  const uint32_t address =
+      command_processor.wrm_writer_address_.load(std::memory_order_acquire);
+  if (address != UINT32_MAX && address >= physical_address_start &&
+      address - physical_address_start < length &&
+      !command_processor.wrm_writer_hit_.load(std::memory_order_relaxed)) {
+    // The writer's host PC and guest thread come from Xendroid+'s MMIOHandler
+    // fault records, which this core does not carry.
+    command_processor.wrm_writer_event_.host_pc = 0;
+    command_processor.wrm_writer_event_.guest_thread = 0;
+    command_processor.wrm_writer_event_.time_ns = FrameStatsNow();
+    command_processor.wrm_writer_hit_.store(true, std::memory_order_release);
+  }
+  return std::make_pair(uint32_t(0), UINT32_MAX);
+}
+
+void CommandProcessor::WrmWriterArm(uint32_t physical_address) {
+  // As TranslatePhysical reads it.
+  physical_address &= 0x1FFFFFFF;
+  if (!wrm_writer_callback_handle_) {
+    wrm_writer_callback_handle_ =
+        memory_->RegisterPhysicalMemoryInvalidationCallback(
+            WrmWriterWatchCallback, this);
+  }
+  wrm_writer_hit_.store(false, std::memory_order_relaxed);
+  wrm_writer_address_.store(physical_address, std::memory_order_release);
+  memory_->EnablePhysicalMemoryAccessCallbacks(physical_address & ~0xFFFu,
+                                               0x1000, true, false);
+}
+
+std::string CommandProcessor::WrmWriterTake() {
+  wrm_writer_address_.store(UINT32_MAX, std::memory_order_release);
+  if (!wrm_writer_hit_.load(std::memory_order_acquire)) {
+    return "writer not seen";
+  }
+  const WrmWriterEvent event = wrm_writer_event_;
+  uint32_t guest_function = 0, guest_instruction = 0;
+  cpu::Processor* processor =
+      kernel_state_ ? kernel_state_->processor() : nullptr;
+  if (processor && processor->backend() &&
+      processor->backend()->code_cache()) {
+    if (cpu::GuestFunction* function =
+            processor->backend()->code_cache()->LookupFunction(
+                event.host_pc)) {
+      guest_function = function->address();
+      guest_instruction = function->MapMachineCodeToGuestAddress(
+          uintptr_t(event.host_pc));
+    }
+  }
+  return fmt::format(
+      "writer thread {:08X} fn {:08X} at {:08X}, {}us before the wait saw it",
+      event.guest_thread, guest_function, guest_instruction,
+      (FrameStatsNow() - event.time_ns) / 1000);
+}
+
 uint64_t CommandProcessor::FrameStatsNow() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -551,12 +671,99 @@ uint64_t CommandProcessor::FrameStatsBegin() {
   return cvars::log_gpu_frame_time_breakdown ? FrameStatsNow() : 0;
 }
 
+uint64_t CommandProcessor::FrameWaitBegin() {
+  return (cvars::log_gpu_frame_time_breakdown || cvars::gpu_performance_hint)
+             ? FrameStatsNow()
+             : 0;
+}
+
+void CommandProcessor::FrameHintEndFrame() {
+#if defined(__ANDROID__)
+  if (!cvars::gpu_performance_hint || frame_hint_failed_) {
+    return;
+  }
+  const uint64_t now = FrameStatsNow();
+  const uint64_t wait_ns = frame_hint_wait_ns_;
+  frame_hint_wait_ns_ = 0;
+  if (!frame_hint_last_swap_ns_) {
+    frame_hint_last_swap_ns_ = now;
+    return;
+  }
+  const uint64_t interval_ns = now - frame_hint_last_swap_ns_;
+  frame_hint_last_swap_ns_ = now;
+  frame_hint_interval_sum_ns_ += interval_ns;
+  ++frame_hint_interval_count_;
+  if (!frame_hint_session_) {
+    // Learn the frame interval first: it is the target.
+    if (frame_hint_interval_count_ < 60) {
+      return;
+    }
+    frame_hint_failed_ = true;
+    void* lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) {
+      return;
+    }
+    auto get_manager = reinterpret_cast<void* (*)()>(
+        dlsym(lib, "APerformanceHint_getManager"));
+    auto create_session =
+        reinterpret_cast<void* (*)(void*, const int32_t*, size_t, int64_t)>(
+            dlsym(lib, "APerformanceHint_createSession"));
+    frame_hint_report_ = reinterpret_cast<int (*)(void*, int64_t)>(
+        dlsym(lib, "APerformanceHint_reportActualWorkDuration"));
+    frame_hint_update_target_ = reinterpret_cast<int (*)(void*, int64_t)>(
+        dlsym(lib, "APerformanceHint_updateTargetWorkDuration"));
+    void* manager = get_manager ? get_manager() : nullptr;
+    if (!manager || !create_session || !frame_hint_report_ ||
+        !frame_hint_update_target_) {
+      XELOGW("GpuPerformanceHint: ADPF not available");
+      return;
+    }
+    const int32_t tid = int32_t(gettid());
+    const int64_t target_ns =
+        int64_t(frame_hint_interval_sum_ns_ / frame_hint_interval_count_);
+    frame_hint_session_ = create_session(manager, &tid, 1, target_ns);
+    if (!frame_hint_session_) {
+      XELOGW("GpuPerformanceHint: createSession failed");
+      return;
+    }
+    frame_hint_failed_ = false;
+    XELOGI("GpuPerformanceHint: session for the command thread, target "
+           "{:.1f} ms",
+           target_ns / 1e6);
+    frame_hint_interval_sum_ns_ = 0;
+    frame_hint_interval_count_ = 0;
+    return;
+  }
+  frame_hint_report_(frame_hint_session_,
+                     int64_t(interval_ns > wait_ns ? interval_ns - wait_ns
+                                                   : uint64_t(1)));
+  // Follow the guest's frame rate.
+  if (frame_hint_interval_count_ >= 120) {
+    frame_hint_update_target_(
+        frame_hint_session_,
+        int64_t(frame_hint_interval_sum_ns_ / frame_hint_interval_count_));
+    frame_hint_interval_sum_ns_ = 0;
+    frame_hint_interval_count_ = 0;
+  }
+#endif
+}
+
 void CommandProcessor::FrameStatsEndDraw(uint64_t begin_ns) {
   if (!begin_ns) {
     return;
   }
   frame_time_stats_.draws++;
   frame_time_stats_.draw_ns += FrameStatsNow() - begin_ns;
+}
+
+void CommandProcessor::FrameStatsEndWaitRegMem(uint64_t begin_ns) {
+  if (!begin_ns) {
+    return;
+  }
+  const uint64_t wait_ns = FrameStatsNow() - begin_ns;
+  frame_time_stats_.wait_reg_mem_unmet++;
+  frame_time_stats_.wait_reg_mem_ns += wait_ns;
+  frame_hint_wait_ns_ += wait_ns;
 }
 
 void CommandProcessor::FrameStatsEndSwap(uint64_t begin_ns) {
@@ -571,6 +778,9 @@ void CommandProcessor::FrameStatsEndSwap(uint64_t begin_ns) {
     const uint64_t interval = now - s.last_swap_ns;
     s.interval_ns += interval;
     s.interval_max_ns = std::max(s.interval_max_ns, interval);
+    s.long_intervals[0] += uint64_t(interval > 37000000);
+    s.long_intervals[1] += uint64_t(interval > 50000000);
+    s.long_intervals[2] += uint64_t(interval > 70000000);
   }
   s.last_swap_ns = now;
   if (!s.last_report_ns) {
@@ -580,10 +790,13 @@ void CommandProcessor::FrameStatsEndSwap(uint64_t begin_ns) {
     XELOGI(
         "GpuFrame: {} frames, interval avg={:.1f}ms max={:.1f}ms | per frame: "
         "exec={:.1f}ms draws={:.0f} draw={:.1f}ms swap={:.1f}ms "
-        "stall={:.1f}ms",
+        "stall={:.1f}ms | wait_reg_mem unmet={:.1f} waited={:.1f}ms | "
+        "intervals >37ms={} >50ms={} >70ms={}",
         s.frames, s.interval_ns / f / 1e6, s.interval_max_ns / 1e6,
         s.exec_ns / f / 1e6, s.draws / f, s.draw_ns / f / 1e6,
-        s.swap_ns / f / 1e6, s.stall_ns / f / 1e6);
+        s.swap_ns / f / 1e6, s.stall_ns / f / 1e6, s.wait_reg_mem_unmet / f,
+        s.wait_reg_mem_ns / f / 1e6, s.long_intervals[0], s.long_intervals[1],
+        s.long_intervals[2]);
     const uint64_t keep_swap = s.last_swap_ns;
     s = FrameTimeStats();
     s.last_swap_ns = keep_swap;
@@ -686,6 +899,440 @@ uint32_t CommandProcessor::UpdateAdaptiveFramerateLimit(double frame_work_ms) {
   return limit;
 }
 
+namespace {
+void BinTraceCount(std::vector<std::pair<uint64_t, uint32_t>>& counts,
+                   uint64_t key) {
+  for (auto& entry : counts) {
+    if (entry.first == key) {
+      ++entry.second;
+      return;
+    }
+  }
+  if (counts.size() < 16) {
+    counts.emplace_back(key, 1);
+  }
+}
+}  // namespace
+
+void CommandProcessor::BinTracePoll() {
+#if defined(__ANDROID__)
+  auto& t = bin_trace_;
+  if (++t.frames_since_poll < 30) {
+    return;
+  }
+  t.frames_since_poll = 0;
+  char value[PROP_VALUE_MAX] = {};
+  // debug.xendroid.wrm_log N: log the next N PM4_WAIT_REG_MEM waits that were
+  // not met on the first check (a new value re-arms it).
+  if (__system_property_get("debug.xendroid.wrm_log", value) > 0) {
+    const int32_t count = std::atoi(value);
+    if (count != wrm_log_last_property_) {
+      wrm_log_last_property_ = count;
+      wrm_log_left_ = uint32_t(std::min(std::max(count, 0), 256));
+      if (wrm_log_left_) {
+        XELOGI("WaitRegMem: logging the next {} unmet waits", wrm_log_left_);
+      }
+    }
+  }
+  if (__system_property_get("debug.xendroid.wait_reg_mem_backoff", value) > 0 &&
+      (value[0] == '0' || value[0] == '1')) {
+    const bool enabled = value[0] == '1';
+    if (cvars::wait_reg_mem_backoff != enabled) {
+      cvars::wait_reg_mem_backoff = enabled;
+      XELOGI("debug.xendroid.wait_reg_mem_backoff: wait_reg_mem_backoff = {}",
+             enabled);
+    }
+  }
+  if (__system_property_get("debug.xendroid.fake_extents", value) > 0) {
+    const uint32_t mode = uint32_t(std::min(std::max(std::atoi(value), 0), 4));
+    if (mode != t.fake_extents_mode) {
+      t.fake_extents_mode = mode;
+      XELOGI("BinTrace: fake screen extents mode {}", mode);
+    }
+  }
+  if (__system_property_get("debug.xendroid.pm4_bin_trace", value) <= 0) {
+    return;
+  }
+  const int32_t frames = std::atoi(value);
+  if (frames == t.last_property_value) {
+    return;
+  }
+  t.last_property_value = frames;
+  if (frames > 0) {
+    t.frames_left = uint32_t(std::min(frames, 16));
+    t.frame_number = 0;
+    XELOGI("BinTrace: tracing the next {} frames", t.frames_left);
+  }
+#endif
+}
+
+void CommandProcessor::BinTraceOpcode(uint32_t opcode) {
+  auto& t = bin_trace_;
+  const char* note = nullptr;
+  switch (opcode) {
+    case PM4_INTERRUPT:
+      ++t.interrupts;
+      note = "I";
+      break;
+    case PM4_WAIT_REG_MEM:
+      ++t.wait_reg_mems;
+      note = "W";
+      break;
+    case PM4_EVENT_WRITE_EXT:
+      // Run-length: only the first of a run of screen extent reports.
+      if (t.frame_number == 0 && !t.sequence.empty() &&
+          t.sequence.back() == 'E') {
+        return;
+      }
+      note = "E";
+      break;
+    default:
+      return;
+  }
+  if (t.frame_number == 0 && t.sequence.size() < 6000) {
+    t.sequence += fmt::format(" [{}d] {}", t.draws_since_select, note);
+  }
+}
+
+void CommandProcessor::OnBinSelectWritten() {
+  if (!cvars::merge_tiling_bands) {
+    tiling_band_ = -1;
+    return;
+  }
+  const uint32_t select = uint32_t(bin_select_);
+  if (select == UINT32_MAX) {
+    tiling_band_ = -1;
+    return;
+  }
+  if (tiling_band_ < 0) {
+    if (cvars::merge_tiling_bands_log && tiling_band_stat_draws_) {
+      tiling_band_stat_sum_draws_ += tiling_band_stat_draws_;
+      tiling_band_stat_sum_skipped_ += tiling_band_stat_skipped_;
+      tiling_band_stat_sum_rescued_ += tiling_band_stat_rescued_;
+      if (++tiling_band_stat_sequences_ >= 150) {
+        const double n = double(tiling_band_stat_sequences_);
+        XELOGI(
+            "TilingBands: {} sequences | per sequence draws={:.1f} "
+            "skipped={:.1f} rescued_by_call_sites={:.1f} (call sites {})",
+            tiling_band_stat_sequences_, tiling_band_stat_sum_draws_ / n,
+            tiling_band_stat_sum_skipped_ / n,
+            tiling_band_stat_sum_rescued_ / n,
+            cvars::merge_tiling_bands_call_sites ? "on" : "off");
+        tiling_band_stat_sum_draws_ = 0;
+        tiling_band_stat_sum_skipped_ = 0;
+        tiling_band_stat_sum_rescued_ = 0;
+        tiling_band_stat_sequences_ = 0;
+      }
+    }
+    tiling_band_stat_draws_ = 0;
+    tiling_band_stat_skipped_ = 0;
+    tiling_band_stat_rescued_ = 0;
+    tiling_band_ = 0;
+    ++tiling_band_sequence_;
+    tiling_band_merge_ok_ = true;
+    tiling_band_call_depth_ = ib_call_depth_;
+    ClearTilingBandDraws();
+  } else if (select != tiling_band_select_) {
+    ++tiling_band_;
+  }
+  tiling_band_select_ = select;
+}
+
+void CommandProcessor::ClearTilingBandDraws() {
+  tiling_band_draws_.Clear();
+  tiling_band_draw_other_keys_.Clear();
+}
+
+void CommandProcessor::TilingBandDrawSet::Clear() {
+  count = 0;
+  // Keys of older epochs read as empty; epoch 0 is the zero fill.
+  if (++epoch == 0) {
+    std::fill(epochs.begin(), epochs.end(), uint32_t(0));
+    epoch = 1;
+  }
+}
+
+bool CommandProcessor::TilingBandDrawSet::Insert(uint64_t key) {
+  if (!epoch) {
+    epoch = 1;
+  }
+  if ((size_t(count) + 1) * 2 > keys.size()) {
+    // Grow at half load, keeping the current epoch's keys.
+    std::vector<uint64_t> old_keys;
+    std::vector<uint32_t> old_epochs;
+    old_keys.swap(keys);
+    old_epochs.swap(epochs);
+    const size_t size = std::max(size_t(8192), old_keys.size() * 2);
+    keys.assign(size, uint64_t(0));
+    epochs.assign(size, uint32_t(0));
+    count = 0;
+    for (size_t i = 0; i < old_keys.size(); ++i) {
+      if (old_epochs[i] == epoch) {
+        Insert(old_keys[i]);
+      }
+    }
+  }
+  const size_t mask = keys.size() - 1;
+  // The top bits of a multiplicative hash (the address keys are dword
+  // addresses, so the low bits of the product carry little).
+  size_t index = size_t((key * UINT64_C(0x9E3779B97F4A7C15)) >> 40) & mask;
+  for (;;) {
+    if (epochs[index] != epoch) {
+      keys[index] = key;
+      epochs[index] = epoch;
+      ++count;
+      return true;
+    }
+    if (keys[index] == key) {
+      return false;
+    }
+    index = (index + 1) & mask;
+  }
+}
+
+bool CommandProcessor::PrepareTilingBandDraw() {
+  tiling_band_draw_from_later_band_ = false;
+  if (tiling_band_ < 0 || !tiling_band_merge_ok_ ||
+      register_file_->Get<reg::RB_MODECONTROL>().edram_mode ==
+          xenos::EdramMode::kCopy) {
+    return true;
+  }
+  // The address right past the packet tells the draw apart (the bands replay
+  // the same command buffers), with the calls made inside the scene on the
+  // way to it (beyond 32 bits, so never equal to an address alone).
+  const uint32_t address = GuestReadPtrOffset();
+  const bool call_sites = cvars::merge_tiling_bands_call_sites;
+  const bool log = cvars::merge_tiling_bands_log;
+  uint64_t call_key = address;
+  if (call_sites || log) {
+    const uint32_t depth = std::min(ib_call_depth_, kTilingBandMaxCallDepth);
+    for (uint32_t i = tiling_band_call_depth_ + 1; i < depth; ++i) {
+      call_key =
+          ((call_key ^ ib_call_sites_[i]) * UINT64_C(0x9E3779B97F4A7C15)) |
+          (UINT64_C(1) << 63);
+    }
+  }
+  const bool new_draw =
+      tiling_band_draws_.Insert(call_sites ? call_key : uint64_t(address));
+  if (log) {
+    ++tiling_band_stat_draws_;
+    const bool new_other = tiling_band_draw_other_keys_.Insert(
+        call_sites ? uint64_t(address) : call_key);
+    const bool new_by_calls = call_sites ? new_draw : new_other;
+    const bool new_by_address = call_sites ? new_other : new_draw;
+    if (new_by_calls && !new_by_address && tiling_band_ > 0) {
+      ++tiling_band_stat_rescued_;
+    }
+  }
+  if (!new_draw) {
+    // Executed again within the first band (a buffer it replays itself) -
+    // drawn, otherwise drawn in an earlier band.
+    if (tiling_band_ != 0 && log) {
+      ++tiling_band_stat_skipped_;
+    }
+    return tiling_band_ == 0;
+  }
+  tiling_band_draw_from_later_band_ = tiling_band_ > 0;
+  return true;
+}
+
+void CommandProcessor::BinTraceSetBin(bool is_select,
+                                      uint32_t packet_guest_address) {
+  auto& t = bin_trace_;
+  if (is_select) {
+    ++t.bin_select_writes;
+    if (t.sequence.size() < 6000) {
+      t.sequence += fmt::format(" [{}d] sel={:X}", t.draws_since_select,
+                                bin_select_);
+    }
+    t.draws_since_select = 0;
+  } else {
+    ++t.bin_mask_writes;
+    if (t.mask_writes.size() < 65536) {
+      t.mask_writes.emplace_back(packet_guest_address, bin_select_, bin_mask_);
+    }
+  }
+}
+
+void CommandProcessor::BinTracePacket(uint32_t opcode, bool predicated,
+                                      bool executed) {
+  auto& t = bin_trace_;
+  if (predicated) {
+    ++t.packets_predicated;
+    if (!executed) {
+      ++t.packets_predicated_skipped;
+    }
+  }
+}
+
+void CommandProcessor::BinTraceDraw(bool predicated, bool executed) {
+  auto& t = bin_trace_;
+  if (predicated) {
+    ++t.draws_predicated;
+    if (!executed) {
+      ++t.draws_predicated_skipped;
+      return;
+    }
+    BinTraceCount(t.draws_by_mask, bin_mask_);
+  }
+  // The state of the first draw under each bin select of the first frame:
+  // where the tiling bands are placed (window offset, scissors, surfaces).
+  if (t.frame_number == 0 && !t.draws_since_select) {
+    const RegisterFile& regs = *register_file_;
+    XELOGI(
+        "BinTrace band state: sel={:X} mask={:X} window_offset={:08X} "
+        "window_scissor={:08X}-{:08X} screen_scissor={:08X}-{:08X} "
+        "surface_info={:08X} color_info={:08X} depth_info={:08X} "
+        "modecontrol={:08X} vport_y={}*y+{}",
+        bin_select_, bin_mask_, regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
+        regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
+        regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
+        regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL],
+        regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
+        regs[XE_GPU_REG_RB_SURFACE_INFO], regs[XE_GPU_REG_RB_COLOR_INFO],
+        regs[XE_GPU_REG_RB_DEPTH_INFO], regs[XE_GPU_REG_RB_MODECONTROL],
+        regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+        regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET));
+  }
+  ++t.draws;
+  ++t.draws_since_select;
+  BinTraceCount(t.draws_by_select, bin_select_);
+}
+
+void CommandProcessor::BinTraceIndirectBuffer(uint32_t address,
+                                              uint32_t dwords, bool predicated,
+                                              bool executed) {
+  auto& t = bin_trace_;
+  if (predicated) {
+    ++t.indirect_buffers_predicated;
+    if (!executed) {
+      ++t.indirect_buffers_predicated_skipped;
+      return;
+    }
+  }
+  ++t.indirect_buffers;
+  t.indirect_buffer_dwords += dwords;
+  if (t.indirect_buffer_ranges.size() < 4096) {
+    t.indirect_buffer_ranges.emplace_back(address, address + dwords * 4);
+  }
+}
+
+void CommandProcessor::BinTraceExtents(uint32_t address) {
+  auto& t = bin_trace_;
+  if (t.extent_addresses.size() < 16384) {
+    t.extent_addresses.push_back(address);
+  }
+}
+
+void CommandProcessor::BinTraceNote(const char* tag, uint32_t a, uint32_t b) {
+  auto& t = bin_trace_;
+  if (t.frame_number == 0 && t.sequence.size() < 6000) {
+    t.sequence += fmt::format(" [{}d] {}{}x{}", t.draws_since_select, tag, a, b);
+  }
+}
+
+void CommandProcessor::BinTraceEndFrame() {
+  auto& t = bin_trace_;
+  if (!t.frames_left) {
+    BinTracePoll();
+    return;
+  }
+  // Screen extent destinations inside command buffers executed this frame
+  // would mean the GPU patches its own command stream.
+  uint32_t extents_in_ibs = 0;
+  uint32_t extent_min = UINT32_MAX, extent_max = 0;
+  std::set<uint32_t> extent_unique;
+  for (uint32_t address : t.extent_addresses) {
+    const uint32_t physical = address & 0x1FFFFFFF;
+    extent_unique.insert(physical);
+    extent_min = std::min(extent_min, physical);
+    extent_max = std::max(extent_max, physical);
+    for (const auto& range : t.indirect_buffer_ranges) {
+      if (physical >= (range.first & 0x1FFFFFFF) &&
+          physical < (range.second & 0x1FFFFFFF)) {
+        ++extents_in_ibs;
+        break;
+      }
+    }
+  }
+  std::string by_select, by_mask;
+  for (const auto& entry : t.draws_by_select) {
+    by_select += fmt::format(" {:X}:{}", entry.first, entry.second);
+  }
+  for (const auto& entry : t.draws_by_mask) {
+    by_mask += fmt::format(" {:X}:{}", entry.first, entry.second);
+  }
+  XELOGI(
+      "BinTrace frame {}: draws={} predicated={} (skipped {}) | packets "
+      "predicated={} skipped={} | IBs={} ({} dwords) predicated={} skipped={} "
+      "| bin writes: select={} mask={} | extents={} unique={} in_IBs={} "
+      "range={:08X}-{:08X}",
+      t.frame_number, t.draws, t.draws_predicated, t.draws_predicated_skipped,
+      t.packets_predicated, t.packets_predicated_skipped, t.indirect_buffers,
+      t.indirect_buffer_dwords, t.indirect_buffers_predicated,
+      t.indirect_buffers_predicated_skipped, t.bin_select_writes,
+      t.bin_mask_writes, t.extent_addresses.size(), extent_unique.size(),
+      extents_in_ibs, extent_unique.empty() ? 0 : extent_min, extent_max);
+  XELOGI("BinTrace frame {}: executed draws by bin select:{}", t.frame_number,
+         by_select);
+  XELOGI("BinTrace frame {}: executed predicated draws by bin mask:{}",
+         t.frame_number, by_mask);
+  // Same SET_BIN_MASK packet executed under several bin selects means the
+  // command list is replayed per tile; a different value per tile means the
+  // masks get rewritten between tiles (from the screen extents).
+  {
+    std::unordered_map<uint32_t, std::vector<std::pair<uint64_t, uint64_t>>>
+        masks_by_address;
+    for (const auto& write : t.mask_writes) {
+      masks_by_address[std::get<0>(write)].emplace_back(std::get<1>(write),
+                                                        std::get<2>(write));
+    }
+    uint32_t multi_select = 0, tile_dependent = 0;
+    std::string examples;
+    for (const auto& entry : masks_by_address) {
+      bool several_selects = false, different = false;
+      for (const auto& value : entry.second) {
+        if (value.first != entry.second.front().first) {
+          several_selects = true;
+        }
+        if (value.second != entry.second.front().second) {
+          different = true;
+        }
+      }
+      multi_select += uint32_t(several_selects);
+      if (several_selects && different) {
+        ++tile_dependent;
+        if (tile_dependent <= 6) {
+          examples += fmt::format(" {:08X}:", entry.first);
+          for (const auto& value : entry.second) {
+            examples += fmt::format(" {:X}->{:X}", value.first, value.second);
+          }
+        }
+      }
+    }
+    XELOGI(
+        "BinTrace frame {}: mask packets={} addresses={} replayed under "
+        "several selects={} with per-select values={} | interrupts={} "
+        "wait_reg_mem={} | fake extents mode {} | examples:{}",
+        t.frame_number, t.mask_writes.size(), masks_by_address.size(),
+        multi_select, tile_dependent, t.interrupts, t.wait_reg_mems,
+        t.fake_extents_mode, examples);
+  }
+  XELOGI("BinTrace frame {}: sequence:{} [{}d]", t.frame_number, t.sequence,
+         t.draws_since_select);
+  const uint32_t frames_left = t.frames_left - 1;
+  const uint32_t frame_number = t.frame_number + 1;
+  const int32_t last_property_value = t.last_property_value;
+  const uint32_t fake_extents_mode = t.fake_extents_mode;
+  const uint32_t frames_since_poll = t.frames_since_poll;
+  t = BinTrace();
+  t.frames_left = frames_left;
+  t.frame_number = frame_number;
+  t.last_property_value = last_property_value;
+  t.fake_extents_mode = fake_extents_mode;
+  t.frames_since_poll = frames_since_poll;
+}
+
 void CommandProcessor::ThrottlePresentation() {
   // Host frame rate limiting based on framerate_limit cvar.
   uint32_t framerate_limit = cvars::framerate_limit;
@@ -786,7 +1433,7 @@ void CommandProcessor::WorkerThreadMain() {
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
-      const uint64_t fs_stall_begin = FrameStatsBegin();
+      const uint64_t fs_stall_begin = FrameWaitBegin();
       PrepareForWait();
       uint32_t loop_count = 0;
       do {
@@ -806,7 +1453,9 @@ void CommandProcessor::WorkerThreadMain() {
                 read_ptr_index_ == write_ptr_index));
       ReturnFromWait();
       if (fs_stall_begin) {
-        frame_time_stats_.stall_ns += FrameStatsNow() - fs_stall_begin;
+        const uint64_t stall_ns = FrameStatsNow() - fs_stall_begin;
+        frame_time_stats_.stall_ns += stall_ns;
+        frame_hint_wait_ns_ += stall_ns;
       }
       if (!worker_running_ ||
           has_pending_fns_.load(std::memory_order_acquire)) {
@@ -829,6 +1478,7 @@ void CommandProcessor::WorkerThreadMain() {
     if (read_ptr_writeback_ptr_) {
       xe::store_and_swap<uint32_t>(
           memory_->TranslatePhysical(read_ptr_writeback_ptr_), read_ptr_index_);
+      NotifyGuestGpuProgress();
     }
 
     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
@@ -859,6 +1509,7 @@ void CommandProcessor::Resume() {
     return;
   }
 
+  resume_count_.fetch_add(1, std::memory_order_relaxed);
   pause_resume_event_->Set();
 }
 
@@ -1041,6 +1692,7 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
                rare_install ? "  <== RARE INSTALL" : "");
       }
       xe::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
+      NotifyGuestGpuProgress();
     }
   } else {
     switch (index) {
@@ -1955,7 +2607,11 @@ uint32_t CommandProcessor::NormalizeSampleCount(uint64_t samples,
     return 0;
   }
 
-  uint64_t scale = scale_area;
+  if (scale_area & kZPDScaleHalfSamples) {
+    // Each host sample stands for two of the guest's.
+    samples <<= 1;
+  }
+  uint64_t scale = scale_area & ~kZPDScaleHalfSamples;
   // Round, don't truncate. 1 guest sample at 2x = 4 host samples, need >= 1.
   uint64_t normalized = scale <= 1 ? samples : (samples + (scale >> 1)) / scale;
 

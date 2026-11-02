@@ -24,8 +24,10 @@ bool IsResolveDestinationResident(uint32_t address, uint32_t length) const {
   if (!physical_heap) {
     return false;
   }
+  // Only the pages of the range are walked (a resolve every few hundred
+  // microseconds walked its whole allocation, up to thousands of pages).
   HeapAllocationInfo alloc_info;
-  if (!physical_heap->QueryRegionInfo(address, &alloc_info) ||
+  if (!physical_heap->QueryRegionInfoUpTo(address, length, &alloc_info) ||
       !(alloc_info.state & kMemoryAllocationCommit) ||
       !IsWritableProtect(alloc_info.protect)) {
     return false;

@@ -9,10 +9,25 @@
 
 #include "xenia/gpu/shared_memory.h"
 
+#include <algorithm>
+#include <atomic>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/bit_range.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+
+DEFINE_bool(
+    shared_memory_preserve_gpu_writes, false,
+    "When the CPU writes to a page the GPU wrote last, copy the page's GPU "
+    "data to guest memory before invalidating it, so the reupload keeps it "
+    "(the data the guest memory never got: textures a game copies with the "
+    "GPU, resolves not read back yet). Without it, the whole page is "
+    "reuploaded from guest memory and the GPU's data is lost - Crysis 3 drew "
+    "a character with another texture's leftovers that way. Needs a "
+    "host-mapped GPU memory copy.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -729,6 +744,66 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
       gpu_written_end &= ~((uint64_t(1) << ((page_last & 63) + 1)) - 1);
       page_last = (page_last & ~uint32_t(63)) +
                   (std::max(xe::tzcnt(gpu_written_end), uint8_t(1)) - 1);
+    }
+  }
+
+  if (cvars::shared_memory_preserve_gpu_writes) {
+    // The GPU-written pages among the invalidated ones (the wider range above
+    // stops at them, so only the written ones) go to guest memory. A guest
+    // write faulting in (not exact) lands on them afterwards, so all of them.
+    // An exact range was written by the host already (a file read straight
+    // into physical memory notifies after reading) or isn't kept (released
+    // memory) - only the parts of its pages outside it, around it.
+    const uint32_t written_end = physical_address_last + 1;
+    for (uint32_t i = block_first; i <= block_last; ++i) {
+      uint64_t gpu_written_bits = system_page_flags_valid_and_gpu_written_[i];
+      if (i == block_first) {
+        gpu_written_bits &= ~((uint64_t(1) << (page_first & 63)) - 1);
+      }
+      if (i == block_last && (page_last & 63) != 63) {
+        gpu_written_bits &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+      }
+      uint32_t run_first;
+      while (xe::bit_scan_forward(gpu_written_bits, &run_first)) {
+        uint32_t run_length = xe::tzcnt(~(gpu_written_bits >> run_first));
+        uint32_t run_page_first = (i << 6) + run_first;
+        const uint32_t run_start = run_page_first << page_size_log2_;
+        const uint32_t run_end = (run_page_first + run_length)
+                                 << page_size_log2_;
+        uint32_t copied = 0;
+        if (!exact_range) {
+          if (CopyToGuestMemory(run_start, run_end - run_start)) {
+            copied = run_end - run_start;
+          }
+        } else {
+          if (run_start < physical_address_start) {
+            const uint32_t head_end = std::min(run_end, physical_address_start);
+            if (CopyToGuestMemory(run_start, head_end - run_start)) {
+              copied += head_end - run_start;
+            }
+          }
+          if (run_end > written_end) {
+            const uint32_t tail_start = std::max(run_start, written_end);
+            if (CopyToGuestMemory(tail_start, run_end - tail_start)) {
+              copied += run_end - tail_start;
+            }
+          }
+        }
+        if (copied) {
+          static std::atomic<uint32_t> logged{0};
+          if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            XELOGI(
+                "Shared memory: {} write to {} GPU-written page(s) at {:08X} - "
+                "{} bytes of them copied to guest memory before the reupload",
+                exact_range ? "a host" : "a guest", run_length, run_start,
+                copied);
+          }
+        }
+        gpu_written_bits &=
+            ~((run_length >= 64 ? UINT64_MAX
+                                : (uint64_t(1) << run_length) - 1)
+              << run_first);
+      }
     }
   }
 

@@ -207,6 +207,11 @@ class BaseHeap {
 
   // Queries information about the given region of pages.
   bool QueryRegionInfo(uint32_t base_address, HeapAllocationInfo* out_info);
+  // The same, but the region size is only measured up to max_size bytes (the
+  // pages it spans) - for checking whether a range fits in a region without
+  // walking the rest of a large one.
+  bool QueryRegionInfoUpTo(uint32_t base_address, uint32_t max_size,
+                           HeapAllocationInfo* out_info);
 
   // Queries the size of the region containing the given address.
   bool QuerySize(uint32_t address, uint32_t* out_size);
@@ -217,6 +222,9 @@ class BaseHeap {
   // Queries the current protection mode of the region containing the given
   // address.
   bool QueryProtect(uint32_t address, uint32_t* out_protect);
+  // The same without the global lock, for diagnostics on hot paths: the
+  // answer may be a moment stale.
+  bool QueryProtectUnlocked(uint32_t address, uint32_t* out_protect) const;
 
   // True when no allocation covers any page in the range.
   bool IsRangeUnallocated(uint32_t address, uint32_t size);

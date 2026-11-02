@@ -38,6 +38,267 @@ static const Quirk kQuirks[] = {
     {0x49470804, "network_enabled", false, "hangs on a blocking recvfrom"},
     {0x4E4D083A, "spirv_multiply_zero_test_on_bits", true,
      "ir3 cannot compile fmadz"},
+    // NFS Most Wanted (Criterion): the Turnip compiler rejects fmadz in VS
+    // 13EE4011483DC17D. The bit test preserves the SM3 zero-multiply result.
+    {0x45410961, "spirv_multiply_zero_test_on_bits", true,
+     "ir3 cannot compile fmadz in the first 3D scene"},
+    // Its CPU consumes memory-exported geometry. Without guest-visible
+    // exports the CPU/GPU handshake stalls at PM4_WAIT_REG_MEM after the FMV.
+    {0x45410961, "memexport_enable", true,
+     "CPU consumes memexport output before continuing the command stream"},
+    {0x45410961, "readback_resolve", "uma",
+     "host-mapped fallback for memexport when guest RAM import is unavailable"},
+    // Forza Horizon: both exact (the same image for every input); on the POCO
+    // F7 (Adreno 825) together +3.0% fps, -3.7% GPU time (AB5, 2026-09-29).
+    {0x4D5309C9, "spirv_texture_sign_branch", true,
+     "exact texture sign decode in a uniform branch"},
+    {0x4D5309C9, "spirv_fast_precision_rounding", true,
+     "exact cheaper 21-bit rounding"},
+    // Exact too: ~10 full-screen textures reloaded per frame skip the copy from
+    // a buffer; +4.5% fps, -5.4% GPU time on the POCO F7 (2026-09-29).
+    {0x4D5309C9, "vulkan_texture_load_to_image", true,
+     "texture loads straight into the image"},
+    // Exact: the resolves store into the textures read back from them, whose
+    // uploads are then skipped (3.0 -> 0.75 ms per frame, GPU -1.4 ms, +1.4%
+    // fps with the POCO F7 cool; 2026-09-30).
+    {0x4D5309C9, "vulkan_direct_host_resolve_to_texture", true,
+     "resolves store straight into their textures"},
+    // Main pass -7% (AB5). No visible difference parked, over a 45 s drive
+    // and in the pause menu (2026-09-30); night, rain and tunnels unchecked.
+    {0x4D5309C9, "spirv_ps_relaxed_math", int64_t(3),
+     "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
+    // 55% of the main pass draws use alpha to coverage: main pass -7.5%, the
+    // same foliage parked and driving (only the dither pattern differs).
+    {0x4D5309C9, "host_alpha_to_coverage", true,
+     "alpha to coverage by the host's fixed function"},
+    // The shadow atlas is cleared by 4x depth-only quads read back as 1x: no
+    // more 1x <-> 4x transfers of it, GPU time -1.1 ms (-3.4%), the same
+    // shadows (depth at the double-resolution pixel centers instead of the 4x
+    // sample positions; 2026-09-30).
+    {0x4D5309C9, "vulkan_depth_4x_as_1x", true,
+     "4x depth-only draws into the 1x surface of their samples"},
+    // The Direct3D wait for the GPU (only the code with this signature - its
+    // first 16 instructions - so another build is left alone) sleeps until
+    // the command processor makes progress instead of spinning: Guest CPU 0
+    // 97% -> 37% of a core, the same fps (AB3, AB5).
+    {0x4D5309C9, "spin_park_guest_functions", "829F04A8:B864F65007F969C0",
+     "the Direct3D GPU wait parks instead of spinning"},
+    {0x4D5309C9, "spin_park_mode", int64_t(1),
+     "the Direct3D GPU wait parks instead of spinning"},
+    // Forza Horizon never reads the 7e3 alpha: +3.1% fps, -3.5% GPU time
+    // (AB3), the same image in motion (AB5).
+    {0x4D5309C9, "render_target_7e3_as_r11g11b10", true,
+     "7e3 scene color in 32 bpp"},
+    // The clear of a resolve inside the game's own render pass: with the
+    // draw barriers moved to the resolve, render passes 205 -> ~133 per frame
+    // (AB8), the same GPU time at the 30 fps cap (S18, 2026-10-01). Every
+    // visual check since AB7 ran with it.
+    {0x4D5309C9, "vulkan_resolve_clear_in_guest_pass", true,
+     "resolve clears inside the game's render pass"},
+    // Turnip's early preamble costs every draw ~1.6 us of GPU time when the
+    // draws are small (one-primitive main pass draws 2.8 -> 1.2 us, S20); off,
+    // GPU time -0.8 ms (-2.4%) per frame at the 30 fps cap (S21, 2026-10-01).
+    // Only Turnip reads it; the pipeline cache file is separate per flags.
+    {0x4D5309C9, "ir3_debug", "noearlypreamble",
+     "no early shader preamble in the Turnip compiler"},
+    // The EDRAM is reused by targets that start with a clear quad: the
+    // transfers it overwrites are skipped - 11 of 49 transfers and 3.7 of 12.5
+    // thousand tiles per frame, GPU time -1.1 ms (-3.1%) at the 30 fps cap,
+    // the same image parked and over a drive (S24, 2026-10-01).
+    {0x4D5309C9, "skip_overwritten_transfers", true,
+     "no transfers into what the draw overwrites"},
+    // The 1280x720 lighting marks stencil at 640x360 4x (quads with texture-
+    // less pixel shaders) between 1x passes: drawn into the 1x surface of
+    // their samples, transfers 8071 -> 3703 tiles a frame, GPU time -1.7 ms
+    // (-5.2%) at the 30 fps cap, the same image parked (S28, 2026-10-01).
+    {0x4D5309C9, "vulkan_samples_as_pixels_simple_ps", true,
+     "4x stencil marking with simple pixel shaders into the 1x surface"},
+    // Transfers a clear quad covers in part (whole rows of tiles claimed, less
+    // drawn) copy only the rest: 9 a frame, GPU time -0.1 to -0.2 ms at the
+    // 30 fps cap, the same image parked (S37, 2026-10-01).
+    {0x4D5309C9, "skip_overwritten_transfers_cutout", true,
+     "transfers skip the part the draw overwrites"},
+    // Exact: the texture signs (mostly gamma) as specialization constants of
+    // the pixel shader pipelines, no runtime branches around the samples - GPU
+    // time -1.9 ms (-7.9%) at the 30 fps cap, both restart A/B pairs within
+    // 0.1 ms, the same image parked (S40, 2026-10-01). The first launch after
+    // the change compiles the pixel shader pipelines again.
+    {0x4D5309C9, "spirv_texture_sign_specialization", true,
+     "texture signs known to the host compiler per pipeline"},
+    // 2D fetches with the LOD the host computes (implicit LOD plus the bias)
+    // instead of 4 coarse derivatives and an explicit-gradient sample: with
+    // the signs specialized the texture pipe limits - GPU time -1.6 ms (-7%)
+    // at the 30 fps cap, both restart A/B pairs within 0.2 ms, the same image
+    // parked (S43, 2026-10-01). Neutral in AB10, when branches still wrapped
+    // the samples.
+    {0x4D5309C9, "spirv_texture_implicit_lod", true,
+     "2D texture fetches with the host's LOD"},
+    // Vertex shaders without the Shader Model 3 "0 * x = 0" emulation (a
+    // third of the main pass vertex shaders' instructions): the same positions
+    // for finite operands, so the passes still match - GPU time -0.7 ms at the
+    // 30 fps cap (S43, S45: both restart A/B pairs), no depth fighting on the
+    // road markings over a drive (S45, 2026-10-01).
+    {0x4D5309C9, "spirv_vs_relaxed_math", int64_t(1),
+     "no SM3 zero-multiply emulation in vertex shaders"},
+    // The scene is drawn in 3 bands of predicated tiling replaying the same
+    // command buffers: every draw executed only in the first band it's
+    // predicated into, into render targets as tall as the screen, each band
+    // resolved from its rows - 2916 -> ~1980 draws per frame, GPU time -1.0 to
+    // -1.1 ms at the 30 fps cap (S49, S51), the same image parked and over
+    // drives (2026-10-02). Unchecked: shaders using the pixel position in the
+    // ~300 draws only the lower bands have.
+    {0x4D5309C9, "merge_tiling_bands", true,
+     "the bands of predicated tiling drawn as one"},
+    // The JIT with the host's NaN rules for scalar FPU and VMX arithmetic
+    // (like the x64 backend: only which NaN an operation with a NaN input
+    // returns differs) and leaves up to 32 instructions inlined; loads and
+    // stores stay bit exact (lfs/stfs keep signaling NaNs, so data copied
+    // through float registers is untouched). With the exact paths cheap
+    // (2026-10-02) the gain is small: Guest CPU 5 56.0-56.4 M instructions
+    // per frame against 52.7-63.5 without, Guest CPU 1 -2%, at the 30 fps
+    // cap (S67, b85); the same image parked.
+    {0x4D5309C9, "a64_fpu_nan_fixup", false,
+     "scalar FPU NaNs by the host's rules"},
+    {0x4D5309C9, "a64_vmx_nan_fixup", false, "VMX NaNs by the host's rules"},
+    {0x4D5309C9, "inline_leaf_max_instructions", int64_t(32),
+     "leaves up to 32 instructions inlined"},
+    // Forza Horizon 2 (the same engine family) takes Forza Horizon's GPU
+    // quirks: racing in its first race at full throttle, GPU time 41.1 / 36.4
+    // -> 20.2 / 20.2 ms per frame, 24-27 -> 29.95 fps, frames over 37 ms
+    // 38-79% -> 0.7% (S70, b89, 2026-10-02); the exact ones alone 29.0 / 26.8
+    // ms. The same image at the same spots of the race, no seams at the band
+    // boundaries. Without the spin park (Forza Horizon's address). Its band
+    // merge relies on merge_tiling_bands_call_sites: 100-200 draws a frame
+    // were otherwise taken for an earlier band's (whole blocks of Castelletto
+    // missing until close). With the rest of Forza Horizon's quirks too (the
+    // 7e3 render target as R11G11B10, the host's NaN rules), against the
+    // defaults alone: GPU time 9.37 -> 7.98 ms per frame driving, the same
+    // streets (2026-10-05).
+    {0x4D530AA4, "spirv_texture_sign_specialization", true,
+     "texture signs known to the host compiler per pipeline"},
+    {0x4D530AA4, "spirv_texture_sign_branch", true,
+     "exact texture sign decode in a uniform branch"},
+    {0x4D530AA4, "spirv_fast_precision_rounding", true,
+     "exact cheaper 21-bit rounding"},
+    {0x4D530AA4, "skip_overwritten_transfers", true,
+     "no transfers into what the draw overwrites"},
+    {0x4D530AA4, "skip_overwritten_transfers_cutout", true,
+     "transfers skip the part the draw overwrites"},
+    {0x4D530AA4, "vulkan_texture_load_to_image", true,
+     "texture loads straight into the image"},
+    {0x4D530AA4, "vulkan_direct_host_resolve_to_texture", true,
+     "resolves store straight into their textures"},
+    {0x4D530AA4, "vulkan_resolve_clear_in_guest_pass", true,
+     "resolve clears inside the game's render pass"},
+    {0x4D530AA4, "spirv_texture_implicit_lod", true,
+     "2D texture fetches with the host's LOD"},
+    {0x4D530AA4, "spirv_ps_relaxed_math", int64_t(3),
+     "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
+    {0x4D530AA4, "spirv_vs_relaxed_math", int64_t(1),
+     "no SM3 zero-multiply emulation in vertex shaders"},
+    {0x4D530AA4, "host_alpha_to_coverage", true,
+     "alpha to coverage by the host's fixed function"},
+    {0x4D530AA4, "vulkan_depth_4x_as_1x", true,
+     "4x depth-only draws into the 1x surface of their samples"},
+    {0x4D530AA4, "vulkan_samples_as_pixels_simple_ps", true,
+     "4x stencil marking with simple pixel shaders into the 1x surface"},
+    {0x4D530AA4, "merge_tiling_bands", true,
+     "the bands of predicated tiling drawn as one"},
+    {0x4D530AA4, "ir3_debug", "noearlypreamble",
+     "no early shader preamble in the Turnip compiler"},
+    {0x4D530AA4, "render_target_7e3_as_r11g11b10", true,
+     "7e3 scene color in 32 bpp"},
+    {0x4D530AA4, "a64_fpu_nan_fixup", false,
+     "scalar FPU NaNs by the host's rules"},
+    {0x4D530AA4, "a64_vmx_nan_fixup", false,
+     "VMX NaNs by the host's rules"},
+    // Gears of War 3 (Unreal Engine 3) draws the depth of each projected
+    // shadow at 4x MSAA into EDRAM it then reads as 1x - 20 shadows a frame in
+    // its first checkpoint, each a 4x -> 1x and a 1x -> 4x transfer: 96
+    // transfers (36700 tiles) and 143 render passes a frame, GPU-bound at 25
+    // fps. Into the 1x surfaces of their samples (with the overwritten
+    // transfers skipped, on for every title), 6300 tiles and 66 render passes
+    // a frame, 30 fps (its cap), the same shadows (fork.opt b105, runtime
+    // switches in the same scene, 2026-10-05).
+    {0x4D5308AB, "vulkan_depth_4x_as_1x", true,
+     "4x depth-only shadow draws into the 1x surface of their samples"},
+    {0x4D5308AB, "vulkan_samples_as_pixels_simple_ps", true,
+     "4x draws with simple pixel shaders into the 1x surface"},
+    // Crysis 3 (CryENGINE 3) moves one 1350-tile depth surface between 1x and
+    // 4x MSAA 47 times each way a frame on the deck of its first checkpoint:
+    // 156 transfers (45100 tiles) and 211 render passes a frame, GPU-bound at
+    // ~22 fps (39.6 ms of GPU a frame). Into the 1x surfaces of their samples,
+    // 46 transfers (8400 tiles) and 109 render passes: GPU time -15%, +10%
+    // fps over all arms, -17% and +18% against the neighboring ones, the same
+    // image standing in the rain (fork.ui, runtime switches interleaved in one
+    // session, 2026-10-06). The depth draws alone save only 1.1 ms.
+    {0x4541098E, "vulkan_depth_4x_as_1x", true,
+     "4x depth-only draws into the 1x surface of their samples"},
+    {0x4541098E, "vulkan_samples_as_pixels_simple_ps", true,
+     "4x draws with simple pixel shaders into the 1x surface"},
+    // Its lighting and HDR copies go through integers: the light buffers (7e3
+    // in the EDRAM) are resolved as k_2_10_10_10 with exponent bias +10, the
+    // scene and the bloom 7e3 to k_10_11_11 (+6) and k_16_16_16_16 (+11), all
+    // to unsigned integer destinations, and sampled with the integer
+    // num_format and the opposite exponent adjustment (-7, -6, -11) - a
+    // lossless HDR round trip. Packed as unsigned fractions, the copies
+    // saturated (the light buffers 100% white, the scene ~98%, the exposure
+    // chain 0) and the lit surfaces went black; with only the fetch side
+    // honoured, the screen went white. Both sides: the lighting of the
+    // original, with the direct resolves and the resolves into textures still
+    // used for them (frame dump and runtime A/B, 2026-10-06).
+    {0x4541098E, "accurate_resolve_number_formats", true,
+     "resolve shaders that pack integer destinations"},
+    {0x4541098E, "resolve_copy_dest_number_packing", true,
+     "resolves honour their integer destinations"},
+    {0x4541098E, "texture_integer_num_format", true,
+     "integer texture fetches return integers"},
+    // Half of the textures it draws on the deck (114-128 of ~260 in frame
+    // dumps) were placed by the GPU, in pages its loading screen had resolved
+    // to: valid only in the GPU's copy, the guest memory still holding the
+    // loading screen (its hint text included). Its streaming writes into the
+    // same pool - guest stores and file reads straight into it - invalidated
+    // whole pages, and their reupload from guest memory put that in place of
+    // the neighbouring textures: in one of four launches Psycho was drawn
+    // blue. The GPU's data in those pages is kept now; the image and GPU time
+    // as before (24.8 ms a frame, 2026-10-07).
+    {0x4541098E, "shared_memory_preserve_gpu_writes", true,
+     "CPU writes keep the GPU's data in their pages"},
+    // Its worker threads spin on NtYieldExecution whenever they have no job:
+    // the 6 guest CPU threads took 460-490% of a core standing still at the
+    // 30 fps cap, the phone ~10.7 W, and the SoC throttles within minutes (big
+    // cores capped from 2.8-3.2 to ~2.07 GHz, the GPU 4 steps down). Sleeping
+    // 50 us per empty yield once a spin is under way: 255-296%, the same 30
+    // fps and GPU time (runtime switch interleaved in one session; 20 us:
+    // 9.8 W against 10.7 W unplugged, 2026-10-06).
+    {0x4541098E, "guest_yield_sleep_us", int64_t(50),
+     "spinning workers give the host core back"},
+    // Exact: it copies the scene into one k_10_11_11 texture 7.5-9.5 times a
+    // frame and samples it after each copy, reloading the whole 1152x720 every
+    // time; with the resolves storing into it (and into its other resolve
+    // destinations), reloads 1.8-2.4 -> 0.02-0.08 ms, GPU time 28.5 -> 26.9
+    // ms a frame, the same image (runtime switch interleaved in one session,
+    // 2026-10-06).
+    {0x4541098E, "vulkan_direct_host_resolve_to_texture", true,
+     "resolves store straight into their textures"},
+    // 2D fetches with the LOD the host computes instead of 4 coarse
+    // derivatives and an explicit-gradient sample: main pass 12.8 -> 11.0 ms,
+    // the 640x4096 passes 2.0 -> 1.5 ms, GPU time ~26.4 -> 24.4 ms a frame,
+    // the same image standing on the deck (one restart A/B pair at the same
+    // temperature, 2026-10-06).
+    {0x4541098E, "spirv_texture_implicit_lod", true,
+     "2D texture fetches with the host's LOD"},
+    // Without the Shader Model 3 "0 * x = 0" emulation and the 21-bit
+    // rounding in pixel shaders, and the former in vertex shaders, as for
+    // Forza Horizon: main pass 11.4 -> 9.9 ms, the 640x4096 passes 1.57 ->
+    // 1.32 ms, GPU time 24.8 -> 23.5 ms a frame with the phone hotter. The
+    // same image standing on the deck at night in the rain with the lighting
+    // right - no black or white pixels; the colored specks flickering on the
+    // pistol's emblem are there with either (restart A/B pair, 2026-10-07).
+    {0x4541098E, "spirv_ps_relaxed_math", int64_t(3),
+     "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
+    {0x4541098E, "spirv_vs_relaxed_math", int64_t(1),
+     "no SM3 zero-multiply emulation in vertex shaders"},
 };
 
 // Same path/priority as a per-game config file.
