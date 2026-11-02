@@ -78,6 +78,34 @@ class SharedMemory {
   // ensures the host GPU memory backing the range are resident. Returns true if
   // the range has been fully updated and is usable.
   bool RequestRange(uint32_t start, uint32_t length);
+
+  // shared_memory_page_history (diagnostics for the frame dump): per page, the
+  // frame (as last given to SetHistoryFrame, plus 1, 0 for never) of the last
+  // upload from guest memory, CPU invalidation, GPU write and copy of the GPU's
+  // data to guest memory, with what made that copy.
+  enum class GuestCopySource : uint32_t {
+    kNone,
+    kResolveReadback,
+    kPreserveGuestWrite,
+    kPreserveAroundHostWrite,
+    kMemexportReadback,
+  };
+  struct PageHistory {
+    uint32_t upload = 0;
+    uint32_t invalidation = 0;
+    uint32_t gpu_write = 0;
+    // The range of the last GPU write (a resolve's or memexport's).
+    uint32_t gpu_write_start = 0;
+    uint32_t gpu_write_length = 0;
+    uint32_t guest_copy = 0;
+    GuestCopySource guest_copy_source = GuestCopySource::kNone;
+  };
+  void SetHistoryFrame(uint32_t frame) { history_frame_ = frame + 1; }
+  bool HasPageHistory() const { return !page_history_.empty(); }
+  PageHistory GetPageHistory(uint32_t address) const;
+  // Records a copy of the GPU's data to guest memory made outside the shared
+  // memory (resolve and memory export readback).
+  void NoteGuestCopy(uint32_t start, uint32_t length, GuestCopySource source);
   // Returns whether every page in the range is currently valid in the host GPU
   // memory copy. Hold the global critical region if relying on this for state
   // transitions such as watch installation.
@@ -205,6 +233,22 @@ class SharedMemory {
   // on it is not hard - the access callback takes a range as an argument, and
   // touched pages of the buffer of this size will be invalidated).
   uint32_t page_size_log2_;
+
+  // shared_memory_page_history, empty when off.
+  std::vector<PageHistory> page_history_;
+  uint32_t history_frame_ = 1;
+  // Sets one field of the history of the pages of a range.
+  template <uint32_t PageHistory::*field>
+  void NotePages(uint32_t start, uint32_t length) {
+    if (page_history_.empty() || !length || start >= kBufferSize) {
+      return;
+    }
+    const uint32_t last =
+        std::min(start + (length - 1), kBufferSize - 1) >> page_size_log2_;
+    for (uint32_t page = start >> page_size_log2_; page <= last; ++page) {
+      page_history_[page].*field = history_frame_;
+    }
+  }
 
   bool EnsureHostGpuMemoryAllocated(uint32_t start, uint32_t length);
   uint32_t host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;

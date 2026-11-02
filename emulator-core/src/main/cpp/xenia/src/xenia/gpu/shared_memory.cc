@@ -28,6 +28,13 @@ DEFINE_bool(
     "a character with another texture's leftovers that way. Needs a "
     "host-mapped GPU memory copy.",
     "GPU");
+DEFINE_bool(
+    shared_memory_page_history, false,
+    "Diagnostics: remember, per page of the GPU's memory copy, the frame of its "
+    "last upload, CPU invalidation, GPU write and copy of the GPU's data to "
+    "guest memory, for the frame dump (debug.xendroid.frame_dump) to report "
+    "where broken data came from. 2.5 MB.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -61,6 +68,10 @@ bool SharedMemory::InitializeCommon() {
       system_page_flags_base + 2 * num_system_page_flags_;
 
   memset(system_page_flags_base, 0, 3 * 8 * num_system_page_flags_entries);
+
+  if (cvars::shared_memory_page_history) {
+    page_history_.resize(kBufferSize >> page_size_log2_);
+  }
 
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(
@@ -412,6 +423,27 @@ bool SharedMemory::AllocateSparseHostGpuMemoryRange(
   return false;
 }
 
+SharedMemory::PageHistory SharedMemory::GetPageHistory(
+    uint32_t address) const {
+  if (page_history_.empty() || address >= kBufferSize) {
+    return PageHistory();
+  }
+  return page_history_[address >> page_size_log2_];
+}
+
+void SharedMemory::NoteGuestCopy(uint32_t start, uint32_t length,
+                                 GuestCopySource source) {
+  if (page_history_.empty() || !length || start >= kBufferSize) {
+    return;
+  }
+  const uint32_t last =
+      std::min(start + (length - 1), kBufferSize - 1) >> page_size_log2_;
+  for (uint32_t page = start >> page_size_log2_; page <= last; ++page) {
+    page_history_[page].guest_copy = history_frame_;
+    page_history_[page].guest_copy_source = source;
+  }
+}
+
 void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
                                   bool written_by_gpu) {
   if (length == 0 || start >= kBufferSize) {
@@ -445,6 +477,18 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
       } else {
         system_page_flags_valid_and_gpu_written_[i] &= ~valid_bits;
       }
+    }
+    if (written_by_gpu) {
+      NotePages<&PageHistory::gpu_write>(start, length);
+      if (!page_history_.empty()) {
+        for (uint32_t page = valid_page_first; page <= valid_page_last;
+             ++page) {
+          page_history_[page].gpu_write_start = start;
+          page_history_[page].gpu_write_length = length;
+        }
+      }
+    } else {
+      NotePages<&PageHistory::upload>(start, length);
     }
   }
 
@@ -774,18 +818,24 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
         if (!exact_range) {
           if (CopyToGuestMemory(run_start, run_end - run_start)) {
             copied = run_end - run_start;
+            NoteGuestCopy(run_start, run_end - run_start,
+                          GuestCopySource::kPreserveGuestWrite);
           }
         } else {
           if (run_start < physical_address_start) {
             const uint32_t head_end = std::min(run_end, physical_address_start);
             if (CopyToGuestMemory(run_start, head_end - run_start)) {
               copied += head_end - run_start;
+              NoteGuestCopy(run_start, head_end - run_start,
+                            GuestCopySource::kPreserveAroundHostWrite);
             }
           }
           if (run_end > written_end) {
             const uint32_t tail_start = std::max(run_start, written_end);
             if (CopyToGuestMemory(tail_start, run_end - tail_start)) {
               copied += run_end - tail_start;
+              NoteGuestCopy(tail_start, run_end - tail_start,
+                            GuestCopySource::kPreserveAroundHostWrite);
             }
           }
         }
@@ -826,6 +876,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
   // GPU-written flags changed due to CPU invalidation.
   gpu_written_data_dirty_ = true;
   dirty_blocks_ |= dirty_blocks_mask;
+  NotePages<&PageHistory::invalidation>(
+      page_first << page_size_log2_,
+      (page_last - page_first + 1) << page_size_log2_);
 
   FireWatches(page_first, page_last, false);
 

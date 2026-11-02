@@ -932,7 +932,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
   void PollFrameDump();
   void DumpFrameDraw(const VulkanShader& vertex_shader,
                      const VulkanShader* pixel_shader,
-                     xenos::PrimitiveType prim_type, uint32_t index_count);
+                     xenos::PrimitiveType prim_type, uint32_t index_count,
+                     const IndexBufferInfo* index_buffer_info);
   void DumpFrameResolve(uint32_t written_address, uint32_t written_length);
   std::string frame_dump_value_;
   std::filesystem::path frame_dump_dir_;
@@ -953,6 +954,68 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::map<uint32_t, FrameDumpTexture> frame_dump_textures_;
   // debug.xendroid.gpu_reload, the last value acted upon.
   std::string gpu_reload_value_;
+  // The vertex and index buffers drawn with in the dumped frame (guest address
+  // and length), compared like the textures.
+  std::map<uint32_t, uint32_t> frame_dump_buffers_;
+  // Per draw of the dumped frame, what its vertices are read from: scanned at
+  // the end of the frame in the GPU's copy, for values a stretched triangle
+  // would have (infinite, NaN, huge).
+  struct FrameDumpVertexScan {
+    struct Attribute {
+      uint32_t base;  // Bytes.
+      uint32_t size;  // Bytes, as the fetch constant gives it.
+      uint32_t stride_words;
+      int32_t offset_words;
+      uint32_t fetch_constant;
+      xenos::VertexFormat format;
+      xenos::Endian endian;
+    };
+    uint32_t draw;
+    uint32_t index_base;  // 0 for auto-indexed draws.
+    uint32_t index_count;
+    xenos::IndexFormat index_format;
+    xenos::Endian index_endian;
+    uint32_t index_offset;
+    // VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX.
+    uint32_t index_clamp_min, index_clamp_max;
+    std::vector<Attribute> attributes;
+    // Every vertex buffer binding, for dumping the ranges of a broken draw.
+    struct Binding {
+      uint32_t fetch_constant;
+      uint32_t base;  // Bytes.
+      uint32_t size;  // Bytes.
+      uint32_t stride_words;
+    };
+    std::vector<Binding> bindings;
+  };
+  // Broken draws whose index buffer, vertex ranges and page histories were
+  // written.
+  uint32_t frame_dump_broken_draws_ = 0;
+  // resolve_log_frames: the resolves of the first frames, one line each.
+  FILE* resolve_log_file_ = nullptr;
+  bool OpenResolveLog();
+  void LogResolve(uint32_t written_address, uint32_t written_length);
+  // And the memory-exporting draws: their export ranges and, with the GPU
+  // drained, whether the GPU's copy of what they read matches guest memory.
+  void LogMemexportDraw(const VulkanShader& vertex_shader,
+                        const VulkanShader* pixel_shader, uint32_t index_count,
+                        const IndexBufferInfo* index_buffer_info);
+  // Exporting shaders whose disassembly is already in the storage root.
+  std::unordered_set<uint64_t> memexport_logged_shaders_;
+  std::vector<FrameDumpVertexScan> frame_dump_vertex_scans_;
+  // Raw vertex files written for the attributes found broken.
+  uint32_t frame_dump_vertex_files_ = 0;
+  void WriteFrameDumpVertexScans();
+  // Draws so far in the frame, counted where the frame dump numbers them, and
+  // debug.xendroid.skip_draws=<first>[-<last>][!<first>[-<last>]]: the draws of
+  // every frame not issued, except those after the "!", to find the ones
+  // drawing something broken by elimination.
+  uint32_t frame_draw_index_ = 0;
+  std::string skip_draws_value_;
+  uint32_t skip_draws_first_ = UINT32_MAX;
+  uint32_t skip_draws_last_ = 0;
+  uint32_t skip_draws_keep_first_ = UINT32_MAX;
+  uint32_t skip_draws_keep_last_ = 0;
 
   struct SubmissionWork {
     uint32_t draws = 0;
@@ -1669,7 +1732,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
   uint32_t memexport_snapshot_size_ = 0;
   std::vector<VkBufferCopy> memexport_snapshot_regions_;
   std::vector<uint8_t> memexport_readback_after_;
-
   // Backend-agnostic resolve-to-guest-RAM copy decisions and read-watch
   // consumption tracking, shared with the D3D12 backend.
 #include "../command_processor_resolve_readwatch.inc"

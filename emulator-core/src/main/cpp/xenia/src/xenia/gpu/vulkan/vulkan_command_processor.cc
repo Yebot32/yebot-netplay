@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -232,6 +233,14 @@ DEFINE_int32(
     "per-frame draw count.",
     "GPU");
 UPDATE_from_int32(vulkan_mid_frame_submission_draws, 2026, 7, 24, 12, 0);
+
+DEFINE_int32(
+    resolve_log_frames, 0,
+    "Diagnostics: write one line per resolve of the first this many frames "
+    "(source, rectangle, destination, format, written range) to "
+    "resolve_log.txt in the storage root - what the GPU wrote where while a "
+    "game loads.",
+    "GPU");
 
 DEFINE_bool(
     vulkan_cache_texture_descriptors, true,
@@ -3014,7 +3023,281 @@ void VulkanCommandProcessor::ReassertGpuPowerControlIfDue() {
 #endif
 }
 
+void VulkanCommandProcessor::WriteFrameDumpVertexScans() {
+  if (frame_dump_vertex_scans_.empty() || !shared_memory_->IsHostMapped() ||
+      !AwaitAllQueueOperationsCompletion()) {
+    frame_dump_vertex_scans_.clear();
+    return;
+  }
+  // One line per draw: the vertex index range it reads (with VGT_INDX_OFFSET)
+  // and, per floating-point attribute, the vertices the fetch constant's size
+  // covers, the largest finite magnitude, and how many components are
+  // infinite, NaN or beyond 1e5 (with the first such vertex) - from the GPU's
+  // copy, which is what was drawn.
+  std::vector<uint8_t> bytes;
+  auto read = [&](uint64_t base, uint64_t length) -> const uint8_t* {
+    if (!length || base + length > SharedMemory::kBufferSize) {
+      return nullptr;
+    }
+    bytes.resize(size_t(length));
+    return shared_memory_->ReadHostMapped(uint32_t(base), uint32_t(length),
+                                          bytes.data())
+               ? bytes.data()
+               : nullptr;
+  };
+  auto half_to_float = [](uint32_t half) {
+    const uint32_t sign = (half & 0x8000) << 16;
+    const uint32_t exponent = (half >> 10) & 0x1F;
+    const uint32_t mantissa = half & 0x3FF;
+    if (!exponent) {
+      const float value = std::ldexp(float(mantissa), -24);
+      return sign ? -value : value;
+    }
+    const uint32_t bits =
+        sign | (exponent == 0x1F ? 0x7F800000 : (exponent + 112) << 23) |
+        (mantissa << 13);
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+  };
+  constexpr uint32_t kMaxVertices = 1 << 16;
+  // The frame now, as the page history counts it.
+  const std::string frame_line =
+      fmt::format("VF {}\n", uint32_t(frame_current_) + 1);
+  std::fwrite(frame_line.data(), 1, frame_line.size(), frame_dump_file_);
+  frame_dump_vertex_files_ = 0;
+  frame_dump_broken_draws_ = 0;
+  for (const FrameDumpVertexScan& scan : frame_dump_vertex_scans_) {
+    uint32_t index_min = UINT32_MAX, index_max = 0;
+    if (scan.index_base) {
+      const uint32_t index_size =
+          scan.index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
+      const uint8_t* indices =
+          read(scan.index_base, uint64_t(scan.index_count) * index_size);
+      for (uint32_t i = 0; indices && i < scan.index_count; ++i) {
+        uint32_t index;
+        if (index_size == 4) {
+          uint32_t value;
+          std::memcpy(&value, indices + i * 4, sizeof(value));
+          index = xenos::GpuSwap(value, scan.index_endian);
+          if (index == UINT32_MAX) {
+            continue;
+          }
+        } else {
+          uint16_t value;
+          std::memcpy(&value, indices + i * 2, sizeof(value));
+          index = xenos::GpuSwap(value, scan.index_endian);
+          if (index == UINT16_MAX) {
+            continue;
+          }
+        }
+        index_min = std::min(index_min, index);
+        index_max = std::max(index_max, index);
+      }
+    } else if (scan.index_count) {
+      index_min = 0;
+      index_max = scan.index_count - 1;
+    }
+    if (index_min > index_max) {
+      continue;
+    }
+    index_min += scan.index_offset;
+    index_max += scan.index_offset;
+    // And VGT_MIN_VTX_INDX..VGT_MAX_VTX_INDX, which the vertex grouper clamps
+    // indices to.
+    std::string line = fmt::format("V {} ix {}-{} clamp {}-{}", scan.draw,
+                                   index_min, index_max, scan.index_clamp_min,
+                                   scan.index_clamp_max);
+    bool broken = false;
+    for (const FrameDumpVertexScan::Attribute& attribute : scan.attributes) {
+      const bool half =
+          attribute.format == xenos::VertexFormat::k_16_16_FLOAT ||
+          attribute.format == xenos::VertexFormat::k_16_16_16_16_FLOAT;
+      const uint32_t words =
+          half ? (attribute.format == xenos::VertexFormat::k_16_16_FLOAT ? 1
+                                                                         : 2)
+               : uint32_t(xenos::GetVertexFormatComponentCount(
+                     attribute.format));
+      const uint32_t stride = attribute.stride_words * 4;
+      line += fmt::format(" a{}.{}.{}", attribute.fetch_constant,
+                          attribute.offset_words, uint32_t(attribute.format));
+      if (!stride || attribute.offset_words < 0 ||
+          uint32_t(attribute.offset_words) + words > attribute.stride_words) {
+        line += ":layout?";
+        continue;
+      }
+      const uint32_t last =
+          std::min(index_max, index_min + (kMaxVertices - 1));
+      const uint8_t* data =
+          read(attribute.base + uint64_t(index_min) * stride,
+               uint64_t(last - index_min + 1) * stride);
+      if (!data) {
+        line += ":unreadable";
+        continue;
+      }
+      float max_abs = 0.0f;
+      uint32_t infinite = 0, nan = 0, huge = 0, first_bad = UINT32_MAX;
+      for (uint32_t vertex = index_min; vertex <= last; ++vertex) {
+        const uint8_t* vertex_data = data + (vertex - index_min) * stride +
+                                     attribute.offset_words * 4;
+        bool bad = false;
+        for (uint32_t word_index = 0; word_index < words; ++word_index) {
+          uint32_t word;
+          std::memcpy(&word, vertex_data + word_index * 4, sizeof(word));
+          word = xenos::GpuSwap(word, attribute.endian);
+          float values[2];
+          uint32_t value_count = 1;
+          if (half) {
+            values[0] = half_to_float(word & 0xFFFF);
+            values[1] = half_to_float(word >> 16);
+            value_count = 2;
+          } else {
+            std::memcpy(&values[0], &word, sizeof(float));
+          }
+          for (uint32_t i = 0; i < value_count; ++i) {
+            if (std::isnan(values[i])) {
+              ++nan;
+              bad = true;
+            } else if (std::isinf(values[i])) {
+              ++infinite;
+              bad = true;
+            } else {
+              const float magnitude = std::fabs(values[i]);
+              max_abs = std::max(max_abs, magnitude);
+              if (magnitude > 1e5f) {
+                ++huge;
+                bad = true;
+              }
+            }
+          }
+        }
+        if (bad && first_bad == UINT32_MAX) {
+          first_bad = vertex;
+        }
+      }
+      line += fmt::format(":n{}:max{:g}", attribute.size / stride, max_abs);
+      if (infinite || nan || huge) {
+        broken = true;
+        line += fmt::format(":inf{}:nan{}:huge{}:at{}", infinite, nan, huge,
+                            first_bad);
+        // The page of the first such vertex: its state now and its history
+        // (frames + 1, 0 for never), and the vertices from there, raw.
+        const uint32_t bad_address = attribute.base + first_bad * stride +
+                                     uint32_t(attribute.offset_words) * 4;
+        const SharedMemory::PageHistory history =
+            shared_memory_->GetPageHistory(bad_address);
+        line += fmt::format(
+            ":page{:08X}:valid{}:gpu{}:up{}:inv{}:gw{}:copy{}/{}",
+            bad_address, uint32_t(shared_memory_->IsRangeValid(bad_address, 1)),
+            uint32_t(shared_memory_->IsRangeGpuWritten(bad_address, 1)),
+            history.upload, history.invalidation, history.gpu_write,
+            history.guest_copy, uint32_t(history.guest_copy_source));
+        if (frame_dump_vertex_files_ < 16) {
+          ++frame_dump_vertex_files_;
+          const uint32_t raw_first = first_bad - index_min;
+          const uint32_t raw_count = std::min(64u, last - first_bad + 1);
+          FILE* file = xe::filesystem::OpenFile(
+              frame_dump_dir_ / fmt::format("v{}_{}_{}_{:08X}.bin", scan.draw,
+                                            attribute.fetch_constant,
+                                            attribute.offset_words,
+                                            bad_address),
+              "wb");
+          if (file) {
+            std::fwrite(data + size_t(raw_first) * stride, 1,
+                        size_t(raw_count) * stride, file);
+            std::fclose(file);
+          }
+        }
+      }
+      if (last != index_max) {
+        line += ":truncated";
+      }
+    }
+    line += '\n';
+    std::fwrite(line.data(), 1, line.size(), frame_dump_file_);
+    if (!broken || frame_dump_broken_draws_ >= 4) {
+      continue;
+    }
+    ++frame_dump_broken_draws_;
+    // A broken draw in full: its index buffer and the vertex range of every
+    // binding (ib<draw>.bin, vb<draw>_<fetch constant>.bin, from the GPU's
+    // copy), and the history of each of their pages ("H <draw> <page> upload
+    // invalidation gpu_write@start+length guest_copy/source valid gpu").
+    auto write_file = [&](const std::string& name, const uint8_t* file_data,
+                          size_t file_size) {
+      FILE* file = xe::filesystem::OpenFile(frame_dump_dir_ / name, "wb");
+      if (file) {
+        std::fwrite(file_data, 1, file_size, file);
+        std::fclose(file);
+      }
+    };
+    std::string history_lines;
+    auto append_history = [&](const char* what, uint64_t start,
+                              uint64_t length) {
+      if (!length || start >= SharedMemory::kBufferSize) {
+        return;
+      }
+      const uint64_t end =
+          std::min(start + length, uint64_t(SharedMemory::kBufferSize));
+      for (uint64_t page = start & ~uint64_t(4095); page < end;
+           page += 4096) {
+        const SharedMemory::PageHistory history =
+            shared_memory_->GetPageHistory(uint32_t(page));
+        history_lines += fmt::format(
+            "H {} {} {:08X} up{} inv{} gw{}@{:08X}+{} copy{}/{} valid{} "
+            "gpu{}\n",
+            scan.draw, what, uint32_t(page), history.upload,
+            history.invalidation, history.gpu_write, history.gpu_write_start,
+            history.gpu_write_length, history.guest_copy,
+            uint32_t(history.guest_copy_source),
+            uint32_t(shared_memory_->IsRangeValid(uint32_t(page), 1)),
+            uint32_t(shared_memory_->IsRangeGpuWritten(uint32_t(page), 1)));
+      }
+    };
+    if (scan.index_base) {
+      const uint64_t index_bytes =
+          uint64_t(scan.index_count) *
+          (scan.index_format == xenos::IndexFormat::kInt32 ? 4 : 2);
+      if (const uint8_t* indices = read(scan.index_base, index_bytes)) {
+        write_file(fmt::format("ib{}.bin", scan.draw), indices,
+                   size_t(index_bytes));
+      }
+      append_history("ib", scan.index_base, index_bytes);
+    }
+    const uint32_t last = std::min(index_max, index_min + (kMaxVertices - 1));
+    for (const FrameDumpVertexScan::Binding& binding : scan.bindings) {
+      const uint64_t stride = uint64_t(binding.stride_words) * 4;
+      if (!stride) {
+        continue;
+      }
+      const uint64_t range_start = binding.base + index_min * stride;
+      const uint64_t range_length = uint64_t(last - index_min + 1) * stride;
+      if (const uint8_t* vertices = read(range_start, range_length)) {
+        write_file(fmt::format("vb{}_{}.bin", scan.draw,
+                               binding.fetch_constant),
+                   vertices, size_t(range_length));
+      }
+      history_lines += fmt::format(
+          "VB {} fc{} base {:08X} size {} stride {} first {} count {}\n",
+          scan.draw, binding.fetch_constant, binding.base, binding.size,
+          stride, index_min, last - index_min + 1);
+      append_history("vb", range_start, range_length);
+    }
+    std::fwrite(history_lines.data(), 1, history_lines.size(),
+                frame_dump_file_);
+  }
+  frame_dump_vertex_scans_.clear();
+  BeginSubmission(true);
+}
+
 void VulkanCommandProcessor::PollFrameDump() {
+  frame_draw_index_ = 0;
+  shared_memory_->SetHistoryFrame(uint32_t(frame_current_));
+  if (resolve_log_file_ &&
+      frame_current_ >= uint64_t(std::max(cvars::resolve_log_frames, 0))) {
+    std::fclose(resolve_log_file_);
+    resolve_log_file_ = nullptr;
+  }
   // The frame being dumped ends with this swap.
   if (frame_dump_file_) {
     // Whether the GPU's copy of each texture's base level still matches the
@@ -3069,6 +3352,48 @@ void VulkanCommandProcessor::PollFrameDump() {
       BeginSubmission(true);
     }
     frame_dump_textures_.clear();
+    // The same for the vertex and index buffers (no copies written).
+    if (!frame_dump_buffers_.empty() && shared_memory_->IsHostMapped() &&
+        AwaitAllQueueOperationsCompletion()) {
+      std::vector<uint8_t> gpu_bytes;
+      uint32_t buffers_written = 0;
+      for (const auto& range : frame_dump_buffers_) {
+        const uint32_t base = range.first, length = range.second;
+        gpu_bytes.resize(length);
+        if (!shared_memory_->ReadHostMapped(base, length, gpu_bytes.data())) {
+          continue;
+        }
+        const uint8_t* guest_bytes = memory_->TranslatePhysical(base);
+        uint32_t differing = 0;
+        for (uint32_t i = 0; i < length; ++i) {
+          differing += gpu_bytes[i] != guest_bytes[i];
+        }
+        std::string line = fmt::format(
+            "B {:08X} {} valid {} gpu_written {} differing {}\n", base, length,
+            uint32_t(shared_memory_->IsRangeValid(base, length)),
+            uint32_t(shared_memory_->IsRangeGpuWritten(base, length)),
+            differing);
+        std::fwrite(line.data(), 1, line.size(), frame_dump_file_);
+        // Both copies of the first differing buffers, to tell which is right.
+        if (differing && buffers_written < 32) {
+          ++buffers_written;
+          for (int copy = 0; copy < 2; ++copy) {
+            FILE* file = xe::filesystem::OpenFile(
+                frame_dump_dir_ /
+                    fmt::format("b{:08X}_{}.bin", base, copy ? "guest" : "gpu"),
+                "wb");
+            if (file) {
+              std::fwrite(copy ? guest_bytes : gpu_bytes.data(), 1, length,
+                          file);
+              std::fclose(file);
+            }
+          }
+        }
+      }
+      BeginSubmission(true);
+    }
+    frame_dump_buffers_.clear();
+    WriteFrameDumpVertexScans();
     std::fclose(frame_dump_file_);
     frame_dump_file_ = nullptr;
     XELOGI("FrameDump: {} draws and {} resolves in {}", frame_dump_draws_,
@@ -3098,6 +3423,34 @@ void VulkanCommandProcessor::PollFrameDump() {
              (reload & 2) ? "guest memory" : "");
     }
   }
+  char skip_value[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.xendroid.skip_draws", skip_value);
+  if (skip_draws_value_ != skip_value) {
+    skip_draws_value_ = skip_value;
+    // <first>[-<last>], each range of the form.
+    auto parse_range = [](const char* text, uint32_t& first, uint32_t& last) {
+      first = UINT32_MAX;
+      last = 0;
+      if (*text < '0' || *text > '9') {
+        return text;
+      }
+      char* end = nullptr;
+      first = uint32_t(std::strtoul(text, &end, 10));
+      last = first;
+      if (*end == '-') {
+        last = uint32_t(std::strtoul(end + 1, &end, 10));
+      }
+      return const_cast<const char*>(end);
+    };
+    const char* rest =
+        parse_range(skip_value, skip_draws_first_, skip_draws_last_);
+    skip_draws_keep_first_ = UINT32_MAX;
+    skip_draws_keep_last_ = 0;
+    if (*rest == '!') {
+      parse_range(rest + 1, skip_draws_keep_first_, skip_draws_keep_last_);
+    }
+    XELOGI("debug.xendroid.skip_draws: {}", skip_draws_value_);
+  }
   char value[PROP_VALUE_MAX] = {};
   __system_property_get("debug.xendroid.frame_dump", value);
   if (frame_dump_value_ == value) {
@@ -3121,15 +3474,16 @@ void VulkanCommandProcessor::PollFrameDump() {
   frame_dump_draws_ = 0;
   frame_dump_resolves_ = 0;
   frame_dump_shaders_.clear();
+  frame_dump_vertex_scans_.clear();
   XELOGI("FrameDump: dumping the next frame to {}",
          xe::path_to_utf8(frame_dump_dir_));
 #endif
 }
 
-void VulkanCommandProcessor::DumpFrameDraw(const VulkanShader& vertex_shader,
-                                           const VulkanShader* pixel_shader,
-                                           xenos::PrimitiveType prim_type,
-                                           uint32_t index_count) {
+void VulkanCommandProcessor::DumpFrameDraw(
+    const VulkanShader& vertex_shader, const VulkanShader* pixel_shader,
+    xenos::PrimitiveType prim_type, uint32_t index_count,
+    const IndexBufferInfo* index_buffer_info) {
   const RegisterFile& regs = *register_file_;
   // Raw registers, decoded by the reader.
   std::string line = fmt::format(
@@ -3158,6 +3512,73 @@ void VulkanCommandProcessor::DumpFrameDraw(const VulkanShader& vertex_shader,
       regs.values[XE_GPU_REG_RB_COLORCONTROL],
       regs.values[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
       regs.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
+  // The vertex buffers (fetch constant words and the binding's stride) and the
+  // index buffer.
+  auto record_buffer = [&](uint32_t base, uint32_t length) {
+    if (base && length && uint64_t(base) + length <= (UINT64_C(1) << 29)) {
+      uint32_t& recorded = frame_dump_buffers_[base];
+      recorded = std::max(recorded, length);
+    }
+  };
+  for (const Shader::VertexBinding& binding : vertex_shader.vertex_bindings()) {
+    const xenos::xe_gpu_vertex_fetch_t fetch =
+        regs.GetVertexFetch(binding.fetch_constant);
+    line += fmt::format(" vf{}:{:08X}:{:08X}:{}", binding.fetch_constant,
+                        fetch.dword_0, fetch.dword_1, binding.stride_words);
+    record_buffer(uint32_t(fetch.address) << 2, uint32_t(fetch.size) << 2);
+  }
+  if (index_buffer_info && index_buffer_info->guest_base) {
+    line += fmt::format(" ib:{:08X}:{}:{}:{}", index_buffer_info->guest_base,
+                        uint32_t(index_buffer_info->format),
+                        uint32_t(index_buffer_info->endianness),
+                        uint32_t(index_buffer_info->length));
+    record_buffer(index_buffer_info->guest_base,
+                  uint32_t(index_buffer_info->length));
+  }
+  // The floating-point attributes and the indices, scanned when the frame ends.
+  {
+    FrameDumpVertexScan& scan = frame_dump_vertex_scans_.emplace_back();
+    scan.draw = frame_dump_draws_ - 1;
+    const bool indexed = index_buffer_info && index_buffer_info->guest_base;
+    scan.index_base = indexed ? index_buffer_info->guest_base : 0;
+    scan.index_count = indexed ? index_buffer_info->count : index_count;
+    scan.index_format =
+        indexed ? index_buffer_info->format : xenos::IndexFormat::kInt16;
+    scan.index_endian =
+        indexed ? index_buffer_info->endianness : xenos::Endian::kNone;
+    scan.index_offset = regs.values[XE_GPU_REG_VGT_INDX_OFFSET] & 0xFFFFFF;
+    scan.index_clamp_min = regs.values[XE_GPU_REG_VGT_MIN_VTX_INDX] & 0xFFFFFF;
+    scan.index_clamp_max = regs.values[XE_GPU_REG_VGT_MAX_VTX_INDX] & 0xFFFFFF;
+    for (const Shader::VertexBinding& binding :
+         vertex_shader.vertex_bindings()) {
+      const xenos::xe_gpu_vertex_fetch_t fetch =
+          regs.GetVertexFetch(binding.fetch_constant);
+      scan.bindings.push_back(FrameDumpVertexScan::Binding{
+          binding.fetch_constant, uint32_t(fetch.address) << 2,
+          uint32_t(fetch.size) << 2, binding.stride_words});
+      for (const Shader::VertexBinding::Attribute& attribute :
+           binding.attributes) {
+        const xenos::VertexFormat format =
+            attribute.fetch_instr.attributes.data_format;
+        switch (format) {
+          case xenos::VertexFormat::k_32_FLOAT:
+          case xenos::VertexFormat::k_32_32_FLOAT:
+          case xenos::VertexFormat::k_32_32_32_FLOAT:
+          case xenos::VertexFormat::k_32_32_32_32_FLOAT:
+          case xenos::VertexFormat::k_16_16_FLOAT:
+          case xenos::VertexFormat::k_16_16_16_16_FLOAT:
+            scan.attributes.push_back(FrameDumpVertexScan::Attribute{
+                uint32_t(fetch.address) << 2, uint32_t(fetch.size) << 2,
+                binding.stride_words,
+                attribute.fetch_instr.attributes.offset,
+                binding.fetch_constant, format, fetch.endian});
+            break;
+          default:
+            break;
+        }
+      }
+    }
+  }
   // The six dwords of the fetch constant of every texture the shaders sample.
   auto append_textures = [&](const char* stage, const VulkanShader& shader) {
     for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
@@ -3240,6 +3661,149 @@ void VulkanCommandProcessor::DumpFrameDraw(const VulkanShader& vertex_shader,
   if (pixel_shader) {
     dump_shader("ps", *pixel_shader);
   }
+}
+
+bool VulkanCommandProcessor::OpenResolveLog() {
+  if (!resolve_log_file_ && kernel_state_) {
+    resolve_log_file_ = xe::filesystem::OpenFile(
+        kernel_state_->emulator()->storage_root() / "resolve_log.txt", "w");
+  }
+  return resolve_log_file_ != nullptr;
+}
+
+void VulkanCommandProcessor::LogMemexportDraw(
+    const VulkanShader& vertex_shader, const VulkanShader* pixel_shader,
+    uint32_t index_count, const IndexBufferInfo* index_buffer_info) {
+  if (!OpenResolveLog() || !shared_memory_->IsHostMapped() ||
+      !AwaitAllQueueOperationsCompletion()) {
+    return;
+  }
+  const RegisterFile& regs = *register_file_;
+  // "M <frame> vs <hash> ps <hash> count <n> out <export ranges> in <what read>":
+  // per range read, its pages' state (all valid, all GPU-written), the bytes
+  // where the GPU's copy differs from guest memory, and the history of its
+  // first page. A valid range that differs fed the export stale data.
+  std::string line = fmt::format(
+      "M {} vs {:016X} ps {:016X} count {} out", frame_current_,
+      vertex_shader.ucode_data_hash(),
+      pixel_shader ? pixel_shader->ucode_data_hash() : 0, index_count);
+  // The first 32 bytes of a range in the GPU's copy, as hex.
+  auto head_hex = [&](uint32_t base, uint32_t length) {
+    uint8_t head[32];
+    length = std::min(length, uint32_t(sizeof(head)));
+    std::string hex;
+    if (length && uint64_t(base) + length <= SharedMemory::kBufferSize &&
+        shared_memory_->ReadHostMapped(base, length, head)) {
+      for (uint32_t i = 0; i < length; ++i) {
+        hex += fmt::format("{:02X}", head[i]);
+      }
+    }
+    return hex;
+  };
+  for (const draw_util::MemExportRange& range : memexport_ranges_) {
+    const uint32_t base = range.base_address_dwords << 2;
+    line += fmt::format(" {:08X}+{}:{}", base, range.size_bytes,
+                        head_hex(base, range.size_bytes));
+  }
+  // The float constants the vertex shader reads (c0-c255).
+  line += " c";
+  const Shader::ConstantRegisterMap& constants =
+      vertex_shader.constant_register_map();
+  for (uint32_t i = 0; i < 256; ++i) {
+    if (!(constants.float_bitmap[i >> 6] & (uint64_t(1) << (i & 63)))) {
+      continue;
+    }
+    const uint32_t* value =
+        &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + i * 4];
+    line += fmt::format(" c{}={:08X}:{:08X}:{:08X}:{:08X}", i, value[0],
+                        value[1], value[2], value[3]);
+  }
+  if (memexport_logged_shaders_.insert(vertex_shader.ucode_data_hash())
+          .second) {
+    FILE* file = xe::filesystem::OpenFile(
+        kernel_state_->emulator()->storage_root() /
+            fmt::format("memexport_vs_{:016X}.txt",
+                        vertex_shader.ucode_data_hash()),
+        "w");
+    if (file) {
+      const std::string& disassembly = vertex_shader.ucode_disassembly();
+      std::fwrite(disassembly.data(), 1, disassembly.size(), file);
+      std::fclose(file);
+    }
+  }
+  line += " in";
+  std::vector<uint8_t> gpu_bytes;
+  auto append_read = [&](const char* what, uint32_t base, uint32_t length) {
+    length = std::min(length, uint32_t(1) << 20);
+    if (!length || uint64_t(base) + length > SharedMemory::kBufferSize) {
+      return;
+    }
+    gpu_bytes.resize(length);
+    uint32_t differing = UINT32_MAX;
+    if (shared_memory_->ReadHostMapped(base, length, gpu_bytes.data())) {
+      const uint8_t* guest_bytes = memory_->TranslatePhysical(base);
+      differing = 0;
+      for (uint32_t i = 0; i < length; ++i) {
+        differing += gpu_bytes[i] != guest_bytes[i];
+      }
+    }
+    const SharedMemory::PageHistory history =
+        shared_memory_->GetPageHistory(base);
+    line += fmt::format(
+        " {}:{:08X}+{}:valid{}:gpu{}:diff{}:up{}:inv{}:gw{}:copy{}/{}:{}",
+        what, base, length,
+        uint32_t(shared_memory_->IsRangeValid(base, length)),
+        uint32_t(shared_memory_->IsRangeGpuWritten(base, length)), differing,
+        history.upload, history.invalidation, history.gpu_write,
+        history.guest_copy, uint32_t(history.guest_copy_source),
+        head_hex(base, length));
+  };
+  for (const Shader::VertexBinding& binding : vertex_shader.vertex_bindings()) {
+    const xenos::xe_gpu_vertex_fetch_t fetch =
+        regs.GetVertexFetch(binding.fetch_constant);
+    append_read(fmt::format("vf{}", binding.fetch_constant).c_str(),
+                uint32_t(fetch.address) << 2, uint32_t(fetch.size) << 2);
+  }
+  if (index_buffer_info && index_buffer_info->guest_base) {
+    append_read("ib", index_buffer_info->guest_base,
+                uint32_t(index_buffer_info->length));
+  }
+  line += '\n';
+  std::fwrite(line.data(), 1, line.size(), resolve_log_file_);
+  BeginSubmission(true);
+}
+
+void VulkanCommandProcessor::LogResolve(uint32_t written_address,
+                                        uint32_t written_length) {
+  if (!OpenResolveLog()) {
+    return;
+  }
+  const draw_util::ResolveInfo& info = render_target_cache_->last_resolve_info();
+  const bool is_depth = info.IsCopyingDepth();
+  const draw_util::ResolveEdramInfo& edram_info =
+      is_depth ? info.depth_edram_info : info.color_edram_info;
+  const std::string line = fmt::format(
+      "{} {} base {} pitch {} msaa {} format {} rect {},{} {}x{} dest {:08X} "
+      "pitch {} height {} offset {},{} format {} endian {} number {} "
+      "exp_bias {} swap {} written {:08X} {} copy_control {:08X}\n",
+      frame_current_, is_depth ? "depth" : "color",
+      uint32_t(edram_info.base_tiles), uint32_t(edram_info.pitch_tiles),
+      1u << uint32_t(edram_info.msaa_samples), uint32_t(edram_info.format),
+      uint32_t(info.coordinate_info.edram_offset_x_div_8) * 8,
+      uint32_t(info.coordinate_info.edram_offset_y_div_8) * 8,
+      uint32_t(info.coordinate_info.width_div_8) * 8, info.height_div_8 * 8,
+      info.copy_dest_base,
+      uint32_t(info.copy_dest_coordinate_info.pitch_aligned_div_32) * 32,
+      uint32_t(info.copy_dest_coordinate_info.height_aligned_div_32) * 32,
+      uint32_t(info.copy_dest_coordinate_info.offset_x_div_8) * 8,
+      uint32_t(info.copy_dest_coordinate_info.offset_y_div_8) * 8,
+      uint32_t(info.copy_dest_info.copy_dest_format),
+      uint32_t(info.copy_dest_info.copy_dest_endian),
+      uint32_t(info.copy_dest_info.copy_dest_number),
+      int32_t(info.copy_dest_info.copy_dest_exp_bias),
+      uint32_t(info.copy_dest_info.copy_dest_swap), written_address,
+      written_length, info.rb_copy_control.value);
+  std::fwrite(line.data(), 1, line.size(), resolve_log_file_);
 }
 
 void VulkanCommandProcessor::DumpFrameResolve(uint32_t written_address,
@@ -5621,7 +6185,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
   }
   if (frame_dump_file_) {
-    DumpFrameDraw(*vertex_shader, pixel_shader, prim_type, index_count);
+    DumpFrameDraw(*vertex_shader, pixel_shader, prim_type, index_count,
+                  index_buffer_info);
+  }
+  const uint32_t draw_index = frame_draw_index_++;
+  if (draw_index >= skip_draws_first_ && draw_index <= skip_draws_last_ &&
+      (draw_index < skip_draws_keep_first_ ||
+       draw_index > skip_draws_keep_last_)) {
+    return true;
   }
 
   // A pixel shader that may kill pixels leaves covered pixels unwritten, and
@@ -6979,6 +7550,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       memexport_range.size_bytes,
                                       !route_to_host);
   }
+  if (!memexport_ranges_.empty() &&
+      frame_current_ < uint64_t(std::max(cvars::resolve_log_frames, 0))) {
+    LogMemexportDraw(*vertex_shader, pixel_shader, index_count,
+                     index_buffer_info);
+  }
 
   if (route_to_host && !memexport_ranges_.empty()) {
     // Producer draw: output landed in host_buffer_ (guest RAM), already CPU
@@ -7387,6 +7963,9 @@ bool VulkanCommandProcessor::IssueCopy() {
   if (frame_dump_file_) {
     DumpFrameResolve(written_address, written_length);
   }
+  if (frame_current_ < uint64_t(std::max(cvars::resolve_log_frames, 0))) {
+    LogResolve(written_address, written_length);
+  }
 
   // The resolve wrote the device buffer. Drop any stale memexport marks so the
   // output isn't overwritten with guest RAM by a later texture load.
@@ -7489,6 +8068,9 @@ bool VulkanCommandProcessor::IssueCopy() {
         shared_memory_->ReadHostMapped(
             written_address, written_length,
             memory_->TranslatePhysical(written_address));
+        shared_memory_->NoteGuestCopy(
+            written_address, written_length,
+            SharedMemory::GuestCopySource::kResolveReadback);
       }
       last_write = resolve_submission;
       PopDebugMarker();
