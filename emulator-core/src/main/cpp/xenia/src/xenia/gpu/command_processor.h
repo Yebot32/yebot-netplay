@@ -299,6 +299,7 @@ class CommandProcessor {
   void AwaitMemexportForFence(const char* reason) {}
   void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {}
   bool AwaitMemexportReadbacks(const char* reason) { return false; }
+  bool MemexportReadbacksPending() const { return false; }
 
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,

@@ -243,17 +243,19 @@ DEFINE_int32(
     "GPU");
 
 DEFINE_bool(
-    memexport_readback_deferred, false,
+    memexport_readback_deferred, true,
     "With memexport_enable on a host-mapped buffer (readback_resolve=uma), "
     "read memory export output back into guest memory when the exporting "
     "draw's submission completes, instead of awaiting the GPU after every "
     "exporting draw. While any is pending, a fence, interrupt or coherency "
     "request the guest observes, a wait on memory in its command stream and "
-    "the command processor running out of commands await the GPU first, so "
-    "the output is there by then. Only while memexport_await_fences is on. "
+    "the command processor running out of commands await the GPU first (with "
+    "memexport_await_fences on or off), so the output is there by then. "
     "Crysis 3 copies memory with exports thousands of times while loading and "
-    "stalled on each.",
+    "stalled on each; Need for Speed: Most Wanted the same either way. On for "
+    "every title since 2026-10-07.",
     "GPU");
+UPDATE_from_bool(memexport_readback_deferred, 2026, 10, 7, 11, false);
 
 DEFINE_bool(
     vulkan_cache_texture_descriptors, true,
@@ -6319,18 +6321,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Memory export read back from the host-mapped buffer (no guest memory
   // import to export into), for which the GPU snapshots the export ranges
-  // before the draw. With memexport_readback_deferred - only while the guest's
-  // fences await the output, which is what gets it there in time - this
-  // export's snapshot goes after those of the exports still pending; read
-  // back right after the draw, it reuses the buffer from its start. Without
-  // room, the pending ones are read back first, here, before the draw records
-  // anything (awaiting the GPU is safe only between draws).
+  // before the draw. With memexport_readback_deferred, this export's snapshot
+  // goes after those of the exports still pending; read back right after the
+  // draw, it reuses the buffer from its start. Without room, the pending ones
+  // are read back first, here, before the draw records anything (awaiting the
+  // GPU is safe only between draws).
   bool memexport_deferred = false;
   if (cvars::memexport_enable && !memexport_ranges_.empty() &&
       !shared_memory_->is_zero_copy() && shared_memory_->IsHostMapped() &&
       shared_memory_host_and_edram_descriptor_set_ == VK_NULL_HANDLE) {
-    memexport_deferred =
-        cvars::memexport_readback_deferred && cvars::memexport_await_fences;
+    memexport_deferred = cvars::memexport_readback_deferred;
     uint32_t snapshot_size = 0;
     for (const draw_util::MemExportRange& range : memexport_ranges_) {
       snapshot_size += range.size_bytes;

@@ -85,6 +85,10 @@ bool AwaitMemexportReadbacks(const char* reason) {
   return awaited;
 }
 
+// Whether the guest's fences, interrupts and coherency requests must await the
+// GPU for the output above whatever memexport_await_fences says.
+bool MemexportReadbacksPending() const { return memexport_readbacks_pending_; }
+
 // Clears memexport marks for a range a resolve just wrote, so its device-buffer
 // output is no longer treated as memexport (host buffer) data. Clearing rounds
 // inward: a page straddling the edge holds both this range's data and
