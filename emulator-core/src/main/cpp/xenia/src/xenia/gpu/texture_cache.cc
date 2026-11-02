@@ -78,6 +78,18 @@ DEFINE_bool(
     "time on Android.",
     "GPU");
 
+DEFINE_bool(
+    texture_partial_reload, true,
+    "Watch the memory of each layer of each level of textures with several "
+    "layers or levels (and no packed mip tail) on its own, and reload only "
+    "the ones written since the last load. Need for Speed: Most Wanted "
+    "samples its reflection cube map between the 36 resolves that build its "
+    "faces and mips every frame, each of which had the whole cube reloaded. "
+    "Results are identical. Decided when a texture is created; whether the "
+    "loads skip the up-to-date subresources is read per load "
+    "(debug.xendroid.partial_reload on Android).",
+    "GPU");
+
 DEFINE_bool(tiled_shared_memory, true,
             "Enable tiled/sparse resources for efficient large address space "
             "support. Disable for graphics debugger compatibility.",
@@ -645,6 +657,45 @@ TextureCache::Texture::Texture(TextureCache& texture_cache,
   // Never try to upload data that doesn't exist.
   base_outdated_ = guest_layout().base.level_data_extent_bytes != 0;
   mips_outdated_ = guest_layout().mips_total_extent_bytes != 0;
+
+  // texture_partial_reload: a watch for each layer of each level.
+  const texture_util::TextureGuestLayout& layout = guest_layout();
+  if (cvars::texture_partial_reload &&
+      texture_cache.partial_reloads_supported_ && !key.scaled_resolve &&
+      (key.dimension == xenos::DataDimension::k2DOrStacked ||
+       key.dimension == xenos::DataDimension::kCube) &&
+      layout.packed_level > layout.max_level &&
+      (layout.max_level == 0 || key.mip_page != 0)) {
+    const uint32_t layers = layout.array_size;
+    const uint32_t count = (layout.max_level + 1) * layers;
+    if ((layers > 1 || layout.max_level > 0) && count <= 64) {
+      subresource_count_ = count;
+      subresource_layers_ = layers;
+      subresource_watch_handles_ =
+          std::make_unique<SharedMemory::WatchHandle[]>(count);
+      for (uint32_t i = 0; i < count; ++i) {
+        uint32_t start, length;
+        GetSubresourceRange(i, start, length);
+        if (length) {
+          outdated_subresources_ |= uint64_t(1) << i;
+        }
+      }
+    }
+  }
+}
+
+void TextureCache::Texture::GetSubresourceRange(uint32_t index,
+                                                uint32_t& start_out,
+                                                uint32_t& length_out) const {
+  const uint32_t level = index / subresource_layers_;
+  const uint32_t layer = index % subresource_layers_;
+  const texture_util::TextureGuestLayout& layout = guest_layout();
+  const texture_util::TextureGuestLayout::Level& level_layout =
+      level ? layout.mips[level] : layout.base;
+  start_out = (level ? (key_.mip_page << 12) + layout.mip_offsets_bytes[level]
+                     : key_.base_page << 12) +
+              layer * level_layout.array_slice_stride_bytes;
+  length_out = level_layout.array_slice_data_extent_bytes;
 }
 
 TextureCache::Texture::~Texture() {
@@ -653,6 +704,12 @@ TextureCache::Texture::~Texture() {
     // under the global lock, so check the handles under it too, or a stale
     // range would be unlinked twice, corrupting the watch free lists.
     auto global_lock = xe::global_critical_region::Acquire();
+    for (uint32_t i = 0; i < subresource_count_; ++i) {
+      if (subresource_watch_handles_[i]) {
+        texture_cache().shared_memory().UnwatchMemoryRange(
+            subresource_watch_handles_[i]);
+      }
+    }
     if (mips_watch_handle_) {
       texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
     }
@@ -681,9 +738,43 @@ TextureCache::Texture::~Texture() {
 bool TextureCache::Texture::MakeUpToDateAndWatch(
     const global_unique_lock_type& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
+  assert_true(global_lock.owns_lock());
+  if (subresource_count_) {
+    // What the load covered - not what became outdated during it.
+    const uint64_t loaded = loading_subresources_;
+    for (uint64_t bits = loaded; bits; bits &= bits - 1) {
+      uint32_t start, length;
+      GetSubresourceRange(xe::tzcnt(bits), start, length);
+      if (length && !shared_memory.IsRangeValid(
+                        start, xe::align(length, UINT32_C(16)))) {
+        return false;
+      }
+    }
+    for (uint64_t bits = loaded; bits; bits &= bits - 1) {
+      const uint32_t index = xe::tzcnt(bits);
+      uint32_t start, length;
+      GetSubresourceRange(index, start, length);
+      outdated_subresources_ &= ~(uint64_t(1) << index);
+      if (subresource_watch_handles_[index]) {
+        shared_memory.UnwatchMemoryRange(subresource_watch_handles_[index]);
+        subresource_watch_handles_[index] = nullptr;
+      }
+      if (length) {
+        subresource_watch_handles_[index] = shared_memory.WatchMemoryRange(
+            start, length, TextureCache::WatchCallback, this, nullptr,
+            2 + index);
+      }
+    }
+    loading_subresources_ = 0;
+    const uint64_t base_mask = subresource_layers_ >= 64
+                                   ? ~uint64_t(0)
+                                   : (uint64_t(1) << subresource_layers_) - 1;
+    base_outdated_ = (outdated_subresources_ & base_mask) != 0;
+    mips_outdated_ = (outdated_subresources_ & ~base_mask) != 0;
+    return true;
+  }
   const bool watch_base = base_outdated_;
   const bool watch_mips = mips_outdated_;
-  assert_true(global_lock.owns_lock());
   if (watch_base &&
       !shared_memory.IsRangeValid(
           key().base_page << 12, xe::align(GetGuestBaseSize(), UINT32_C(16)))) {
@@ -743,8 +834,20 @@ void TextureCache::Texture::MarkAsUsed() {
 }
 
 void TextureCache::Texture::WatchCallback(
-    [[maybe_unused]] const global_unique_lock_type& global_lock, bool is_mip) {
-  if (is_mip) {
+    [[maybe_unused]] const global_unique_lock_type& global_lock,
+    uint64_t argument) {
+  if (argument >= 2) {
+    const uint32_t index = uint32_t(argument - 2);
+    outdated_subresources_ |= uint64_t(1) << index;
+    subresource_watch_handles_[index] = nullptr;
+    if (index < subresource_layers_) {
+      base_outdated_ = true;
+    } else {
+      mips_outdated_ = true;
+    }
+    return;
+  }
+  if (argument != 0) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = true;
     mips_watch_handle_ = nullptr;
@@ -759,7 +862,7 @@ void TextureCache::WatchCallback(const global_unique_lock_type& global_lock,
                                  void* context, void* data, uint64_t argument,
                                  bool invalidated_by_gpu) {
   Texture& texture = *static_cast<Texture*>(context);
-  texture.WatchCallback(global_lock, argument != 0);
+  texture.WatchCallback(global_lock, argument);
   texture.texture_cache().texture_became_outdated_.store(
       true, std::memory_order_release);
 }
@@ -931,6 +1034,7 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
 
       auto base_outdated = current->base_outdated(global_lock);
       auto mips_outdated = current->mips_outdated(global_lock);
+      current->SnapshotOutdatedSubresources(global_lock);
 
       index_base_outdated |= static_cast<uint64_t>(base_outdated) << i;
       index_mips_outdated |= static_cast<uint64_t>(mips_outdated) << i;
@@ -970,19 +1074,10 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     // portion of its pages is invalidated, in this case we'll need the texture
     // from the shared memory to load the unscaled parts.
     // TODO(Triang3l): Load unscaled parts.
-    if (index_base_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.base_page << 12,
-              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
-        continue;
-      }
-    }
-    if (index_mips_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.mip_page << 12,
-              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
-        continue;
-      }
+    if (!RequestOutdatedTextureRanges(
+            texture, (index_base_outdated & (1ULL << i)) != 0,
+            (index_mips_outdated & (1ULL << i)) != 0)) {
+      continue;
     }
     if (texture_key.scaled_resolve) {
       // Make sure all the scaled resolve memory is resident and accessible from
@@ -1029,6 +1124,37 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     }
   }
 }
+bool TextureCache::RequestOutdatedTextureRanges(Texture& texture,
+                                                bool base_outdated,
+                                                bool mips_outdated) {
+  if (texture.has_subresource_watches()) {
+    for (uint64_t bits = texture.loading_subresources(); bits;
+         bits &= bits - 1) {
+      uint32_t start, length;
+      texture.GetSubresourceRange(xe::tzcnt(bits), start, length);
+      if (length && !shared_memory().RequestRange(
+                        start, xe::align(length, UINT32_C(16)))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  const TextureKey& texture_key = texture.key();
+  if (base_outdated &&
+      !shared_memory().RequestRange(
+          texture_key.base_page << 12,
+          xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
+    return false;
+  }
+  if (mips_outdated &&
+      !shared_memory().RequestRange(
+          texture_key.mip_page << 12,
+          xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
+    return false;
+  }
+  return true;
+}
+
 bool TextureCache::LoadTextureData(Texture& texture) {
   // Lockless pre-check: if texture appears up-to-date, skip the lock.
   // This is safe because worst case is a false positive (we acquire lock
@@ -1043,6 +1169,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
     auto global_lock = global_critical_region_.Acquire();
     base_outdated = texture.base_outdated(global_lock);
     mips_outdated = texture.mips_outdated(global_lock);
+    texture.SnapshotOutdatedSubresources(global_lock);
   }
   if (!base_outdated && !mips_outdated) {
     return true;
@@ -1064,19 +1191,8 @@ bool TextureCache::LoadTextureData(Texture& texture) {
   // its pages is invalidated, in this case we'll need the texture from the
   // shared memory to load the unscaled parts.
   // TODO(Triang3l): Load unscaled parts.
-  if (base_outdated) {
-    if (!shared_memory().RequestRange(
-            texture_key.base_page << 12,
-            xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
-      return false;
-    }
-  }
-  if (mips_outdated) {
-    if (!shared_memory().RequestRange(
-            texture_key.mip_page << 12,
-            xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
-      return false;
-    }
+  if (!RequestOutdatedTextureRanges(texture, base_outdated, mips_outdated)) {
+    return false;
   }
   if (texture_key.scaled_resolve) {
     // Make sure all the scaled resolve memory is resident and accessible from

@@ -32,6 +32,7 @@
 #include "xenia/ui/vulkan/vulkan_mem_alloc.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
+DECLARE_bool(texture_partial_reload);
 DECLARE_bool(tiled_shared_memory);
 DECLARE_bool(vulkan_resolve_draw_barriers_at_resolve);
 
@@ -2366,6 +2367,11 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryUpload(
   // The stores write the levels [level_first, image_level_end).
   const uint32_t image_level_end = load_levels_to_image ? level_last + 1 : 0;
   const bool load_through_buffer = !load_to_image && !load_levels_to_image;
+  // The levels in the image get only the layers written since the last load
+  // (texture_partial_reload).
+  const bool load_subresources_only = load_levels_to_image &&
+                                      cvars::texture_partial_reload &&
+                                      texture.has_subresource_watches();
 
   // Get the host layout and the buffer.
   uint32_t host_block_width = host_format.block_compressed ? block_width : 1;
@@ -2522,6 +2528,11 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryUpload(
     level_dest_sets.resize(size_t(image_level_end - level_first) * array_size);
     for (uint32_t level = level_first; level < image_level_end; ++level) {
       for (uint32_t layer = 0; layer < array_size; ++layer) {
+        // Up to date (texture_partial_reload) - not stored.
+        if (load_subresources_only &&
+            !texture.IsSubresourceLoading(level, layer)) {
+          continue;
+        }
         VkImageView level_view =
             vulkan_texture.GetLoadStorageLevelView(level, layer);
         VkDescriptorSet level_set =
@@ -2907,6 +2918,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryUpload(
         level_guest_layout.array_slice_stride_bytes *
         (texture_resolution_scale_x * texture_resolution_scale_y);
     for (uint32_t slice = 0; slice < array_size; ++slice) {
+      if (level_to_image && load_subresources_only &&
+          !texture.IsSubresourceLoading(level, slice)) {
+        load_constants.guest_offset += level_array_slice_stride_bytes_scaled;
+        load_constants.host_offset +=
+            uint32_t(level_host_layout.slice_size_bytes);
+        continue;
+      }
       if (slice != 0) {
         command_buffer.CmdVkPushConstants(
             level_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
@@ -3975,6 +3993,9 @@ bool VulkanTextureCache::Initialize() {
         "Adreno 750 or newer)");
   }
   load_to_image_storage_ = cvars::vulkan_texture_load_to_image;
+  // Single layers of single levels are loaded straight into the image.
+  SetPartialReloadsSupported(load_to_image_storage_ &&
+                             cvars::vulkan_texture_load_levels_to_image);
   load_descriptor_set_layouts[kLoadDescriptorSetIndexDestination] =
       command_processor_.GetSingleTransientDescriptorLayout(
           VulkanCommandProcessor::SingleTransientDescriptorLayout::

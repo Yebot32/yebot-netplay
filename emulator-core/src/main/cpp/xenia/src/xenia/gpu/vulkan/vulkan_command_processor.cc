@@ -91,6 +91,7 @@ DECLARE_bool(spirv_specialize_no_alpha);
 DECLARE_bool(vulkan_texture_load_coalesced);
 DECLARE_bool(vulkan_texture_load_to_image);
 DECLARE_bool(vulkan_texture_load_levels_to_image);
+DECLARE_bool(texture_partial_reload);
 DECLARE_bool(texture_integer_num_format);
 DECLARE_bool(vulkan_direct_host_resolve);
 DECLARE_bool(vulkan_async_skip_draws);
@@ -566,6 +567,9 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
   PollDebugPropertyOverride("debug.xendroid.texload_to_image",
                             "vulkan_texture_load_to_image",
                             cvars::vulkan_texture_load_to_image);
+  PollDebugPropertyOverride("debug.xendroid.partial_reload",
+                            "texture_partial_reload",
+                            cvars::texture_partial_reload);
   PollDebugPropertyOverride("debug.xendroid.texload_levels",
                             "vulkan_texture_load_levels_to_image",
                             cvars::vulkan_texture_load_levels_to_image);

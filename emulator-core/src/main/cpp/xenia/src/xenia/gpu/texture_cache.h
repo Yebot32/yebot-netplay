@@ -355,7 +355,32 @@ class TextureCache {
     bool mips_outdated_lockless() const { return mips_outdated_; }
     bool MakeUpToDateAndWatch(const global_unique_lock_type& global_lock);
 
-    void WatchCallback(const global_unique_lock_type& global_lock, bool is_mip);
+    // 0 - the base, 1 - the mips, 2 + index - a subresource.
+    void WatchCallback(const global_unique_lock_type& global_lock,
+                       uint64_t argument);
+
+    // texture_partial_reload: a texture with several layers or levels and no
+    // packed mip tail watches the memory of each layer of each level on its
+    // own (index level * layers + layer), so a write reloads only what it
+    // touched. A load covers the subresources outdated when it started.
+    bool has_subresource_watches() const { return subresource_count_ != 0; }
+    void SnapshotOutdatedSubresources(
+        const global_unique_lock_type& global_lock) {
+      loading_subresources_ = outdated_subresources_;
+    }
+    uint64_t loading_subresources() const { return loading_subresources_; }
+    // Whether the load in progress needs the layer of the level (always
+    // without subresource watches).
+    bool IsSubresourceLoading(uint32_t level, uint32_t layer) const {
+      if (!subresource_count_) {
+        return true;
+      }
+      const uint32_t index = level * subresource_layers_ + layer;
+      return index >= subresource_count_ ||
+             ((loading_subresources_ >> index) & 1) != 0;
+    }
+    void GetSubresourceRange(uint32_t index, uint32_t& start_out,
+                             uint32_t& length_out) const;
 
     // For LRU caching - updates the last usage frame and moves the texture to
     // the end of the usage queue. Must be called any time the texture is
@@ -408,6 +433,14 @@ class TextureCache {
     // Watch handles for the memory ranges.
     SharedMemory::WatchHandle base_watch_handle_ = nullptr;
     SharedMemory::WatchHandle mips_watch_handle_ = nullptr;
+    // Subresource watches (texture_partial_reload) instead of the two above:
+    // their count (0 without them), the layers per level, the outdated
+    // subresources, those the load in progress covers, and their handles.
+    uint32_t subresource_count_ = 0;
+    uint32_t subresource_layers_ = 0;
+    uint64_t outdated_subresources_ = 0;
+    uint64_t loading_subresources_ = 0;
+    std::unique_ptr<SharedMemory::WatchHandle[]> subresource_watch_handles_;
   };
 
   // Rules of data access in load shaders:
@@ -673,6 +706,16 @@ class TextureCache {
                                       uint8_t swizzled_signs);
   bool LoadTextureData(Texture& texture);
   void LoadTexturesData(Texture** textures, uint32_t n_textures);
+  // Requests the outdated memory of the texture: the base and the mips, or
+  // only the subresources the load covers (texture_partial_reload).
+  bool RequestOutdatedTextureRanges(Texture& texture, bool base_outdated,
+                                    bool mips_outdated);
+  // Whether the implementation loads single layers of single levels, so
+  // textures created from now on may watch them separately
+  // (texture_partial_reload).
+  void SetPartialReloadsSupported(bool supported) {
+    partial_reloads_supported_ = supported;
+  }
   // Writes the texture data (for base, mips or both - but not neither) from the
   // shared memory or the scaled resolve memory. The shared memory management is
   // done outside this function, the implementation just needs to load the data
@@ -780,6 +823,9 @@ class TextureCache {
   // so need to recheck if textures aren't outdated, disregarding whether fetch
   // constants have been changed.
   std::atomic<bool> texture_became_outdated_{false};
+
+  // SetPartialReloadsSupported.
+  bool partial_reloads_supported_ = false;
 
   std::array<TextureBinding, xenos::kTextureFetchConstantCount>
       texture_bindings_;
