@@ -1181,7 +1181,18 @@ void VulkanPipelineCache::EndSubmission() {
     // command buffer is replayed drop their draws for that submission
     // (during the storage preload at startup, or always with
     // vulkan_async_skip_draws - pop-in instead of a wait).
-    creation_request_cond_.notify_one();
+    // Every queued pipeline already woke a creation thread, and they check
+    // the queue before waiting: wake one again only for queued work - with
+    // nothing queued this woke a thread for nothing (a futex syscall on the
+    // command thread) at every submission.
+    bool creation_queued;
+    {
+      std::lock_guard<std::mutex> lock(creation_request_lock_);
+      creation_queued = !creation_queue_.empty();
+    }
+    if (creation_queued) {
+      creation_request_cond_.notify_one();
+    }
   } else {
     // Blocking: wait for all queued pipelines so every deferred pipeline bind
     // recorded in this submission resolves to a created handle - no draws are
