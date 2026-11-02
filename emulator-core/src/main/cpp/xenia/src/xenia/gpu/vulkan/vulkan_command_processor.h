@@ -973,6 +973,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
     // Fetch constant words 0 and 1 (format, pitch, tiling, endianness) and 2
     // (size) of the first draw sampling it.
     uint32_t dword_0, dword_1, dword_2;
+    // A 3D texture: its GPU copy is written even when it matches the guest's.
+    bool is_3d;
   };
   std::map<uint32_t, FrameDumpTexture> frame_dump_textures_;
   // debug.xendroid.gpu_reload, the last value acted upon.

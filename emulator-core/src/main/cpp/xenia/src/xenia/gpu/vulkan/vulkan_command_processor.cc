@@ -3475,9 +3475,15 @@ void VulkanCommandProcessor::PollFrameDump() {
             uint32_t(shared_memory_->IsRangeGpuWritten(base, length)),
             differing, range.second.dword_0, range.second.dword_1,
             range.second.dword_2);
+        if (range.second.is_3d) {
+          line += " 3d";
+        }
         if (differing) {
           line += fmt::format(" first +{:X}", first);
-          // Both copies of the first differing ones, to tell which is right.
+        }
+        // Both copies of the first differing ones, to tell which is right, and
+        // of the 3D ones (their slices are made by resolves to slices).
+        if (differing || range.second.is_3d) {
           if (differing_written < 48) {
             ++differing_written;
             for (int copy = 0; copy < 2; ++copy) {
@@ -3521,8 +3527,9 @@ void VulkanCommandProcessor::PollFrameDump() {
             uint32_t(shared_memory_->IsRangeGpuWritten(base, length)),
             differing);
         std::fwrite(line.data(), 1, line.size(), frame_dump_file_);
-        // Both copies of the first differing buffers, to tell which is right.
-        if (differing && buffers_written < 32) {
+        // Both copies of the first differing buffers, to tell which is right,
+        // and of small ones (a few vertices).
+        if ((differing || length <= 256) && buffers_written < 64) {
           ++buffers_written;
           for (int copy = 0; copy < 2; ++copy) {
             FILE* file = xe::filesystem::OpenFile(
@@ -3681,6 +3688,43 @@ void VulkanCommandProcessor::DumpFrameDraw(
     line += fmt::format(" vf{}:{:08X}:{:08X}:{}", binding.fetch_constant,
                         fetch.dword_0, fetch.dword_1, binding.stride_words);
     record_buffer(uint32_t(fetch.address) << 2, uint32_t(fetch.size) << 2);
+    // The words of a small buffer (a few vertices) as the guest memory holds
+    // them when the draw is issued.
+    if (fetch.size && fetch.size <= 64) {
+      const uint32_t* words = reinterpret_cast<const uint32_t*>(
+          memory_->TranslatePhysical(uint32_t(fetch.address) << 2));
+      line += fmt::format(" vd{}=", binding.fetch_constant);
+      for (uint32_t i = 0; i < fetch.size; ++i) {
+        line += fmt::format("{}{:08X}", i ? "," : "", words[i]);
+      }
+    }
+  }
+  // Clipping and the viewport transform.
+  line += fmt::format(
+      " clip {:08X} vte {:08X} vport {:g},{:g},{:g},{:g},{:g},{:g}",
+      regs.values[XE_GPU_REG_PA_CL_CLIP_CNTL],
+      regs.values[XE_GPU_REG_PA_CL_VTE_CNTL],
+      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE),
+      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
+      regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET));
+  // The float constants the vertex shader reads (c0...c255).
+  {
+    const Shader::ConstantRegisterMap& constants =
+        vertex_shader.constant_register_map();
+    for (uint32_t i = 0; i < 256; ++i) {
+      if (!(constants.float_bitmap[i >> 6] & (uint64_t(1) << (i & 63)))) {
+        continue;
+      }
+      float components[4];
+      std::memcpy(components,
+                  &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + i * 4],
+                  sizeof(components));
+      line += fmt::format(" vc{}={:g},{:g},{:g},{:g}", i, components[0],
+                          components[1], components[2], components[3]);
+    }
   }
   if (index_buffer_info && index_buffer_info->guest_base) {
     line += fmt::format(" ib:{:08X}:{}:{}:{}", index_buffer_info->guest_base,
@@ -3770,8 +3814,40 @@ void VulkanCommandProcessor::DumpFrameDraw(
         if (base && length && base + length <= (UINT64_C(1) << 29)) {
           FrameDumpTexture& recorded = frame_dump_textures_.try_emplace(
               base, FrameDumpTexture{0, fetch.dword_0, fetch.dword_1,
-                                     fetch.dword_2}).first->second;
+                                     fetch.dword_2, false}).first->second;
           recorded.length = std::max(recorded.length, uint32_t(length));
+        }
+      } else if (fetch.dimension == xenos::DataDimension::k3D &&
+                 format_info && format_info->bits_per_pixel) {
+        // The base level of a 3D texture, all its slices: 32x32x4 tiles when
+        // tiled.
+        uint32_t width_blocks =
+            xe::align(uint32_t(fetch.size_3d.width) + 1,
+                      format_info->block_width) /
+            format_info->block_width;
+        uint32_t height_blocks =
+            xe::align(uint32_t(fetch.size_3d.height) + 1,
+                      format_info->block_height) /
+            format_info->block_height;
+        uint32_t depth = uint32_t(fetch.size_3d.depth) + 1;
+        if (fetch.tiled) {
+          width_blocks = xe::align(width_blocks, UINT32_C(32));
+          height_blocks = xe::align(height_blocks, UINT32_C(32));
+          depth = xe::align(depth, UINT32_C(4));
+        } else {
+          width_blocks = xe::align(
+              width_blocks * format_info->bytes_per_block(), UINT32_C(256)) /
+              format_info->bytes_per_block();
+        }
+        const uint32_t base = fetch.base_address << 12;
+        const uint64_t length = uint64_t(width_blocks) * height_blocks *
+                                depth * format_info->bytes_per_block();
+        if (base && length && base + length <= (UINT64_C(1) << 29)) {
+          FrameDumpTexture& recorded = frame_dump_textures_.try_emplace(
+              base, FrameDumpTexture{0, fetch.dword_0, fetch.dword_1,
+                                     fetch.dword_2, true}).first->second;
+          recorded.length = std::max(recorded.length, uint32_t(length));
+          recorded.is_3d = true;
         }
       }
     }
