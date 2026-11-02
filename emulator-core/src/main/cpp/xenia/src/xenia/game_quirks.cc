@@ -66,6 +66,12 @@ static const Quirk kQuirks[] = {
     // (restarts, 2026-10-08).
     {0x45410961, "readback_resolve_uma_read_watch", true,
      "resolves copied into guest RAM only once the CPU reads them"},
+    // It samples its reflection cube map between the 36 resolves building its
+    // faces and mips every frame, and each reloaded the whole cube: GPU busy
+    // 43.5 -> 41.1 ms a frame at the first race's start line, the same image
+    // (2026-10-08).
+    {0x45410961, "texture_partial_reload", true,
+     "only the layers and levels written since the last load reloaded"},
     // Forza Horizon: both exact (the same image for every input); on the POCO
     // F7 (Adreno 825) together +3.0% fps, -3.7% GPU time (AB5, 2026-09-29).
     {0x4D5309C9, "spirv_texture_sign_branch", true,

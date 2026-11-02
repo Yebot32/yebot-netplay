@@ -79,13 +79,14 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    texture_partial_reload, true,
+    texture_partial_reload, false,
     "Watch the memory of each layer of each level of textures with several "
     "layers or levels (and no packed mip tail) on its own, and reload only "
     "the ones written since the last load. Need for Speed: Most Wanted "
     "samples its reflection cube map between the 36 resolves that build its "
     "faces and mips every frame, each of which had the whole cube reloaded. "
-    "Results are identical. Decided when a texture is created; whether the "
+    "Results are identical (on for that title; other titles untested). "
+    "Decided when a texture is created; whether the "
     "loads skip the up-to-date subresources is read per load "
     "(debug.xendroid.partial_reload on Android).",
     "GPU");
