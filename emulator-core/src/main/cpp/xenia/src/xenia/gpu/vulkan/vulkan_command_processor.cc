@@ -915,7 +915,7 @@ void VulkanCommandProcessor::PrepareForWait() {
   // Out of commands, or the guest's command stream waiting: export output read
   // back as its submission completes would otherwise wait for a submission
   // nothing makes, while the guest may be waiting for it to go on.
-  AwaitMemexportReadbacks();
+  AwaitMemexportReadbacks("idle or register wait");
   CommandProcessor::PrepareForWait();
 }
 
@@ -3480,6 +3480,14 @@ void VulkanCommandProcessor::PollFrameDump() {
       parse_range(rest + 1, skip_draws_keep_first_, skip_draws_keep_last_);
     }
     XELOGI("debug.xendroid.skip_draws: {}", skip_draws_value_);
+  }
+  char memexport_log_value[PROP_VALUE_MAX] = {};
+  __system_property_get("debug.xendroid.memexport_log", memexport_log_value);
+  if (memexport_log_value_ != memexport_log_value) {
+    memexport_log_value_ = memexport_log_value;
+    memexport_log_left_ = uint32_t(std::max(std::atoi(memexport_log_value), 0));
+    XELOGI("debug.xendroid.memexport_log: the next {} exports and awaits",
+           memexport_log_left_);
   }
   char value[PROP_VALUE_MAX] = {};
   __system_property_get("debug.xendroid.frame_dump", value);
@@ -7405,6 +7413,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             uint32_t(memexport_snapshot_regions_[i].dstOffset)});
       }
       pending_memexport_snapshot_used_ = uint32_t(snapshot_offset);
+      if (memexport_log_left_) {
+        --memexport_log_left_;
+        XELOGI(
+            "MemexportLog: export at draw {} of frame {}, submission {}, {} "
+            "bytes, {} pending",
+            frame_draw_index_ - 1, frame_current_, GetCurrentSubmission(),
+            uint32_t(snapshot_offset - snapshot_start),
+            pending_memexport_readbacks_.size());
+      }
       // A fence or coherency request the guest observes awaits the GPU first
       // (command_processor_memexport.inc), which reads these back.
       memexport_await_pending_ = true;
@@ -9195,6 +9212,15 @@ void VulkanCommandProcessor::CheckSubmissionCompletionAndDeviceLoss(
     const uint64_t t0 = FrameStatsNow();
     completion_timeline_.AwaitSubmissionAndUpdateCompleted(await_submission);
     const uint64_t t1 = FrameStatsNow();
+    if (memexport_await_reason_ && memexport_log_left_) {
+      --memexport_log_left_;
+      XELOGI(
+          "MemexportLog: await for {} at draw {} of frame {}: submission {} "
+          "(completed {} before), {} readbacks pending, {:.2f} ms",
+          memexport_await_reason_, frame_draw_index_, frame_current_,
+          await_submission, completed_before,
+          pending_memexport_readbacks_.size(), double(t1 - t0) * 1e-6);
+    }
     if (await_submission) {
       vk_frame_sync_stats_.awaits++;
       vk_frame_sync_stats_.await_ns += t1 - t0;

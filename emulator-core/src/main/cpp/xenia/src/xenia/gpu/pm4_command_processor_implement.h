@@ -828,7 +828,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_INTERRUPT(
   // The handler runs as if everything before this point in the command stream
   // is done, so export output it may read has to be in guest RAM first.
   if (cvars::memexport_await_fences) {
-    COMMAND_PROCESSOR::AwaitMemexportForFence();
+    COMMAND_PROCESSOR::AwaitMemexportForFence("interrupt");
   }
 
   for (int n = 0; n < 6; n++) {
@@ -991,7 +991,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     if (!matched) {
       // Export output read back as its submission completes may be what this
       // waits for - it arrives once the GPU is awaited.
-      if (is_memory && COMMAND_PROCESSOR::AwaitMemexportReadbacks()) {
+      if (is_memory &&
+          COMMAND_PROCESSOR::AwaitMemexportReadbacks("memory wait")) {
         continue;
       }
       if (!unmet_begin_ns) {
@@ -1278,7 +1279,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_SHD(
   // The guest treats this fence as "the GPU is done", so any export output it
   // is about to read has to be in guest RAM first.
   if (cvars::memexport_await_fences) {
-    COMMAND_PROCESSOR::AwaitMemexportForFence();
+    COMMAND_PROCESSOR::AwaitMemexportForFence("fence");
   }
 
   uint32_t data_value;

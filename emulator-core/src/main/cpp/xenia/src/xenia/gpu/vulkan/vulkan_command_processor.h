@@ -1020,6 +1020,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
   uint32_t skip_draws_last_ = 0;
   uint32_t skip_draws_keep_first_ = UINT32_MAX;
   uint32_t skip_draws_keep_last_ = 0;
+  // debug.xendroid.memexport_log=N: the next N deferred exports and awaits of
+  // their output, with where in the frame and how long (needs
+  // log_gpu_frame_time_breakdown for the awaits).
+  std::string memexport_log_value_;
+  uint32_t memexport_log_left_ = 0;
 
   struct SubmissionWork {
     uint32_t draws = 0;

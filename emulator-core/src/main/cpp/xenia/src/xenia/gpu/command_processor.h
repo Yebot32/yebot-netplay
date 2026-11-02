@@ -296,9 +296,9 @@ class CommandProcessor {
   // Shadowed by backends that route memory export through guest RAM (see
   // command_processor_memexport.inc). No-ops where export output never reaches
   // the CPU, so there is nothing to wait for.
-  void AwaitMemexportForFence() {}
+  void AwaitMemexportForFence(const char* reason) {}
   void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {}
-  bool AwaitMemexportReadbacks() { return false; }
+  bool AwaitMemexportReadbacks(const char* reason) { return false; }
 
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,
