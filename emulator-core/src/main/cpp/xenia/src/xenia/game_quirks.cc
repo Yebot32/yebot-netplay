@@ -299,6 +299,26 @@ static const Quirk kQuirks[] = {
      "no SM3 zero-multiply or 21-bit rounding emulation in pixel shaders"},
     {0x4541098E, "spirv_vs_relaxed_math", int64_t(1),
      "no SM3 zero-multiply emulation in vertex shaders"},
+    // It copies memory with the GPU while loading - one vertex shader
+    // (D6A6A2ABFA7AF8A1) fetching 32 bytes a vertex and exporting them, about
+    // 2000-2500 draws - and its CPU builds index buffers from the copies.
+    // Without the export output in guest memory it read what was there
+    // before, and the indices of a breakable object's mesh came out off by
+    // 435-3036 vertices: read from the tangent data after its positions, its
+    // triangles drew blades across the screen when shots hit inside the ship
+    // (5 of 6 sessions). Read back right after each exporting draw, no blades
+    // in 2 of 2 sessions, but 4.1-5.6% of the frames over 50 ms (1.7-2.1%
+    // without); read back as their submissions complete, no blades and 1.4%
+    // (frame dumps: the mesh's indices 0-776, positions within 2.03,
+    // 2026-10-07).
+    {0x4541098E, "memexport_enable", true,
+     "its CPU reads what the GPU copies with memory export"},
+    {0x4541098E, "memexport_await_fences", true,
+     "the copies are in guest memory when the GPU signals"},
+    {0x4541098E, "memexport_readback_deferred", true,
+     "the copies read back as submissions complete, not per draw"},
+    {0x4541098E, "readback_resolve", "uma",
+     "host-mapped buffer the copies are read back from"},
 };
 
 // Same path/priority as a per-game config file.
