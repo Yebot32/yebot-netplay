@@ -2122,7 +2122,12 @@ bool VulkanTextureCache::ShouldPromoteToResolveDest(
     if (!key.tiled || key.packed_mips || key.mip_max_level) {
       continue;
     }
-    if (key.dimension != xenos::DataDimension::k2DOrStacked || d.is_array) {
+    // One layer only: a stacked texture takes the rows of a plain 2D resolve
+    // as its layers in memory - Gears of War 3 resolves its color grading
+    // volume (16 layers of 16x16) as one 16x512 strip - but the store into the
+    // image, through a 2D view, reaches its first layer alone.
+    if (key.dimension != xenos::DataDimension::k2DOrStacked ||
+        key.GetDepthOrArraySize() > 1 || d.is_array) {
       continue;
     }
     if (key.format != GetBaseFormat(xenos::TextureFormat(d.format))) {
@@ -2244,7 +2249,10 @@ bool VulkanTextureCache::IsResolveDestEligible(const Texture& texture) const {
     if (!key.tiled || key.packed_mips || key.mip_max_level) {
       continue;
     }
-    if (key.dimension != xenos::DataDimension::k2DOrStacked || d.is_array) {
+    // One layer only, like the promotion: the resolves cover the memory of
+    // every layer of a stacked texture, but its image got the first layer.
+    if (key.dimension != xenos::DataDimension::k2DOrStacked ||
+        key.GetDepthOrArraySize() > 1 || d.is_array) {
       continue;
     }
     if (key.format != GetBaseFormat(xenos::TextureFormat(d.format))) {
