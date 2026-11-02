@@ -991,10 +991,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
-      // Export output read back as its submission completes may be what this
-      // waits for - it arrives once the GPU is awaited.
-      if (is_memory &&
-          COMMAND_PROCESSOR::AwaitMemexportReadbacks("memory wait")) {
+      // Export output read back once its submission completes may be what
+      // this waits for - in memory, or in a register the guest CPU writes
+      // after reading it (short register waits spin without PrepareForWait).
+      // It arrives once the GPU is awaited.
+      if (COMMAND_PROCESSOR::AwaitMemexportReadbacks(is_memory
+                                                         ? "memory wait"
+                                                         : "register wait")) {
         continue;
       }
       if (!unmet_begin_ns) {
