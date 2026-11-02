@@ -26,7 +26,10 @@ DEFINE_bool(
     "GPU, resolves not read back yet). Without it, the whole page is "
     "reuploaded from guest memory and the GPU's data is lost - Crysis 3 drew "
     "a character with another texture's leftovers that way. Needs a "
-    "host-mapped GPU memory copy.",
+    "host-mapped GPU memory copy. Not for every title: Need for Speed: Most "
+    "Wanted froze with it where its prologue gives way to the first 3D scene, "
+    "its main thread spinning (3 of 3 launches; 0 of 2 without it, "
+    "2026-10-07).",
     "GPU");
 DEFINE_bool(
     shared_memory_page_history, false,
