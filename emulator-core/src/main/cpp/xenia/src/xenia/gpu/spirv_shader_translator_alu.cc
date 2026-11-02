@@ -21,7 +21,6 @@
 #include "xenia/gpu/spirv_compatibility.h"
 
 DECLARE_bool(spirv_multiply_zero_test_on_bits);
-DECLARE_bool(spirv_fast_precision_rounding);
 
 // Measured on Halo 3's main menu (Tab S9, stock Adreno driver): the
 // min(|a|, |b|) == 0 test costs about half the GPU frame time, because the
