@@ -58,14 +58,6 @@ static const Quirk kQuirks[] = {
      "4x depth-only draws into the 1x surface of their samples"},
     {0x45410961, "vulkan_samples_as_pixels_simple_ps", true,
      "4x draws with simple pixel shaders into the 1x surface"},
-    // Its 122 resolves a frame were copied into guest RAM after each next one
-    // (readback_resolve uma), 77 MB a frame its CPU never reads. Copied only
-    // once read (those under 256 KB still always, or the exposure goes white):
-    // at the first race's start line 18.6 -> 21.2 fps, a minute later 19.1 ->
-    // 23.2, the command thread 53.5 -> 47.0 ms a frame, the same image
-    // (restarts, 2026-10-08).
-    {0x45410961, "readback_resolve_uma_read_watch", true,
-     "resolves copied into guest RAM only once the CPU reads them"},
     // It samples its reflection cube map between the 36 resolves building its
     // faces and mips every frame, and each reloaded the whole cube: GPU busy
     // 43.5 -> 41.1 ms a frame at the first race's start line, the same image

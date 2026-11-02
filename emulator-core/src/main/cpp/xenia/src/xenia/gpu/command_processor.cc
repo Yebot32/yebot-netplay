@@ -162,15 +162,19 @@ DEFINE_string(
     "GPU");
 
 DEFINE_bool(
-    readback_resolve_uma_read_watch, false,
+    readback_resolve_uma_read_watch, true,
     "With readback_resolve = uma: after the first resolve into a range, copy "
     "its later resolves into guest RAM only once the CPU has read the range "
     "(the read watch of the fast mode), instead of after every resolve. The "
     "first read of a range then sees the copy of an earlier resolve. A CPU "
     "write into part of a page holding resolve output that was not copied "
-    "puts older data back in the rest of the page. Read per resolve "
-    "(debug.xendroid.uma_read_watch on Android).",
+    "puts older data back in the rest of the page. Need for Speed: Most "
+    "Wanted resolves 122 times a frame, 77 MB its CPU never reads: at its "
+    "first race's start line 18.6 -> 21.2 fps, a minute later 19.1 -> 23.2. "
+    "On for every title since 2026-10-08 (others not measured). Read per "
+    "resolve (debug.xendroid.uma_read_watch on Android).",
     "GPU");
+UPDATE_from_bool(readback_resolve_uma_read_watch, 2026, 10, 8, 23, false);
 
 DEFINE_int32(
     readback_resolve_uma_read_watch_min_kb, 256,
