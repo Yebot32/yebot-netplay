@@ -6184,15 +6184,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (memexport_used_pixel) {
     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
   }
-  if (frame_dump_file_) {
+  if (frame_dump_file_ && !issue_draw_memexport_retry_) {
     DumpFrameDraw(*vertex_shader, pixel_shader, prim_type, index_count,
                   index_buffer_info);
   }
-  const uint32_t draw_index = frame_draw_index_++;
-  if (draw_index >= skip_draws_first_ && draw_index <= skip_draws_last_ &&
-      (draw_index < skip_draws_keep_first_ ||
-       draw_index > skip_draws_keep_last_)) {
-    return true;
+  if (!issue_draw_memexport_retry_) {
+    const uint32_t draw_index = frame_draw_index_++;
+    if (draw_index >= skip_draws_first_ && draw_index <= skip_draws_last_ &&
+        (draw_index < skip_draws_keep_first_ ||
+         draw_index > skip_draws_keep_last_)) {
+      return true;
+    }
   }
 
   // A pixel shader that may kill pixels leaves covered pixels unwritten, and
@@ -6665,6 +6667,38 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
            vertex_shader->ucode_data_hash(),
            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
     return false;
+  }
+
+  // A draw exporting memory writes data later draws and the CPU use, not only
+  // pixels. Recorded while its pipeline is still being created (or its shaders
+  // translated), it would be dropped at replay and its output never written -
+  // Crysis 3 generates index buffers that way while loading and when objects
+  // break, and a dropped one keeps another mesh's indices (long spikes across
+  // the screen). Wait for the creation and issue it again, once.
+  if (!memexport_ranges_.empty() && !issue_draw_memexport_retry_ &&
+      (pipeline->pipeline.load(std::memory_order_acquire) == VK_NULL_HANDLE ||
+       !stage_bindings_ready[0] ||
+       (pixel_shader && !stage_bindings_ready[1]))) {
+    pipeline_cache_->AwaitPipelineCompletion();
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+      XELOGI(
+          "IssueDraw: waited for the pipeline of a memory-exporting draw "
+          "(VS {:016X}, PS {:016X}) instead of dropping it",
+          vertex_shader->ucode_data_hash(),
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+    }
+    // From the state the guest set: vulkan_depth_4x_as_1x may have rewritten
+    // the surface for this draw already, and the draw would then neither see
+    // a 4x surface nor scale itself to the samples.
+    register_file_->values[XE_GPU_REG_RB_SURFACE_INFO] =
+        surface_info_restore.surface_info;
+    render_target_cache_->SetDrawSamplesAsPixels(false);
+    issue_draw_memexport_retry_ = true;
+    const bool issued = IssueDraw(prim_type, index_count, index_buffer_info,
+                                  major_mode_explicit);
+    issue_draw_memexport_retry_ = false;
+    return issued;
   }
 
   if (drop_until_ready) {

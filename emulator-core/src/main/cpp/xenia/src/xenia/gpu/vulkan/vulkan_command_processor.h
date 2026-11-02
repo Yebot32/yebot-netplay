@@ -531,6 +531,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info,
                  bool major_mode_explicit) override;
+  // Set while IssueDraw issues a memory-exporting draw again after waiting for
+  // its pipeline (it was already numbered and dumped the first time).
+  bool issue_draw_memexport_retry_ = false;
   bool IssueCopy() override;
   // vulkan_depth_4x_as_1x: the guest's 4x MSAA surface info rewritten for the
   // current draw (IssueDraw restores it) to the 1x surface of the samples, for
