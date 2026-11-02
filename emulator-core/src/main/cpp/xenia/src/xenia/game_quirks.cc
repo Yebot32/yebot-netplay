@@ -48,6 +48,16 @@ static const Quirk kQuirks[] = {
      "CPU consumes memexport output before continuing the command stream"},
     {0x45410961, "readback_resolve", "uma",
      "host-mapped fallback for memexport when guest RAM import is unavailable"},
+    // It moves depth surfaces between 4x and 1x MSAA like Forza Horizon's
+    // shadow atlas (1040x2528 at 13 tiles of pitch, among others): ~105
+    // transfers and ~13400 tiles a frame. Into the 1x surfaces of their
+    // samples, ~6000 tiles: +7% fps cool (11.5 -> 12.3, GPU 67.9 -> 64.8 ms a
+    // frame, two pairs of arms switched in one session) and +8% hot, the same
+    // image on Connors Bridge Road (2026-10-07).
+    {0x45410961, "vulkan_depth_4x_as_1x", true,
+     "4x depth-only draws into the 1x surface of their samples"},
+    {0x45410961, "vulkan_samples_as_pixels_simple_ps", true,
+     "4x draws with simple pixel shaders into the 1x surface"},
     // Forza Horizon: both exact (the same image for every input); on the POCO
     // F7 (Adreno 825) together +3.0% fps, -3.7% GPU time (AB5, 2026-09-29).
     {0x4D5309C9, "spirv_texture_sign_branch", true,
