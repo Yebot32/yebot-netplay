@@ -709,8 +709,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
   bool CanEndSubmissionImmediately() const;
   bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionCompletionAndDeviceLoss(GetCurrentSubmission());
-    return !submission_open_ &&
-           GetCompletedSubmission() + 1u >= GetCurrentSubmission();
+    const bool drained = !submission_open_ &&
+                         GetCompletedSubmission() + 1u >= GetCurrentSubmission();
+    if (drained) {
+      drained_submission_ = GetCurrentSubmission();
+    }
+    return drained;
   }
 
   void ClearTransientDescriptorPools();
@@ -1057,6 +1061,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // Draws recorded into the currently open submission, for
   // vulkan_mid_frame_submission_draws.
   uint32_t draws_since_submission_ = 0;
+  // The first submission after the GPU was last awaited until it had nothing
+  // left to do (vulkan_drained_submission_draws).
+  uint64_t drained_submission_ = 0;
   VkBuffer frame_timestamp_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory frame_timestamp_buffer_memory_ = VK_NULL_HANDLE;
   VkDeviceSize frame_timestamp_buffer_size_ = 0;
