@@ -52,13 +52,30 @@ void AwaitMemexportForFence() {
 
 // Same, for the guest asking the GPU to flush a range it is about to read
 // (COHER_BASE_HOST/COHER_SIZE_HOST). Gated on the range actually holding export
-// output, unlike the fence path which cannot know what the fence refers to.
+// output (or on output the backend reads back being pending, wherever it went),
+// unlike the fence path which cannot know what the fence refers to.
 void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {
-  if (!memexport_await_pending_ || !IsMemexportRange(base_bytes, size_bytes)) {
+  if (!memexport_await_pending_ ||
+      (!memexport_readbacks_pending_ &&
+       !IsMemexportRange(base_bytes, size_bytes))) {
     return;
   }
   memexport_await_pending_ = false;
   AwaitAllQueueOperationsCompletion();
+}
+
+// Export output the backend reads back as its submission completes
+// (memexport_readbacks_pending_), for the guest's command stream waiting on
+// memory (WAIT_REG_MEM) and the command processor running out of commands:
+// nothing else would submit and check that submission then, while the guest
+// may be waiting for the output to go on. Returns whether the output is there
+// now (not with the device lost, which leaves it pending).
+bool AwaitMemexportReadbacks() {
+  if (!memexport_readbacks_pending_) {
+    return false;
+  }
+  memexport_await_pending_ = false;
+  return AwaitAllQueueOperationsCompletion();
 }
 
 // Clears memexport marks for a range a resolve just wrote, so its device-buffer
@@ -126,6 +143,7 @@ void ResetMemexportPages() {
   memexport_written_pages_.fill(0);
   any_memexport_pages_written_ = false;
   memexport_await_pending_ = false;
+  memexport_readbacks_pending_ = false;
   memexport_written_page_min_ = kMemexportPageCount;
   memexport_written_page_max_ = 0;
 }
@@ -138,6 +156,9 @@ std::array<uint64_t, kMemexportPageCount / 64> memexport_written_pages_{};
 bool any_memexport_pages_written_ = false;
 // Export output has been recorded but not yet awaited for the guest to read.
 bool memexport_await_pending_ = false;
+// Export output the backend copies to guest memory as its submission completes
+// (Vulkan's memexport_readback_deferred) is still pending, wherever it went.
+bool memexport_readbacks_pending_ = false;
 // Inclusive min/max written page, so IsMemexportRange rejects a range outside
 // the memexport region in O(1). Empty (min > max) until the first memexport.
 uint32_t memexport_written_page_min_ = kMemexportPageCount;

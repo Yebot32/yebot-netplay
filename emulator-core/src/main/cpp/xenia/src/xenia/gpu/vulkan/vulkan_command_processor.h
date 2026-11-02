@@ -186,6 +186,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   void RestoreEdramSnapshot(const void* snapshot) override;
 
+  void PrepareForWait() override;
   void PollCompletedSubmission() override;
 
   ui::vulkan::VulkanDevice* GetVulkanDevice() const {
@@ -1735,6 +1736,32 @@ class VulkanCommandProcessor final : public CommandProcessor {
   uint32_t memexport_snapshot_size_ = 0;
   std::vector<VkBufferCopy> memexport_snapshot_regions_;
   std::vector<uint8_t> memexport_readback_after_;
+  // memexport_readback_deferred: the exports not read back yet, in draw order,
+  // with their submission and where their snapshot is in the snapshot buffer
+  // (filled from 0 by the exports since it was last empty).
+  struct PendingMemexportReadback {
+    uint64_t submission;
+    uint32_t address;
+    uint32_t size;
+    uint32_t snapshot_offset;
+  };
+  std::deque<PendingMemexportReadback> pending_memexport_readbacks_;
+  uint32_t pending_memexport_snapshot_used_ = 0;
+  // The open submission has such exports: it ends with a barrier making the
+  // shader writes visible to the host.
+  bool memexport_readbacks_in_submission_ = false;
+  // Stores the changes of the pending exports whose submission has completed
+  // in guest memory - as submissions complete, and so by the time the guest
+  // can see the GPU as done (while any is pending, its fences, interrupts,
+  // coherency requests and waits on memory, and the command processor running
+  // out of commands, await the GPU - command_processor_memexport.inc).
+  void ApplyCompletedMemexportReadbacks(uint64_t completed_submission);
+  // Byte-wise: the bytes of a range that differ between the snapshot taken
+  // before an export and the GPU's copy after it, to guest memory. False if
+  // the GPU's copy could not be read.
+  bool StoreMemexportChanges(uint32_t address, uint32_t size,
+                             const uint8_t* before);
+
   // Backend-agnostic resolve-to-guest-RAM copy decisions and read-watch
   // consumption tracking, shared with the D3D12 backend.
 #include "../command_processor_resolve_readwatch.inc"

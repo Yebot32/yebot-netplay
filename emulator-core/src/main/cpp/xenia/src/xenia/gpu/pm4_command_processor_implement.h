@@ -989,6 +989,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
+      // Export output read back as its submission completes may be what this
+      // waits for - it arrives once the GPU is awaited.
+      if (is_memory && COMMAND_PROCESSOR::AwaitMemexportReadbacks()) {
+        continue;
+      }
       if (!unmet_begin_ns) {
         unmet_begin_ns = COMMAND_PROCESSOR::FrameWaitBegin();
       }
