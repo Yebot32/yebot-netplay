@@ -319,6 +319,14 @@ static const Quirk kQuirks[] = {
      "the copies read back as submissions complete, not per draw"},
     {0x4541098E, "readback_resolve", "uma",
      "host-mapped buffer the copies are read back from"},
+    // Presented with the mailbox mode, after minutes of play SurfaceFlinger
+    // took its frames at ever longer intervals (216 -> 400 ms), then none for
+    // 112 s while it kept presenting ~31 a second: the image froze until the
+    // swapchain was recreated (turning frame generation on, which presents
+    // with FIFO). With FIFO, no such stall in ~33 minutes and the same frame
+    // times (POCO F7, HyperOS, 2026-10-07).
+    {0x4541098E, "vulkan_allow_present_mode_mailbox", false,
+     "presentation stalls with the mailbox mode after minutes"},
 };
 
 // Same path/priority as a per-game config file.
