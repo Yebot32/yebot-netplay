@@ -146,8 +146,17 @@ class SharedMemory {
   // written_to_buffer false means the GPU wrote guest RAM directly (memexport
   // routed to the host-imported buffer), leaving the shared memory buffer stale
   // for this range rather than up to date.
+  // read_back: a memory export whose output the backend reads back into guest
+  // memory itself (only the bytes the export changed) - the rest of the bytes
+  // of its pages are the CPU's, and the GPU buffer's copy of them may be older
+  // than guest memory (an upload or the export recorded but not executed yet),
+  // so shared_memory_preserve_gpu_writes doesn't copy those pages over guest
+  // memory. Marked with the GPU write itself, so a guest write faulting in
+  // between can't see the pages as preserved. Another GPU write of the pages
+  // makes them preserved again, and pages that one (a resolve) left valid only
+  // in the GPU's copy stay preserved under an export.
   void RangeWrittenByGpu(uint32_t start, uint32_t length,
-                         bool written_to_buffer = true);
+                         bool written_to_buffer = true, bool read_back = false);
 
  protected:
   SharedMemory(Memory& memory);
@@ -189,7 +198,8 @@ class SharedMemory {
                                                 uint32_t length_allocations);
 
   // Mark the memory range as updated and protect it.
-  void MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu);
+  void MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu,
+                      bool read_back = false);
 
   // Whether any page in the ranges lost validity since the current GPU
   // submission opened. Pages that were never invalidated while the submission
@@ -293,6 +303,8 @@ class SharedMemory {
   // Pages invalidated since the current GPU submission opened - cleared by
   // OnGpuSubmissionOpened.
   uint64_t* system_page_flags_invalidated_in_submission_ = nullptr;
+  // Pages of exports read back (RangeWrittenByGpu read_back).
+  uint64_t* system_page_flags_preserve_exempt_ = nullptr;
 
   // Set when GPU-written flags change, so an unchanged frame skips the copy.
   bool gpu_written_data_dirty_ = false;

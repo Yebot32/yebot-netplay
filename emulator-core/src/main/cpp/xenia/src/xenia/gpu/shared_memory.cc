@@ -26,10 +26,11 @@ DEFINE_bool(
     "GPU, resolves not read back yet). Without it, the whole page is "
     "reuploaded from guest memory and the GPU's data is lost - Crysis 3 drew "
     "a character with another texture's leftovers that way. Needs a "
-    "host-mapped GPU memory copy. Not for every title: Need for Speed: Most "
-    "Wanted froze with it where its prologue gives way to the first 3D scene, "
-    "its main thread spinning (3 of 3 launches; 0 of 2 without it, "
-    "2026-10-07).",
+    "host-mapped GPU memory copy. The pages of memory exports read back are "
+    "not copied (their readback brings the bytes the export changed): Need "
+    "for Speed: Most Wanted froze with them copied where its prologue gives "
+    "way to the first 3D scene (3 of 3 launches, 2026-10-07; 0 of 4 with them "
+    "left out, 2026-10-11).",
     "GPU");
 DEFINE_bool(
     shared_memory_page_history, false,
@@ -53,10 +54,10 @@ bool SharedMemory::InitializeCommon() {
       ((kBufferSize >> page_size_log2_) + 63) / 64;
   num_system_page_flags_ = static_cast<uint32_t>(num_system_page_flags_entries);
 
-  // Three flag arrays (valid, valid_and_gpu_written,
-  // invalidated_in_submission), 8 bytes per 64-page entry.
+  // Four flag arrays (valid, valid_and_gpu_written,
+  // invalidated_in_submission, preserve_exempt), 8 bytes per 64-page entry.
   uint64_t* system_page_flags_base = (uint64_t*)memory::AllocFixed(
-      nullptr, num_system_page_flags_ * 3 * sizeof(uint64_t),
+      nullptr, num_system_page_flags_ * 4 * sizeof(uint64_t),
       memory::AllocationType::kReserveCommit, memory::PageAccess::kReadWrite);
 
   if (!system_page_flags_base) {
@@ -69,8 +70,10 @@ bool SharedMemory::InitializeCommon() {
       system_page_flags_base + num_system_page_flags_;
   system_page_flags_invalidated_in_submission_ =
       system_page_flags_base + 2 * num_system_page_flags_;
+  system_page_flags_preserve_exempt_ =
+      system_page_flags_base + 3 * num_system_page_flags_;
 
-  memset(system_page_flags_base, 0, 3 * 8 * num_system_page_flags_entries);
+  memset(system_page_flags_base, 0, 4 * 8 * num_system_page_flags_entries);
 
   if (cvars::shared_memory_page_history) {
     page_history_.resize(kBufferSize >> page_size_log2_);
@@ -139,6 +142,7 @@ void SharedMemory::ShutdownCommon() {
 
   system_page_flags_valid_and_gpu_written_ = nullptr;
   system_page_flags_invalidated_in_submission_ = nullptr;
+  system_page_flags_preserve_exempt_ = nullptr;
   num_system_page_flags_ = 0;
 }
 
@@ -397,7 +401,7 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
 }
 
 void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length,
-                                     bool written_to_buffer) {
+                                     bool written_to_buffer, bool read_back) {
   if (length == 0 || start >= kBufferSize) {
     return;
   }
@@ -415,7 +419,7 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length,
   // written_to_buffer also marks it GPU-authoritative, which must not happen
   // when the write went to guest RAM instead - that would keep the buffer's
   // stale copy across cache clears.
-  MakeRangeValid(start, length, written_to_buffer);
+  MakeRangeValid(start, length, written_to_buffer, read_back);
 }
 
 bool SharedMemory::AllocateSparseHostGpuMemoryRange(
@@ -448,7 +452,7 @@ void SharedMemory::NoteGuestCopy(uint32_t start, uint32_t length,
 }
 
 void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
-                                  bool written_by_gpu) {
+                                  bool written_by_gpu, bool read_back) {
   if (length == 0 || start >= kBufferSize) {
     return;
   }
@@ -473,6 +477,17 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
       // SystemPageFlagsBlock& block = system_page_flags_[i];
       system_page_flags_valid_[i] |= valid_bits;
       if (written_by_gpu) {
+        // In the same critical region as the GPU write, so a guest write
+        // faulting in can't see the pages of an export read back as preserved.
+        // A page that a GPU write not read back (a resolve) left only in the
+        // GPU's copy stays preserved under the export.
+        if (read_back) {
+          system_page_flags_preserve_exempt_[i] |=
+              valid_bits & ~(system_page_flags_valid_and_gpu_written_[i] &
+                             ~system_page_flags_preserve_exempt_[i]);
+        } else {
+          system_page_flags_preserve_exempt_[i] &= ~valid_bits;
+        }
         system_page_flags_valid_and_gpu_written_[i] |= valid_bits;
         // Mark the touched chunk dirty so the next copy picks it up.
         gpu_written_data_dirty_ = true;
@@ -803,7 +818,9 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     // memory) - only the parts of its pages outside it, around it.
     const uint32_t written_end = physical_address_last + 1;
     for (uint32_t i = block_first; i <= block_last; ++i) {
-      uint64_t gpu_written_bits = system_page_flags_valid_and_gpu_written_[i];
+      // Not the pages of exports read back into guest memory.
+      uint64_t gpu_written_bits = system_page_flags_valid_and_gpu_written_[i] &
+                                  ~system_page_flags_preserve_exempt_[i];
       if (i == block_first) {
         gpu_written_bits &= ~((uint64_t(1) << (page_first & 63)) - 1);
       }

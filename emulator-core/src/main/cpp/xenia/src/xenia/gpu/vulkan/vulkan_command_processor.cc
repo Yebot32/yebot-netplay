@@ -7887,9 +7887,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Invalidate textures in memexported memory and watch for changes.
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+    // read_back: the bytes it changes reach guest memory by the readback -
+    // the rest of the range is the CPU's (Need for Speed: Most Wanted's job
+    // pool shares a 400 KB export range, of which the draw changes 1 byte).
     shared_memory_->RangeWrittenByGpu(memexport_range.base_address_dwords << 2,
                                       memexport_range.size_bytes,
-                                      !route_to_host);
+                                      !route_to_host, memexport_readback);
   }
   if (!memexport_ranges_.empty() &&
       frame_current_ < uint64_t(std::max(cvars::resolve_log_frames, 0))) {
