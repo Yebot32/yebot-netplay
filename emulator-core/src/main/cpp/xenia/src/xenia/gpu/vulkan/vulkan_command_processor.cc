@@ -90,6 +90,7 @@ DECLARE_bool(vulkan_resolve_clear_in_guest_pass);
 DECLARE_bool(spirv_specialize_no_alpha);
 DECLARE_bool(vulkan_texture_load_coalesced);
 DECLARE_bool(vulkan_texture_load_to_image);
+DECLARE_bool(vulkan_texture_load_levels_to_image);
 DECLARE_bool(texture_integer_num_format);
 DECLARE_bool(vulkan_direct_host_resolve);
 DECLARE_bool(vulkan_async_skip_draws);
@@ -565,6 +566,9 @@ void PollDebugPropertyOverrides(CommandProcessor& command_processor) {
   PollDebugPropertyOverride("debug.xendroid.texload_to_image",
                             "vulkan_texture_load_to_image",
                             cvars::vulkan_texture_load_to_image);
+  PollDebugPropertyOverride("debug.xendroid.texload_levels",
+                            "vulkan_texture_load_levels_to_image",
+                            cvars::vulkan_texture_load_levels_to_image);
   // Read per resolve (0: dump the render targets to the EDRAM buffer and copy
   // from there).
   PollDebugPropertyOverride("debug.xendroid.direct_host_resolve",

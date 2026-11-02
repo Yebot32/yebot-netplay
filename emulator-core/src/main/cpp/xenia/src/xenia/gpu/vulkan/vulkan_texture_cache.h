@@ -441,6 +441,12 @@ class VulkanTextureCache final : public TextureCache {
     // R32_UINT alias of the base level for texture loads straight into the
     // image (vulkan_texture_load_to_image); may be resolve_dest_storage_view_.
     VkImageView load_storage_view_ = VK_NULL_HANDLE;
+    // Its uint format, for the views of the other levels and layers below.
+    VkFormat load_storage_format_ = VK_FORMAT_UNDEFINED;
+    // Single-level, single-layer uint views of the levels and layers past the
+    // base layer of level 0, which a load of a texture with mips or layers
+    // stores through ([level * layers + layer]), created on first use.
+    std::vector<VkImageView> load_storage_level_views_;
     uint64_t resolve_dest_written_frame_ = 0;
     bool pending_storage_write_ = false;
     // Whether the image still holds what the guest memory of the base level
@@ -474,7 +480,13 @@ class VulkanTextureCache final : public TextureCache {
       resolve_dest_storage_view_ = view;
     }
     VkImageView load_storage_view() const { return load_storage_view_; }
-    void SetLoadStorageView(VkImageView view) { load_storage_view_ = view; }
+    void SetLoadStorageView(VkImageView view, VkFormat format) {
+      load_storage_view_ = view;
+      load_storage_format_ = format;
+    }
+    // The uint storage view of one level and layer (load_storage_view() for
+    // the base layer of level 0), or null if it can't be created.
+    VkImageView GetLoadStorageLevelView(uint32_t level, uint32_t layer);
     uint64_t resolve_dest_written_frame() const {
       return resolve_dest_written_frame_;
     }
