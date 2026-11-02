@@ -370,6 +370,15 @@ static const Quirk kQuirks[] = {
      "integer texture fetches return integers"},
     {0x53510823, "vulkan_depth_clamp_without_depth", true,
      "draws without depth outside the depth range are drawn"},
+    // In its first level, without the memory export output in guest memory,
+    // saturated cyan patches covered the snow and the rocks of the trail and
+    // the ice had magenta specks; with it, none in 4 screenshots over 1.5
+    // minutes at the level's start (restart A/B, POCO F7, 2026-10-14; the
+    // overlay showed 19-21 FPS with it, 23 without).
+    {0x53510823, "memexport_enable", true,
+     "its CPU reads what the GPU writes with memory export"},
+    {0x53510823, "memexport_await_fences", true,
+     "the output is in guest memory when the GPU signals"},
 };
 
 // Same path/priority as a per-game config file.
