@@ -1194,6 +1194,9 @@ class DeferredCommandBuffer {
 
  private:
   ReplayStats replay_stats_;
+  // Draws dropped at replay because their pipeline was not created when they
+  // were recorded.
+  uint64_t dropped_draws_total_ = 0;
   // The last arguments replayed per command and state key, for the redundancy
   // counts (cleared at the start of every replayed command buffer).
   std::unordered_map<uint64_t, std::vector<uint8_t>> replay_last_args_;

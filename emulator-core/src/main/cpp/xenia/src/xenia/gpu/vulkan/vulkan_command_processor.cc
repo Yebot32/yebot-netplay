@@ -7137,7 +7137,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Crysis 3 generates index buffers that way while loading and when objects
   // break, and a dropped one keeps another mesh's indices (long spikes across
   // the screen). Wait for the creation and issue it again, once.
-  if (!memexport_ranges_.empty() && !issue_draw_memexport_retry_ &&
+  // Without vulkan_async_skip_draws no draw may be dropped at all, and the
+  // wait at the submission boundary can't save one: the bind is recorded with
+  // the handle observed here, and replay drops a null one even if the
+  // pipeline was created in between - objects vanished for a frame or two
+  // whenever a shader compiled. Not during the startup storage preload,
+  // which would wait for every stored pipeline.
+  bool must_not_drop =
+      !memexport_ranges_.empty() || (!cvars::vulkan_async_skip_draws &&
+                                     !pipeline_cache_->IsStartupLoading());
+  if (must_not_drop && !issue_draw_memexport_retry_ &&
       (pipeline->pipeline.load(std::memory_order_acquire) == VK_NULL_HANDLE ||
        !stage_bindings_ready[0] ||
        (pixel_shader && !stage_bindings_ready[1]))) {
@@ -7145,8 +7154,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     static std::atomic<uint32_t> logged{0};
     if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
       XELOGI(
-          "IssueDraw: waited for the pipeline of a memory-exporting draw "
-          "(VS {:016X}, PS {:016X}) instead of dropping it",
+          "IssueDraw: waited for the pipeline of a draw (VS {:016X}, PS "
+          "{:016X}) instead of dropping it",
           vertex_shader->ucode_data_hash(),
           pixel_shader ? pixel_shader->ucode_data_hash() : 0);
     }

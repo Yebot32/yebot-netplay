@@ -223,6 +223,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // EndSubmission().
   void MaybeSaveVkPipelineCache();
   bool IsCreatingPipelines();
+  // The shader and pipeline storage is being preloaded at startup.
+  bool IsStartupLoading() const {
+    return startup_loading_.load(std::memory_order_acquire);
+  }
   // Waits for any pipeline creation needed by the current draw path to finish
   // before state is consumed. This was added so strict ZPD query paths stop
   // racing pipeline compilation and then blocking work on incomplete state.

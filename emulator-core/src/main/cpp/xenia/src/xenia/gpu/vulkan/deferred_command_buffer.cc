@@ -94,6 +94,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
   // bound pipeline would use mismatched state, so draws are dropped until the
   // next successful graphics pipeline bind.
   bool guest_graphics_pipeline_unready = false;
+  uint32_t dropped_draws = 0;
   const bool count_replay = cvars::vulkan_replay_stats;
   if (count_replay) {
     replay_last_args_.clear();
@@ -345,6 +346,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
 
       case Command::kVkDraw: {
         if (guest_graphics_pipeline_unready) {
+          ++dropped_draws;
           break;
         }
         auto& args = *reinterpret_cast<const ArgsVkDraw*>(stream);
@@ -354,6 +356,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
 
       case Command::kVkDrawIndexed: {
         if (guest_graphics_pipeline_unready) {
+          ++dropped_draws;
           break;
         }
         auto& args = *reinterpret_cast<const ArgsVkDrawIndexed*>(stream);
@@ -681,6 +684,14 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
 
     stream += header.arguments_size_elements;
     stream_remaining -= header.arguments_size_elements;
+  }
+
+  // Every dropped draw is an object missing from the picture for this
+  // submission, so it goes to the log (only ever while pipelines compile).
+  if (dropped_draws) {
+    dropped_draws_total_ += dropped_draws;
+    XELOGW("Replay dropped {} draws with an unready pipeline ({} in total)",
+           dropped_draws, dropped_draws_total_);
   }
 }
 
