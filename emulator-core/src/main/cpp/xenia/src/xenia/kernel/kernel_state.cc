@@ -800,8 +800,11 @@ const object_ref<UserModule> KernelState::LoadTitleUpdate(
   auto patch_module = object_ref<UserModule>(new UserModule(this));
 
   X_RESULT result = patch_module->LoadFromFile(patch_path);
-  // Nothing looks the patch up by handle so the last reference frees it.
-  patch_module->ReleaseHandle();
+  // The handle keeps the patch alive on purpose, as in Xenia Edge. Freeing it
+  // unloads it, and XModule::OnUnload removes the processor module BY NAME:
+  // default.xexp and default.xex are both "default", so it destroyed the
+  // title's own XexModule and the title's next LoadContinue hit a pure
+  // virtual call - GTA V aborted on boot with its title update installed.
   if (result != X_STATUS_SUCCESS) {
     XELOGE("Failed to load XEX patch, code: {}", result);
     return nullptr;
