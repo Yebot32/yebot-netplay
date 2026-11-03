@@ -2468,7 +2468,13 @@ bool VulkanCommandProcessor::SetupContext() {
   return true;
 }
 
+void VulkanCommandProcessor::OnPaused() {
+  // Resume re-requests it (ReassertGpuPowerControlIfDue).
+  ui::vulkan::ReleaseGpuPowerControl("pause");
+}
+
 void VulkanCommandProcessor::ShutdownContext() {
+  ui::vulkan::ReleaseGpuPowerControl("shutdown");
   AwaitAllQueueOperationsCompletion();
 
   ResetResolveReadWatch();

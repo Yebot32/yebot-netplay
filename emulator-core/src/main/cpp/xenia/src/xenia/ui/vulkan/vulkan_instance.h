@@ -32,6 +32,11 @@ namespace vulkan {
 // where it is not in use or the kernel refuses.
 bool RequestGpuPowerControl(const char* reason);
 
+// Returns KGSL power control to the kernel governor if this process forced it
+// (pause, shutdown). The forced state is device-wide and outlives the process,
+// so without this the whole device stays at a fixed clock after the game.
+void ReleaseGpuPowerControl(const char* reason);
+
 class VulkanInstance {
  public:
   // validation_level: 0=off, 1=standard layer, 2=+synchronization validation.

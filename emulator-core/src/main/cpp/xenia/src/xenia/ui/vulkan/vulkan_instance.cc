@@ -107,9 +107,15 @@ bool IsVendorOsNeedingUbwcFlagHint() {
 
 DEFINE_string(vulkan_lib_path, "", "Custom Driver Library Path", "Vulkan");
 DEFINE_bool(
-        adrenotools_force_max_clocks, false,
-        "Custom Driver Force Max Clocks",
-        "Vulkan");
+    adrenotools_force_max_clocks, true,
+    "Custom Driver Force Max Clocks. Only acts with a custom driver loaded. On "
+    "by default since 2026-11-03: the kernel governor does not raise the clock "
+    "for Turnip - on a Tab S9 (Adreno 740) Forza Horizon 2 sat at 348 MHz and "
+    "16.7 fps, slower than the stock driver's 20.9, and reached 29.5 with this "
+    "on. More heat and battery drain; once the device is hot it throttles "
+    "anyway (about 20 fps sustained there).",
+    "Vulkan");
+UPDATE_from_bool(adrenotools_force_max_clocks, 2026, 11, 3, 12, false);
 DEFINE_int32(
     adrenotools_turbo_reassert_seconds, 5,
     "With a custom driver: request the KGSL GPU power control state (Custom "
@@ -208,8 +214,19 @@ bool RequestGpuPowerControl(const char* reason) {
   }
   return true;
 }
+
+void ReleaseGpuPowerControl(const char* reason) {
+  if (!gpu_power_control_in_use.load(std::memory_order_relaxed) ||
+      !cvars::adrenotools_force_max_clocks) {
+    return;
+  }
+  adrenotools_set_turbo(false);
+  XELOGI("GPU clocks: KGSL power control returned to the kernel governor ({})",
+         reason);
+}
 #else
 bool RequestGpuPowerControl(const char* reason) { return false; }
+void ReleaseGpuPowerControl(const char* reason) {}
 #endif
 
 std::unique_ptr<VulkanInstance> VulkanInstance::Create(
@@ -317,6 +334,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
               "exist; using the system Vulkan driver instead.",
               custom_lib_path);
         }
+        // A session that forced the clocks and was killed (force-stop, crash,
+        // LMK) never released them, and the state outlives the process: a Tab
+        // S9 then held 475 MHz with the GPU idle, and the stock driver ran
+        // Forza Horizon 2 at 13.6 fps instead of 20.9. Return it here.
+        adrenotools_set_turbo(false);
 #endif
 
   // http://developer.download.nvidia.com/mobile/shield/assets/Vulkan/UsingtheVulkanAPI.pdf

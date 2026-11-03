@@ -28,7 +28,7 @@ object SettingsSchema {
             // accepts -1 (auto), but a 0..5 slider is the intended UX.
             i("Vulkan", "vulkan_pipeline_creation_threads", "Pipeline creation threads", 4, 0, 5),
             Action("Vulkan", "vulkan_lib_path", "Custom Vulkan driver", "", desc("vulkan_lib_path")),
-            b("Vulkan", "adrenotools_force_max_clocks", "Force max GPU clocks (adrenotools)", false),
+            b("Vulkan", "adrenotools_force_max_clocks", "Force max GPU clocks (adrenotools)", true),
             // 'sysmem' forces untiled rendering (much slower) but avoids a class of Adreno GPU
             // hangs. Applied at vkCreateInstance, so it takes effect on the next game launch.
             l("Vulkan", "turnip_debug", "Turnip debug mode", "sysmem",

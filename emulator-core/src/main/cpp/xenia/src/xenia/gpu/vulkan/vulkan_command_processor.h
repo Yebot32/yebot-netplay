@@ -478,6 +478,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
  protected:
   bool SetupContext() override;
   void ShutdownContext() override;
+  void OnPaused() override;
   XE_FORCEINLINE
   void WriteRegister(uint32_t index, uint32_t value) override;
   XE_FORCEINLINE

@@ -1536,6 +1536,7 @@ void CommandProcessor::Pause() {
   });
 
   fence.Wait();
+  OnPaused();
 }
 
 void CommandProcessor::Resume() {

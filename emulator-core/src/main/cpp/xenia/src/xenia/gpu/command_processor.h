@@ -508,6 +508,8 @@ class CommandProcessor {
   void WorkerThreadMain();
   virtual bool SetupContext() = 0;
   virtual void ShutdownContext() = 0;
+  // Called by Pause() once the worker has stopped.
+  virtual void OnPaused() {}
   // rarely needed, most register writes have no special logic here
   XE_NOINLINE
   void HandleSpecialRegisterWrite(uint32_t index, uint32_t value);
