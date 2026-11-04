@@ -16,7 +16,6 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
-#include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 
@@ -49,11 +48,6 @@ bool MetalPrimitiveProcessor::Initialize() {
   }
 
   XELOGI("MetalPrimitiveProcessor initialized");
-
-  frame_index_buffer_pool_ = std::make_unique<ui::metal::MetalUploadBufferPool>(
-      command_processor_.GetMetalDevice(), "Xenia Converted Index Buffer",
-      std::max(size_t(kMinRequiredConvertedIndexBufferSize),
-               ui::GraphicsUploadBufferPool::kDefaultPageSize));
 
   {
     // The generic primitive processor emits restart-separated triangle strips
@@ -93,8 +87,13 @@ bool MetalPrimitiveProcessor::Initialize() {
 }
 
 void MetalPrimitiveProcessor::Shutdown(bool from_destructor) {
-  converted_index_buffers_.clear();
-  frame_index_buffer_pool_.reset();
+  // Release all frame index buffers
+  for (auto& frame_buffer : frame_index_buffers_) {
+    if (frame_buffer.buffer) {
+      frame_buffer.buffer->release();
+    }
+  }
+  frame_index_buffers_.clear();
 
   // Release built-in index buffer
   if (builtin_index_buffer_) {
@@ -114,22 +113,36 @@ void MetalPrimitiveProcessor::Shutdown(bool from_destructor) {
 }
 
 void MetalPrimitiveProcessor::CompletedSubmissionUpdated() {
-  SCOPE_profile_cpu_f("gpu");
   // Nothing to do for Metal
 }
 
 void MetalPrimitiveProcessor::BeginSubmission() {
-  SCOPE_profile_cpu_f("gpu");
   // Nothing to do for Metal
 }
 
 void MetalPrimitiveProcessor::BeginFrame() {
-  SCOPE_profile_cpu_f("gpu");
-  frame_index_buffer_pool_->Reclaim(command_processor_.GetCompletedFrame());
+  converted_index_buffers_.clear();
+
+  // Clean up old frame index buffers
+  ++current_frame_;
+  uint64_t current_frame = current_frame_;
+
+  frame_index_buffers_.erase(
+      std::remove_if(frame_index_buffers_.begin(), frame_index_buffers_.end(),
+                     [current_frame](const FrameIndexBuffer& buffer) {
+                       // Keep buffers used in the last 2 frames
+                       if (current_frame - buffer.last_frame_used > 2) {
+                         if (buffer.buffer) {
+                           buffer.buffer->release();
+                         }
+                         return true;
+                       }
+                       return false;
+                     }),
+      frame_index_buffers_.end());
 }
 
 void MetalPrimitiveProcessor::EndFrame() {
-  SCOPE_profile_cpu_f("gpu");
   ClearPerFrameCache();
   converted_index_buffers_.clear();
 }
@@ -181,28 +194,78 @@ bool MetalPrimitiveProcessor::InitializeBuiltinIndexBuffer(
 void* MetalPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
     xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
     uint32_t coalignment_original_address, size_t& backend_handle_out) {
-  SCOPE_profile_cpu_f("gpu");
-  size_t index_size = format == xenos::IndexFormat::kInt16 ? sizeof(uint16_t)
-                                                           : sizeof(uint32_t);
-  MTL::Buffer* buffer;
-  size_t offset;
-  uint8_t* mapping = frame_index_buffer_pool_->Request(
-      command_processor_.GetCurrentFrame(),
-      index_size * index_count +
-          (coalign_for_simd ? XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE : 0),
-      index_size, buffer, offset);
-  if (!mapping) {
-    return nullptr;
-  }
+  // Calculate required size
+  size_t element_size = format == xenos::IndexFormat::kInt16 ? sizeof(uint16_t)
+                                                             : sizeof(uint32_t);
+  size_t required_size = index_count * element_size;
+
+  // Add padding for SIMD alignment if requested
   if (coalign_for_simd) {
-    ptrdiff_t coalignment_offset =
-        GetSimdCoalignmentOffset(mapping, coalignment_original_address);
-    mapping += coalignment_offset;
-    offset += coalignment_offset;
+    required_size += XE_GPU_PRIMITIVE_PROCESSOR_SIMD_SIZE;
   }
+
+  // Find or create a buffer large enough
+  FrameIndexBuffer* chosen_buffer = nullptr;
+  uint64_t current_frame = current_frame_;
+
+  // First try to find an existing buffer that's large enough
+  for (auto& frame_buffer : frame_index_buffers_) {
+    if (frame_buffer.size >= required_size &&
+        frame_buffer.last_frame_used != current_frame) {
+      chosen_buffer = &frame_buffer;
+      break;
+    }
+  }
+
+  // If no suitable buffer found, create a new one
+  if (!chosen_buffer) {
+    MTL::Device* device = command_processor_.GetMetalDevice();
+
+    // Round up to next power of 2 for better reuse
+    size_t allocation_size = required_size;
+    allocation_size = std::max(allocation_size, size_t(4096));
+    allocation_size = (allocation_size + 4095) & ~4095;  // Round to 4KB
+
+    MTL::Buffer* new_buffer =
+        device->newBuffer(allocation_size, MTL::ResourceStorageModeShared);
+
+    if (!new_buffer) {
+      XELOGE("Failed to create Metal index buffer for primitive conversion");
+      backend_handle_out = 0;
+      return nullptr;
+    }
+
+    char label[256];
+    snprintf(label, sizeof(label), "Xenia Converted Index Buffer (%zu bytes)",
+             allocation_size);
+    new_buffer->setLabel(NS::String::string(label, NS::UTF8StringEncoding));
+
+    frame_index_buffers_.push_back({new_buffer, allocation_size, 0});
+    chosen_buffer = &frame_index_buffers_.back();
+
+    XELOGI("Created new Metal index buffer for primitive conversion ({} bytes)",
+           allocation_size);
+  }
+
+  // Mark buffer as used this frame
+  chosen_buffer->last_frame_used = current_frame;
+
+  // Return the buffer handle and CPU mapping.
+  uint64_t gpu_offset = 0;
+  void* cpu_buffer = chosen_buffer->buffer->contents();
+
+  // Apply SIMD co-alignment if requested
+  if (coalign_for_simd) {
+    ptrdiff_t offset =
+        GetSimdCoalignmentOffset(cpu_buffer, coalignment_original_address);
+    cpu_buffer = static_cast<uint8_t*>(cpu_buffer) + offset;
+    gpu_offset += uint64_t(offset);
+  }
+
   backend_handle_out = converted_index_buffers_.size();
-  converted_index_buffers_.push_back({buffer, uint64_t(offset)});
-  return mapping;
+  converted_index_buffers_.push_back({chosen_buffer->buffer, gpu_offset});
+
+  return cpu_buffer;
 }
 
 }  // namespace metal
