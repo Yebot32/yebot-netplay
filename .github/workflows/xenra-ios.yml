@@ -221,7 +221,7 @@ jobs:
       # compile error nobody can read is the least useful kind.
       run: |
         set -o pipefail
-        cmake --build build-ios --target xenra-ios --parallel $(sysctl -n hw.ncpu) 2>&1 | tee build-log.txt
+        cmake --build build-ios --target xenra-ios --parallel $(sysctl -n hw.ncpu) -- -k 0 2>&1 | tee build-log.txt
 
     - name: Upload build log
       if: always()

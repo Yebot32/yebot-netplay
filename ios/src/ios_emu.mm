@@ -388,15 +388,6 @@ class IosEmuApp {
     g_status.store(1, std::memory_order_relaxed);
     g_status_detail = "booting";
     launch_path_ = path;
-    // The emulator's executable regions (guest trampolines, code cache
-    // execute view) were created when the app launched - possibly before
-    // the JIT enabler's script attached, in which case the launch-time
-    // prepare found nothing to talk to. Run the prepare now, while the
-    // script is attached; the detach follows SetupSubsystems on the emu
-    // thread (protocol order: all prepares, then detach).
-    if (emu_->processor() && emu_->processor()->backend()) {
-      emu_->processor()->backend()->Jit26PrepareRegionsIos();
-    }
     emu_thread_ = std::thread(&IosEmuApp::EmuThreadMain, this);
   }
 
@@ -477,15 +468,6 @@ class IosEmuApp {
       g_status_detail = "subsystem setup failed";
       XELOGE("iOS: subsystem setup failed: {:08X}", result);
       return;
-    }
-
-    // All executable regions (guest trampolines + the code cache execute
-    // view) were prepared through the JIT enabler's script during backend
-    // init, which is everything that had to happen before the protocol's
-    // detach. From here the process may execute generated code on its own.
-    if (!xe::memory::Jit26Detach()) {
-      XELOGW("iOS JIT: detach did not answer - the enabler script is gone; "
-             "generated code may still fault");
     }
 
     MountDrives();
@@ -585,13 +567,9 @@ int xe_ios_boot(const char* path) {
   if (!g_app || !g_app->emu_) {
     return -1;
   }
-  // Re-probe fresh, never trust the cached snapshot: the enabler attaches
-  // seconds after launch, and a boot attempt that races ahead of it must
-  // still see the attach (QueryJitStatus() caches its first answer for the
-  // life of the process, which would keep refusing boots forever after a
-  // too-early "no"). The probe is cheap and boot is rare.
-  if (xe::memory::QueryJitStatusRefresh().capability ==
-      xe::memory::JitCapability::kUnavailable) {
+  // CS_DEBUGGED is the kernel's own answer, asked fresh every time. Executing
+  // generated code without it gets the process killed, not an error.
+  if (!xe::memory::QueryJitSignatureState().cs_debugged) {
     g_status_detail = "JIT is OFF - enable it via StikDebug first";
     return -2;
   }

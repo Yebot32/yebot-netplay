@@ -752,70 +752,9 @@ A64Backend::A64Backend() {
   code_cache_ = A64CodeCache::Create();
 
 #if XE_PLATFORM_IOS
-  // iOS 26+ (TXM/SPTM): an RWX region cannot execute until prepared through
-  // the JIT enabler's debug script, and after Jit26Detach() a prepared region
-  // may not be written without a writable alias. Trampolines are built
-  // lazily, during module load - after the detach - so the region is split
-  // into an execute view and a write view of one shared mapping now, and the
-  // execute view is prepared here, before the detach. The views are
-  // offsets-identical: write index i in one, execute index i in the other.
-  const size_t trampoline_total_size =
-      kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES;
-  guest_trampoline_mapping_name_ =
-      fmt::format("xenra_trampolines_{}", Clock::QueryHostTickCount());
-  guest_trampoline_mapping_ = memory::CreateFileMappingHandle(
-      guest_trampoline_mapping_name_, trampoline_total_size,
-      memory::PageAccess::kExecuteReadWrite, false);
-  if (guest_trampoline_mapping_ != memory::kFileMappingHandleInvalid) {
-    guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(memory::MapFileView(
-        guest_trampoline_mapping_, nullptr, trampoline_total_size,
-        memory::PageAccess::kExecuteReadOnly, 0));
-    guest_trampoline_write_base_ = reinterpret_cast<uint8_t*>(memory::MapFileView(
-        guest_trampoline_mapping_, nullptr, trampoline_total_size,
-        memory::PageAccess::kReadWrite, 0));
-    if (guest_trampoline_memory_ && guest_trampoline_write_base_) {
-      if (memory::Jit26PrepareRegion(guest_trampoline_memory_,
-                                     trampoline_total_size)) {
-        XELOGI("A64Backend: guest trampoline region prepared via the JIT "
-               "enabler script");
-      } else {
-        XELOGW("A64Backend: guest trampoline region NOT prepared - no JIT "
-               "enabler script attached; trampolines will fault on execute");
-      }
-    } else {
-      XELOGE("A64Backend: failed to map the split trampoline views");
-      if (guest_trampoline_memory_) {
-        memory::UnmapFileView(guest_trampoline_mapping_,
-                              guest_trampoline_memory_, trampoline_total_size);
-        guest_trampoline_memory_ = nullptr;
-      }
-      if (guest_trampoline_write_base_) {
-        memory::UnmapFileView(guest_trampoline_mapping_,
-                              guest_trampoline_write_base_,
-                              trampoline_total_size);
-        guest_trampoline_write_base_ = nullptr;
-      }
-      memory::CloseFileMappingHandle(guest_trampoline_mapping_,
-                                     guest_trampoline_mapping_name_);
-      guest_trampoline_mapping_ = memory::kFileMappingHandleInvalid;
-    }
-  } else {
-    XELOGE("A64Backend: failed to create the trampoline mapping handle");
-  }
-  if (!guest_trampoline_memory_ || !guest_trampoline_write_base_) {
-    // The split-alias setup failed. Fall back to the plain RWX region: the
-    // backend still constructs and the JIT status gate decides whether
-    // anything executes.
-    void* buf = memory::AllocFixed(
-        nullptr, trampoline_total_size,
-        xe::memory::AllocationType::kReserveCommit,
-        xe::memory::PageAccess::kExecuteReadWrite);
-    xenia_assert(buf);
-    guest_trampoline_memory_ = reinterpret_cast<uint8_t*>(buf);
-    guest_trampoline_write_base_ = guest_trampoline_memory_;
-  }
-  // OS-chosen mapping on iOS, never sub-4GB in practice.
-  guest_trampolines_sub4gb_ = false;
+  // Trampolines live in the code cache here: one region for the JIT tool to
+  // prepare, and the same write gate as everything else.
+  guest_trampoline_code_ios_.resize(MAX_GUEST_TRAMPOLINES, nullptr);
 #else
   // Prefer a sub-2GB slot so fast indirection (rel32) is usable; fall back
   // to an OS-chosen address if none is available. macOS rejects fixed
@@ -852,56 +791,11 @@ A64Backend::~A64Backend() {
   ExceptionHandler::Uninstall(&ExceptionCallbackThunk, this);
   const size_t trampoline_total_size =
       kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES;
-#if XE_PLATFORM_IOS
-  if (guest_trampoline_mapping_ != memory::kFileMappingHandleInvalid) {
-    if (guest_trampoline_memory_) {
-      memory::UnmapFileView(guest_trampoline_mapping_, guest_trampoline_memory_,
-                            trampoline_total_size);
-      guest_trampoline_memory_ = nullptr;
-    }
-    if (guest_trampoline_write_base_) {
-      memory::UnmapFileView(guest_trampoline_mapping_,
-                            guest_trampoline_write_base_, trampoline_total_size);
-      guest_trampoline_write_base_ = nullptr;
-    }
-    memory::CloseFileMappingHandle(guest_trampoline_mapping_,
-                                   guest_trampoline_mapping_name_);
-    guest_trampoline_mapping_ = memory::kFileMappingHandleInvalid;
-  }
-#endif
   if (guest_trampoline_memory_) {
     memory::DeallocFixed(guest_trampoline_memory_, trampoline_total_size,
                          memory::DeallocationType::kRelease);
     guest_trampoline_memory_ = nullptr;
   }
-}
-
-bool A64Backend::Jit26PrepareRegionsIos() {
-#if XE_PLATFORM_IOS
-  bool ok = true;
-  const size_t trampoline_total_size =
-      kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES;
-  if (guest_trampoline_mapping_ != memory::kFileMappingHandleInvalid &&
-      guest_trampoline_memory_) {
-    if (!memory::Jit26PrepareRegion(guest_trampoline_memory_,
-                                    trampoline_total_size)) {
-      // Already prepared is indistinguishable from refused here; both keep
-      // the process alive, and the boot gate reports what the probe saw.
-      ok = false;
-    } else {
-      XELOGI("A64Backend: guest trampoline region prepared for boot");
-    }
-  }
-  if (code_cache_) {
-    // The code cache is owned through the base CodeCache interface; the
-    // iOS prepare lives on the CRTP base and is idempotent.
-    auto* base = static_cast<CodeCacheBase<A64CodeCache>*>(code_cache());
-    ok = base->PrepareExecuteRegionIos() && ok;
-  }
-  return ok;
-#else
-  return false;
-#endif
 }
 
 bool A64Backend::Initialize(Processor* processor) {
@@ -1091,19 +985,34 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
   }
   xenia_assert(new_index != static_cast<size_t>(-1));
 
+#if XE_PLATFORM_IOS
+  // Same instructions, but through the code cache's mapping and write gate.
+  alignas(16) uint8_t code[kGuestTrampolineSize];
+  BuildGuestTrampoline(code, reinterpret_cast<void*>(proc), userdata1,
+                       userdata2,
+                       reinterpret_cast<void*>(guest_to_host_thunk_));
+  void*& slot_code = guest_trampoline_code_ios_[new_index];
+  if (slot_code) {
+    code_cache_->PatchCode(slot_code, code, sizeof(code));
+  } else {
+    EmitFunctionInfo info{};
+    info.code_size.body = info.code_size.total = sizeof(code);
+    void* write_address = nullptr;
+    code_cache_->PlaceHostCode(0, code, info, slot_code, write_address);
+  }
+  auto* execute_pos = static_cast<uint8_t*>(slot_code);
+#else
   const size_t trampoline_offset = kGuestTrampolineSize * new_index;
   uint8_t* execute_pos = &guest_trampoline_memory_[trampoline_offset];
-  // On iOS the write goes through the writable alias of the prepared execute
-  // region; everywhere else the two are the same memory.
   uint8_t* write_pos = &guest_trampoline_write_base_[trampoline_offset];
 
-#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS
+#if XE_PLATFORM_MAC
   pthread_jit_write_protect_np(0);
 #endif
   BuildGuestTrampoline(write_pos, reinterpret_cast<void*>(proc), userdata1,
                        userdata2,
                        reinterpret_cast<void*>(guest_to_host_thunk_));
-#if XE_PLATFORM_MAC && !XE_PLATFORM_IOS
+#if XE_PLATFORM_MAC
   pthread_jit_write_protect_np(1);
 #endif
 
@@ -1129,6 +1038,7 @@ uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
       reinterpret_cast<char*>(execute_pos),
       reinterpret_cast<char*>(execute_pos + kGuestTrampolineSize));
 #endif
+#endif  // XE_PLATFORM_IOS
 
   uint32_t indirection_guest_addr =
       GUEST_TRAMPOLINE_BASE +

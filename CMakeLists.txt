@@ -79,7 +79,13 @@ if(NOT _xe_base_mac_system IN_LIST _xe_base_srcs)
 endif()
 list(REMOVE_ITEM _xe_base_srcs "${_xe_base_mac_system}")
 list(APPEND _xe_base_srcs "${CMAKE_CURRENT_SOURCE_DIR}/ios/system_ios.mm")
+list(APPEND _xe_base_srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_ios.cc")
 set_target_properties(xenia-base PROPERTIES SOURCES "${_xe_base_srcs}")
+
+# The _ios suffix keeps these out of the globs on every platform, iOS included.
+target_sources(xenia-cpu PRIVATE
+  emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/jit_memory_ios.cc)
 
 # -----------------------------------------------------------------------------
 # miniupnpc + the netplay kernel sources, wired from HERE exactly as the

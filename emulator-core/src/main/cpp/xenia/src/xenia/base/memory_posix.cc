@@ -8,6 +8,11 @@
  */
 
 #include "xenia/base/memory.h"
+#include "xenia/base/platform.h"
+
+#if XE_PLATFORM_IOS
+#include "xenia/base/memory_ios.h"
+#endif
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -447,6 +452,10 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
                                           size_t length, PageAccess access,
                                           bool commit) {
+#if XE_PLATFORM_IOS
+  // The app sandbox has no POSIX shared-memory namespace.
+  return CreateFileMappingHandleIOS(length);
+#endif
 // Xendroid means Android here - see the sharedmem include note above. iOS
 // defines XE_PLATFORM_xendroid as well and deliberately falls through to the
 // MAC shm_open branch below.

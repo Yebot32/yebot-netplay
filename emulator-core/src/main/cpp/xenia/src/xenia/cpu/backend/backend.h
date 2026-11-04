@@ -51,13 +51,6 @@ class Backend {
   const MachineInfo* machine_info() const { return &machine_info_; }
   CodeCache* code_cache() const { return code_cache_; }
 
-  // iOS 26+ (TXM/SPTM): asks the backend to run the universal protocol's
-  // prepare call over every executable region it owns (guest trampolines,
-  // code cache execute view), for the case where the regions were created
-  // BEFORE a JIT enabler attached - the launch-time prepare inside the code
-  // cache found no script and did nothing. Idempotent. Only meaningful on
-  // iOS; the base implementation does nothing.
-  virtual bool Jit26PrepareRegionsIos() { return false; }
 
   virtual std::string name() const { return "unknown"; }
 

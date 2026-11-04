@@ -32,6 +32,9 @@
 #include "xenia/base/platform.h"
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
+#if XE_PLATFORM_IOS
+#include "xenia/cpu/backend/jit_memory_ios.h"
+#endif
 
 #if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
 #include <pthread.h>
@@ -174,6 +177,7 @@ class CodeCacheBase : public CodeCache {
   virtual bool Initialize() {
     file_name_ =
         fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
+#if !XE_PLATFORM_IOS
     mapping_ = xe::memory::CreateFileMappingHandle(
         file_name_, kGeneratedCodeSize,
         xe::memory::PageAccess::kExecuteReadWrite, false);
@@ -181,6 +185,8 @@ class CodeCacheBase : public CodeCache {
       XELOGE("Unable to create code cache mmap");
       return false;
     }
+
+#endif  // !XE_PLATFORM_IOS
 
     const bool wx_preferred = xe::memory::IsWritableExecutableMemoryPreferred();
 
@@ -195,7 +201,7 @@ class CodeCacheBase : public CodeCache {
     // succeed but the page isn't actually executable. The encoded path
     // uses an anonymous MAP_JIT mapping which works.
     bool try_fast_indirection = allow_fast_indirection_;
-#if XE_PLATFORM_MAC && XE_ARCH_AMD64
+#if XE_PLATFORM_IOS || (XE_PLATFORM_MAC && XE_ARCH_AMD64)
     try_fast_indirection = false;
 #endif
     if (kExecuteAddrHigh != 0) {
@@ -231,9 +237,6 @@ class CodeCacheBase : public CodeCache {
           indirection_table_base_bias_ = 0;
           encoded_indirection_ = false;
           generated_code_map_.reserve(kMaximumFunctionCount);
-#if XE_PLATFORM_IOS
-          PrepareExecuteRegionIos();
-#endif
           return true;
         }
         xe::memory::DeallocFixed(indirection_table_base_, kIndirectionTableSize,
@@ -267,6 +270,14 @@ class CodeCacheBase : public CodeCache {
     }
     external_indirection_target_count_.store(0, std::memory_order_relaxed);
 
+#if XE_PLATFORM_IOS
+    if (!ios_jit_memory_.Initialize(kGeneratedCodeSize,
+                                    generated_code_execute_base_,
+                                    generated_code_write_base_)) {
+      XELOGE("Unable to allocate the iOS code cache");
+      return false;
+    }
+#else
     // Try the preferred fixed address first; fall back to OS-chosen on fail.
     if (wx_preferred) {
 #if XE_PLATFORM_MAC
@@ -319,46 +330,12 @@ class CodeCacheBase : public CodeCache {
       XELOGE("Unable to allocate code cache generated code storage");
       return false;
     }
+#endif  // XE_PLATFORM_IOS
 
-#if XE_PLATFORM_IOS
-    PrepareExecuteRegionIos();
-#endif
     generated_code_map_.reserve(kMaximumFunctionCount);
     return true;
   }
 
-#if XE_PLATFORM_IOS
-  // iOS 26+ (TXM/SPTM): the execute view must be prepared through the JIT
-  // enabler's debug script (StikDebug universal.js) before any of it can
-  // execute - mprotect alone is not sufficient there. One prepare call covers
-  // the whole reservation: the cache never maps generated code anywhere else,
-  // and everything it will ever commit lives inside this range. A region
-  // introduced after Jit26Detach() cannot be prepared, which is exactly why
-  // the detach belongs to the boot path AFTER backend init, not to the probe.
-  //
-  // Safe to call repeatedly (idempotent): the launch-time call runs while no
-  // enabler may be attached yet, and Backend::Jit26PrepareRegionsIos calls
-  // this again once one has attached. Returns false when the region is still
-  // unprepared, which is not fatal here - the JIT status gate is what decides
-  // whether booting happens at all.
-  bool PrepareExecuteRegionIos() {
-    if (jit26_prepared_) {
-      return true;
-    }
-    if (xe::memory::Jit26PrepareRegion(generated_code_execute_base_,
-                                       kGeneratedCodeSize)) {
-      jit26_prepared_ = true;
-      XELOGI("iOS JIT: code cache execute region prepared via the JIT "
-             "enabler script ({} KB)",
-             kGeneratedCodeSize / 1024);
-      return true;
-    }
-    XELOGW("iOS JIT: code cache execute region was NOT prepared - no JIT "
-           "enabler script is attached; generated code will fault on "
-           "execute");
-    return false;
-  }
-#endif
 
   // Encode a host address as a 32-bit indirection entry:
   //  - bit 31 clear: rel32 offset from code cache base (target in cache).
@@ -486,6 +463,19 @@ class CodeCacheBase : public CodeCache {
     }
   }
 
+#if XE_PLATFORM_IOS
+  // Rewrites code already in the cache, for the guest trampolines, which live
+  // here on iOS so that one region is all the JIT tool has to prepare.
+  void PatchCode(void* execute_address, const void* data, size_t size) {
+    auto global_lock = global_critical_region_.Acquire();
+    uint8_t* write_address =
+        generated_code_write_base_ +
+        (static_cast<uint8_t*>(execute_address) - generated_code_execute_base_);
+    IOSJitWriteScope write_scope(ios_jit_memory_, write_address, size);
+    std::memcpy(write_address, data, size);
+  }
+#endif  // XE_PLATFORM_IOS
+
   void PlaceHostCode(uint32_t guest_address, void* machine_code,
                      const EmitFunctionInfo& func_info,
                      void*& code_execute_address_out,
@@ -504,6 +494,10 @@ class CodeCacheBase : public CodeCache {
     {
       auto global_lock = global_critical_region_.Acquire();
 
+#if XE_PLATFORM_IOS
+      generated_code_offset_ =
+          ios_jit_memory_.AlignOffset(generated_code_offset_);
+#endif
       code_execute_address =
           generated_code_execute_base_ + generated_code_offset_;
       code_execute_address_out = code_execute_address;
@@ -533,6 +527,12 @@ class CodeCacheBase : public CodeCache {
 
       // Commit memory if needed.
       EnsureCommitted(high_mark);
+#if XE_PLATFORM_IOS
+      // Covers the code and its unwind data: both are written below.
+      IOSJitWriteScope write_scope(
+          ios_jit_memory_, code_write_address,
+          static_cast<size_t>(end_write_address - code_write_address));
+#endif
 
 #if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
       // Toggle the per-thread MAP_JIT write gate around writes. Only needed
@@ -588,6 +588,10 @@ class CodeCacheBase : public CodeCache {
     uint8_t* data_address = nullptr;
     {
       auto global_lock = global_critical_region_.Acquire();
+#if XE_PLATFORM_IOS
+      generated_code_offset_ =
+          ios_jit_memory_.AlignOffset(generated_code_offset_);
+#endif
       data_address = generated_code_write_base_ + generated_code_offset_;
       generated_code_offset_ += xe::round_up(length, 16);
       high_mark = generated_code_offset_;
@@ -600,6 +604,9 @@ class CodeCacheBase : public CodeCache {
     if (jit_write_toggle) {
       pthread_jit_write_protect_np(0);
     }
+#endif
+#if XE_PLATFORM_IOS
+    IOSJitWriteScope write_scope(ios_jit_memory_, data_address, length);
 #endif
     std::memcpy(data_address, data, length);
 #if XE_PLATFORM_MAC && !XE_PLATFORM_IOS && XE_ARCH_ARM64
@@ -647,7 +654,14 @@ class CodeCacheBase : public CodeCache {
 
  protected:
   static constexpr size_t kIndirectionTableSize = 0x1FFFFFFF;
+#if XE_PLATFORM_IOS
+  // Each allocation gets its own pages on the mprotect path, and 16 KB pages
+  // make that wasteful, so iOS takes more than the 256 MB every other host does.
+  // Small enough for jit_memory_ios.cc to find room below 8 GB.
+  static constexpr size_t kGeneratedCodeSize = 0x1FFFFFFF;
+#else
   static constexpr size_t kGeneratedCodeSize = 0x0FFFFFFF;
+#endif  // XE_PLATFORM_IOS
 
   // XenDroid: low (guest-space) base constants. The *Low names are the bases
   // OR'd with execute_address_high() by the backends / Win32 unwind lookups to
@@ -691,9 +705,7 @@ class CodeCacheBase : public CodeCache {
   uint8_t* generated_code_write_base_ = nullptr;
   size_t generated_code_offset_ = 0;
 #if XE_PLATFORM_IOS
-  // Set once the execute view has been prepared through the JIT enabler
-  // script; guards the idempotent prepare.
-  bool jit26_prepared_ = false;
+  IOSJitMemory ios_jit_memory_;
 #endif
   // Last 64 MiB step logged by CheckCapacity.
   size_t capacity_log_mark_ = 0;
@@ -731,6 +743,10 @@ class CodeCacheBase : public CodeCache {
   }
 
   void EnsureCommitted(size_t high_mark) {
+#if XE_PLATFORM_IOS
+    // IOSJitMemory maps the whole cache up front; write scopes handle W^X.
+    return;
+#endif
     using namespace xe::literals;
     size_t old_commit_mark, new_commit_mark;
     do {
