@@ -17,6 +17,9 @@
 // pass. The sublayer fallback in that function exists for views we do not
 // control; this one we do.
 @interface XenraMetalView : UIView
+// The xemu presenter draws at whatever size the layer says, so the layer has to
+// follow the view. The 360 presenter manages its own drawable.
+@property(nonatomic, assign) BOOL tracksBounds;
 @end
 
 #endif  // XENRA_IOS_METAL_VIEW_H_

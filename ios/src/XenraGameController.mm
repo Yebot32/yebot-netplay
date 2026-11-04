@@ -11,6 +11,7 @@
 #import "XenraTheme.h"
 #import "XenraTouchPad.h"
 #import "XenraUI.h"
+#import "XenraXemu.h"
 #include "ios_emu.h"
 
 @implementation XenraGameController {
@@ -21,6 +22,9 @@
   UILabel* status_;
   CADisplayLink* link_;
   BOOL booted_;
+  BOOL og_;
+  NSTimer* sdlTimer_;
+  int sdlTicks_;
   NSTimer* jitTimer_;
   // The latest state from each source; the guest sees them merged.
   int padButtons_;
@@ -33,6 +37,7 @@
   if (self) {
     path_ = [path copy];
     name_ = [name copy];
+    og_ = [XenraSettings console] == XenraConsoleOG;
   }
   return self;
 }
@@ -56,7 +61,7 @@
   pad_ = [[XenraTouchPad alloc] initWithFrame:self.view.bounds];
   pad_.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  pad_.x360Layout = YES;
+  pad_.x360Layout = !og_;
   pad_.scaleFactor = [[XenraSettings stringForKey:@"pad.scale"
                                          fallback:@"1.0"] doubleValue];
   pad_.hapticsEnabled =
@@ -92,6 +97,13 @@
   [super viewDidAppear:animated];
   [UIApplication.sharedApplication setIdleTimerDisabled:YES];
   if (booted_ || jitTimer_) return;
+  if (og_) {
+    NSString* problem = XenraXemuPrepare();
+    if (problem) {
+      [self showFailure:problem];
+      return;
+    }
+  }
   if (XenraJitActive()) {
     [self boot];
     return;
@@ -116,6 +128,10 @@
 }
 
 - (void)boot {
+  if (og_) {
+    [self bootXemu];
+    return;
+  }
   [XenraSettings applyForGame:name_];
   xe_ios_set_game_view(metal_);
   XenraLog([NSString stringWithFormat:@"boot: %@", path_.lastPathComponent]);
@@ -129,6 +145,45 @@
   link_ = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
   link_.preferredFramesPerSecond = 60;
   [link_ addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+- (void)bootXemu {
+  NSString* missing = XenraXemuMissingFiles();
+  if (missing) {
+    [self showFailure:[NSString stringWithFormat:@"Still needed: %@. Choose "
+                                                  "them in the Setup Wizard, "
+                                                  "from Settings.",
+                                                 missing]];
+    return;
+  }
+  XenraLog([NSString stringWithFormat:@"boot: %@", path_.lastPathComponent]);
+  XenraLogsBeginSession();
+  booted_ = YES;
+  metal_.tracksBounds = YES;
+  [metal_ setNeedsLayout];
+  [metal_ layoutIfNeeded];
+  status_.text = @"Booting…";
+  [self sendPad];
+  __weak XenraGameController* weak = self;
+  sdlTimer_ = [NSTimer scheduledTimerWithTimeInterval:0.2
+                                              repeats:YES
+                                                block:^(NSTimer*) {
+                                                  [weak keepSdlAway];
+                                                }];
+  // A timer, not a dispatch: see XenraXemuRun.
+  [self performSelector:@selector(runXemu) withObject:nil afterDelay:0.1];
+}
+
+- (void)keepSdlAway {
+  XenraXemuHideSdlWindows(self.view.window);
+  if (status_.text.length && ++sdlTicks_ > 40) status_.text = nil;
+}
+
+- (void)runXemu {
+  const int status = XenraXemuRun(path_, metal_.layer);
+  XenraLog([NSString stringWithFormat:@"xemu returned %d", status]);
+  XenraLogsEndSession();
+  exit(0);
 }
 
 - (void)showFailure:(NSString*)detail {
@@ -180,9 +235,18 @@
   padAxes_[3] = ry;
   padTriggers_[0] = lt;
   padTriggers_[1] = rt;
-  if (!GCController.controllers.count) {
+  if (og_) {
+    [self sendPad];
+  } else if (!GCController.controllers.count) {
     xe_ios_input_set(buttons, lx, ly, rx, ry, lt, rt);
   }
+}
+
+// The pad owns port one while it is on screen; otherwise SDL's controller does.
+- (void)sendPad {
+  XenraXemuSetPad(!pad_.hidden && !GCController.controllers.count, padButtons_,
+                  padAxes_[0], padAxes_[1], padAxes_[2], padAxes_[3],
+                  padTriggers_[0], padTriggers_[1]);
 }
 
 - (void)pollController {
@@ -222,10 +286,15 @@
       title:pad_.hidden ? @"Show Touch Controls" : @"Hide Touch Controls"
       action:^{
         pad.hidden = !pad.hidden;
+        [weak sendPad];
       }];
   XenraBladeItem* share = [XenraBladeItem title:@"Share Logs"
                                          action:^{
                                            XenraShareLogs(weak, nil);
+                                         }];
+  XenraBladeItem* reset = [XenraBladeItem title:@"Reset"
+                                         action:^{
+                                           XenraXemuReset();
                                          }];
   // One title per process, so leaving a game ends the app; the same is true
   // of Quit, and Android's Exit to Game Library has no iOS counterpart yet.
@@ -237,11 +306,21 @@
   [XenraBladeSheet showIn:self.view
                     title:@"Game Menu"
                   message:nil
-                    items:@[ resume, touch, share, quit ]];
+                    items:og_ ? @[ resume, touch, reset, share, quit ]
+                              : @[ resume, touch, share, quit ]];
 }
 
 - (void)quit {
   XenraLogsEndSession();
+  if (og_) {
+    // A clean stop flushes the hard disk image. Give it a moment, no more.
+    XenraXemuShutdown();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+                     exit(0);
+                   });
+    return;
+  }
   if (xe_ios_status() == 1) {
     // Boot in flight: the boot thread may be parked in a CallInUIThread
     // marshaled to this very thread, so joining it here would hang.

@@ -34,6 +34,7 @@ set(_xe_ios_arc_sources
   "${_xe_ios_dir}/src/XenraSetupController.mm"
   "${_xe_ios_dir}/src/XenraTouchPad.mm"
   "${_xe_ios_dir}/src/XenraUI.mm"
+  "${_xe_ios_dir}/src/XenraXemu.mm"
 )
 set(_xe_ios_resources
   "${_xe_ios_dir}/res/setup_logo_x.png"
@@ -55,6 +56,7 @@ add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/XenraSettings.h"
   "${_xe_ios_dir}/src/XenraTouchPad.h"
   "${_xe_ios_dir}/src/XenraUI.h"
+  "${_xe_ios_dir}/src/XenraXemu.h"
   ${_xe_ios_arc_sources}
   ${_xe_ios_resources}
   "${_xe_ios_dir}/src/XenraAppDelegate.h"

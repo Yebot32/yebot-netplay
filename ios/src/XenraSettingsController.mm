@@ -61,6 +61,7 @@
   }
 
   XenraPanelView* panel = [[XenraPanelView alloc] initWithFrame:CGRectZero];
+  panel.rounded = YES;
   panel.translatesAutoresizingMaskIntoConstraints = NO;
   UIScrollView* scroll = [[UIScrollView alloc] init];
   scroll.translatesAutoresizingMaskIntoConstraints = NO;
@@ -139,9 +140,23 @@
     [view removeFromSuperview];
   }
   for (XenraSettingSection* section in tabs_[current_].sections) {
-    UILabel* header = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccent());
-    header.attributedText = XenraTracked(section.title, 13, XenraAccent());
-    [content_ addArrangedSubview:header];
+    // section_header_background: a pill in the accent's container colour.
+    UILabel* header = XenraMakeLabel(section.title, 15, UIFontWeightMedium,
+                                     XenraAccent());
+    UIView* pill = [[UIView alloc] init];
+    pill.backgroundColor = XenraAccentContainer();
+    pill.layer.cornerRadius = 12;
+    [pill addSubview:header];
+    [NSLayoutConstraint activateConstraints:@[
+      [header.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:14],
+      [header.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor
+                                            constant:-14],
+      [header.topAnchor constraintEqualToAnchor:pill.topAnchor constant:6],
+      [header.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor constant:-6],
+    ]];
+    UIStackView* line = [[UIStackView alloc]
+        initWithArrangedSubviews:@[ pill, [[UIView alloc] init] ]];
+    [content_ addArrangedSubview:line];
     for (XenraSettingRow* row in section.rows) {
       [content_ addArrangedSubview:[self viewForRow:row]];
     }
@@ -197,20 +212,23 @@
     line.spacing = 12;
     return line;
   }
+  if (row.kind == XenraRowChoice) {
+    XenraFieldButton* field = [[XenraFieldButton alloc]
+        initWithTitle:row.title
+               action:^{
+                 [weak tapped:row];
+               }];
+    field.value = [self titleForValue:[XenraSettings valueForRow:row game:_game]
+                                  row:row];
+    field.detail = row.detail;
+    return field;
+  }
   XenraBladeButton* blade = [[XenraBladeButton alloc]
       initWithTitle:row.title
              action:^{
                [weak tapped:row];
              }];
-  if (row.kind == XenraRowChoice) {
-    NSString* value = [self titleForValue:[XenraSettings valueForRow:row game:_game]
-                                      row:row];
-    blade.subtitle = row.detail.length
-                         ? [NSString stringWithFormat:@"%@\n%@", value, row.detail]
-                         : value;
-  } else {
-    blade.subtitle = row.detail;
-  }
+  blade.subtitle = row.detail;
   return blade;
 }
 

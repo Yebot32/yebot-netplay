@@ -83,9 +83,8 @@ static XenraSettingRow* FrameLimitRow() {
 static XenraSettingRow* CoreRow() {
   XenraSettingRow* row = Choice(
       @"og.core", @"Core",
-      @"Performance is not on iOS yet. See docs/IOS-PORT-PLAN.md.",
-      @[ @"Performance (hakuX)", @"Compatibility (xemu)" ],
-      @[ @"hakux", @"xemu" ], @"hakux");
+      @"Performance (hakuX) is not on iOS yet: it needs its own port.",
+      @[ @"Compatibility (xemu)" ], @[ @"xemu" ], @"xemu");
   row.perGame = YES;
   return row;
 }
@@ -193,20 +192,30 @@ static XenraSettingRow* CoreRow() {
                                      error:nil];
 }
 
-static NSURL* g_game_folder;
+static NSMutableArray<NSURL*>* g_held;
 
-+ (void)holdGameFolder {
-  [g_game_folder stopAccessingSecurityScopedResource];
-  g_game_folder = [self urlForBookmark:@"games.360"];
-  [g_game_folder startAccessingSecurityScopedResource];
++ (void)holdPickedFiles {
+  for (NSURL* url in g_held) [url stopAccessingSecurityScopedResource];
+  g_held = [NSMutableArray array];
+  for (NSString* key in @[ @"games.360", @"games.og", @"mcpx", @"flash", @"hdd" ]) {
+    NSURL* url = [self urlForBookmark:key];
+    if (url && [url startAccessingSecurityScopedResource]) [g_held addObject:url];
+  }
 }
 
 + (NSArray<NSString*>*)gameFolders {
   NSString* docs = NSSearchPathForDirectoriesInDomains(
                        NSDocumentDirectory, NSUserDomainMask, YES)
                        .firstObject;
-  NSString* own = [docs stringByAppendingPathComponent:@"Games"];
-  return g_game_folder ? @[ own, g_game_folder.path ] : @[ own ];
+  const BOOL x360 = [self console] == XenraConsole360;
+  NSString* own =
+      [docs stringByAppendingPathComponent:x360 ? @"Games" : @"Games OG"];
+  [NSFileManager.defaultManager createDirectoryAtPath:own
+                          withIntermediateDirectories:YES
+                                           attributes:nil
+                                                error:nil];
+  NSURL* picked = [self urlForBookmark:x360 ? @"games.360" : @"games.og"];
+  return picked ? @[ own, picked.path ] : @[ own ];
 }
 
 + (NSString*)gameKey:(NSString*)game row:(NSString*)key {

@@ -47,20 +47,143 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
   if (self) {
     self.backgroundColor = UIColor.clearColor;
     shape_ = [CAShapeLayer layer];
-    shape_.fillColor = XenraPanelFill().CGColor;
-    shape_.strokeColor = XenraAccent().CGColor;
-    shape_.lineWidth = 2;
     [self.layer insertSublayer:shape_ atIndex:0];
+    self.chamfer = 28;
+    self.rounded = NO;
   }
   return self;
 }
 
+// ChamferedPanelView for the library and dialogs; the rounded card with a solid
+// outline is the settings screens' panel.
+- (void)setRounded:(BOOL)rounded {
+  _rounded = rounded;
+  shape_.fillColor =
+      (rounded ? XenraPanelFill()
+               : XenraPick(0xE60D0A04, 0xC4E2EFB4, 0xE60B0B0C))
+          .CGColor;
+  shape_.strokeColor =
+      (rounded ? XenraAccent() : XenraAccentAlpha(0x55)).CGColor;
+  shape_.lineWidth = rounded ? 2 : 1.5;
+  [self setNeedsLayout];
+}
+
+- (void)setFill:(UIColor*)fill {
+  shape_.fillColor = fill.CGColor;
+}
+
 - (void)layoutSubviews {
   [super layoutSubviews];
-  shape_.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds
-                                           cornerRadius:24]
-                    .CGPath;
+  const CGSize s = self.bounds.size;
+  if (_rounded) {
+    shape_.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds
+                                             cornerRadius:24]
+                      .CGPath;
+  } else {
+    const CGFloat c = MIN(_chamfer, MIN(s.width, s.height) / 2);
+    UIBezierPath* path = [UIBezierPath bezierPath];
+    [path moveToPoint:CGPointMake(c, 0)];
+    [path addLineToPoint:CGPointMake(s.width - c, 0)];
+    [path addLineToPoint:CGPointMake(s.width, c)];
+    [path addLineToPoint:CGPointMake(s.width, s.height - c)];
+    [path addLineToPoint:CGPointMake(s.width - c, s.height)];
+    [path addLineToPoint:CGPointMake(c, s.height)];
+    [path addLineToPoint:CGPointMake(0, s.height - c)];
+    [path addLineToPoint:CGPointMake(0, c)];
+    [path closePath];
+    shape_.path = path.CGPath;
+  }
   shape_.frame = self.bounds;
+}
+
+@end
+
+// An outlined field with its label cut into the border, Android's exposed
+// dropdown. The label's own background is what makes the gap in the outline.
+@implementation XenraFieldButton {
+  UIView* box_;
+  UILabel* caption_;
+  UILabel* value_;
+  UILabel* help_;
+}
+
+- (instancetype)initWithTitle:(NSString*)title action:(void (^)(void))action {
+  self = [super initWithFrame:CGRectZero];
+  if (self) {
+    _action = [action copy];
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+    box_ = [[UIView alloc] init];
+    box_.userInteractionEnabled = NO;
+    box_.layer.cornerRadius = 8;
+    box_.layer.borderWidth = 1.5;
+    box_.layer.borderColor = XenraAccent().CGColor;
+    box_.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:box_];
+    value_ = XenraMakeLabel(nil, 17, UIFontWeightRegular, XenraText());
+    [box_ addSubview:value_];
+    UIImageView* chevron = [[UIImageView alloc]
+        initWithImage:[UIImage systemImageNamed:@"arrowtriangle.down.fill"]];
+    chevron.tintColor = XenraTextMuted();
+    chevron.contentMode = UIViewContentModeScaleAspectFit;
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    [box_ addSubview:chevron];
+    caption_ = XenraMakeLabel(
+        [NSString stringWithFormat:@" %@ ", title], 12, UIFontWeightRegular,
+        XenraTextMuted());
+    caption_.backgroundColor = XenraPanelFill();
+    [self addSubview:caption_];
+    help_ = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
+    help_.numberOfLines = 0;
+    [self addSubview:help_];
+    [NSLayoutConstraint activateConstraints:@[
+      [box_.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+      [box_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+      [box_.topAnchor constraintEqualToAnchor:self.topAnchor constant:8],
+      [box_.heightAnchor constraintEqualToConstant:56],
+      [caption_.leadingAnchor constraintEqualToAnchor:self.leadingAnchor
+                                             constant:12],
+      [caption_.centerYAnchor constraintEqualToAnchor:box_.topAnchor],
+      [value_.leadingAnchor constraintEqualToAnchor:box_.leadingAnchor
+                                           constant:16],
+      [value_.centerYAnchor constraintEqualToAnchor:box_.centerYAnchor],
+      [value_.trailingAnchor constraintLessThanOrEqualToAnchor:chevron.leadingAnchor
+                                                      constant:-8],
+      [chevron.trailingAnchor constraintEqualToAnchor:box_.trailingAnchor
+                                             constant:-16],
+      [chevron.centerYAnchor constraintEqualToAnchor:box_.centerYAnchor],
+      [chevron.widthAnchor constraintEqualToConstant:12],
+      [chevron.heightAnchor constraintEqualToConstant:12],
+      [help_.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
+      [help_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor
+                                           constant:-16],
+      [help_.topAnchor constraintEqualToAnchor:box_.bottomAnchor constant:6],
+      [help_.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+    ]];
+    [self addTarget:self
+                  action:@selector(fire)
+        forControlEvents:UIControlEventTouchUpInside];
+  }
+  return self;
+}
+
+- (void)setValue:(NSString*)value {
+  _value = [value copy];
+  value_.text = value;
+}
+
+- (void)setDetail:(NSString*)detail {
+  _detail = [detail copy];
+  help_.text = detail;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+  [super setHighlighted:highlighted];
+  box_.backgroundColor = highlighted ? XenraAccentAlpha(0x22) : nil;
+}
+
+- (void)fire {
+  XenraLog([NSString stringWithFormat:@"tap: %@", caption_.text]);
+  if (_action) _action();
 }
 
 @end
@@ -316,6 +439,7 @@ static UIView* HintPill(NSString* letter, NSString* text, UIColor* color) {
         forControlEvents:UIControlEventTouchUpInside];
     UIView* b = HintPill(@"B", @"Back", XenraAccent());
     [back_ addSubview:b];
+    self.backgroundColor = XenraPick(0xCC0A0A06, 0x66E2EFB4, 0xCC0A0A0B);
     UIView* a = HintPill(@"A", @"Select", XenraAccent());
     [self addSubview:back_];
     [self addSubview:a];

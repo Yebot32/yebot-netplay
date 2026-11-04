@@ -16,7 +16,7 @@ static NSArray<NSString*>* XenraGameExtensions() {
   dispatch_once(&once, ^{
     // Copy of an autoreleased literal: the static holds the single +1.
     ext = [@[
-      @"iso", @"xex", @"zar", @"god", @"con", @"live", @"pirs", @"xbe"
+      @"iso", @"xiso", @"cci", @"xex", @"zar", @"god", @"con", @"live", @"pirs", @"xbe"
     ] copy];
   });
   return ext;

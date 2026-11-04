@@ -11,6 +11,17 @@
 
 // A framed panel with cut corners, Android's ChamferedPanelView.
 @interface XenraPanelView : UIView
+@property(nonatomic, assign) BOOL rounded;
+@property(nonatomic, assign) CGFloat chamfer;
+- (void)setFill:(UIColor*)fill;
+@end
+
+// A setting with a choice of values: an outlined field, its name in the border.
+@interface XenraFieldButton : UIControl
+@property(nonatomic, copy) NSString* value;
+@property(nonatomic, copy) NSString* detail;
+@property(nonatomic, copy) void (^action)(void);
+- (instancetype)initWithTitle:(NSString*)title action:(void (^)(void))action;
 @end
 
 // One tappable blade, Android's Widget.Xaniteog.Blade.

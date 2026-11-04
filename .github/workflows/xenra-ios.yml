@@ -62,6 +62,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   # The CMake source root is THIS repo's root, not the xenia tree. The root
@@ -239,6 +240,28 @@ jobs:
     # must be a direct child of it. Get any of that wrong and installd rejects
     # the archive with a message that says nothing useful.
     #
+    # The original Xbox core is built by xemu-ios-core.yml, which takes far
+    # longer than this job and changes far less. Without one the app still
+    # builds, and the library says so.
+    - name: Fetch the original Xbox core
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -uo pipefail
+        APP=$(find build-ios -maxdepth 5 -name 'xenra-ios.app' -type d | head -n 1)
+        RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow xemu-ios-core.yml \
+              --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+        if [ -z "$RUN" ]; then
+          echo "::warning::No xemu-ios-core build yet."
+          exit 0
+        fi
+        gh run download "$RUN" --repo "$GITHUB_REPOSITORY" --name xemu-ios-core --dir core-artifact
+        tar -xzf core-artifact/xemu-ios-core.tar.gz -C core-artifact
+        mkdir -p "$APP/Frameworks"
+        cp -R core-artifact/core/. "$APP/Frameworks/"
+        install_name_tool -add_rpath @loader_path "$APP/Frameworks/libxemu-ios-core.dylib" || true
+        ls -la "$APP/Frameworks"
+
     # This produces an UNSIGNED ipa, and that is the default, not a failure
     # mode. A user on Windows signs it with their own certificate via
     # Sideloadly, and that path is the one that actually yields a

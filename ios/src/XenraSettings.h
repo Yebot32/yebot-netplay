@@ -69,9 +69,9 @@ typedef NS_ENUM(NSInteger, XenraRowKind) {
 // Files and folders picked in setup, kept across launches.
 + (void)storeBookmark:(NSURL*)url key:(NSString*)key;
 + (NSURL*)urlForBookmark:(NSString*)key;
-// Opens the picked 360 folder for the life of the process, which a boot and a
-// scan both need.
-+ (void)holdGameFolder;
+// Opens every picked file and folder for the life of the process, which a boot
+// and a scan both need.
++ (void)holdPickedFiles;
 + (NSArray<NSString*>*)gameFolders;
 
 // Pushes every cvar row into the core. Call right before boot.

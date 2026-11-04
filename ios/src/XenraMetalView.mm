@@ -27,4 +27,17 @@
   }
 }
 
+
+- (void)layoutSubviews {
+  [super layoutSubviews];
+  if (!_tracksBounds) return;
+  CAMetalLayer* layer = (CAMetalLayer*)self.layer;
+  const CGFloat scale = self.contentScaleFactor;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  layer.drawableSize = CGSizeMake(MAX(1, self.bounds.size.width * scale),
+                                  MAX(1, self.bounds.size.height * scale));
+  [CATransaction commit];
+}
+
 @end

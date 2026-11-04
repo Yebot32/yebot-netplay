@@ -85,6 +85,7 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   [self.view addSubview:dots_];
 
   panel_ = [[XenraPanelView alloc] initWithFrame:CGRectZero];
+  panel_.rounded = YES;
   panel_.layer.cornerRadius = 24;
   panel_.clipsToBounds = YES;
   panel_.translatesAutoresizingMaskIntoConstraints = NO;
@@ -250,8 +251,9 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
     case 1:
       [self addTitle:@"BIOS Files"
                 body:@"Choose your Xbox BIOS, MCPX ROM, and hard disk image. "
-                      "Only the original Xbox needs these, and it is not on "
-                      "iOS yet, so you can skip this step for now."
+                      "Original Xbox games need all three. Xbox 360 games "
+                      "need none of them, so you can skip this if that is all "
+                      "you play."
                   to:stack];
       [self addSlot:@"mcpx"
               title:@"MCPX Boot ROM"
@@ -277,7 +279,7 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
                   to:stack];
       [self addSlot:@"games.og"
               title:@"Original Xbox Games"
-               hint:@"Optional for now"
+               hint:@"Games in Xenra / Games OG are found as well."
              button:@"Choose Original Xbox Folder"
                  to:stack];
       break;
@@ -447,7 +449,7 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   [url startAccessingSecurityScopedResource];
   [XenraSettings storeBookmark:url key:pickingKey_];
   [url stopAccessingSecurityScopedResource];
-  if ([pickingKey_ isEqual:@"games.360"]) [XenraSettings holdGameFolder];
+  [XenraSettings holdPickedFiles];
   [self refreshPage];
 }
 

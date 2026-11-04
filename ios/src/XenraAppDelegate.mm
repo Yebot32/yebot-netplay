@@ -74,7 +74,7 @@ void XenraOpenJitEnabler(void) {
   self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
   self.window.backgroundColor = UIColor.blackColor;
 
-  [XenraSettings holdGameFolder];
+  [XenraSettings holdPickedFiles];
   self.window.rootViewController = XenraMakeRoot(XenraDashboardEntryPlain);
   [self.window makeKeyAndVisible];
 

@@ -8,6 +8,7 @@
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
+#import "XenraXemu.h"
 
 // item_game_cover.xml: a card, then a title that always reserves two lines.
 @interface XenraGameCell : UICollectionViewCell
@@ -15,10 +16,13 @@
 @property(nonatomic, strong) UILabel* name;
 @property(nonatomic, strong) UILabel* detail;
 - (void)useListLayout:(BOOL)list;
+- (void)setCoverImage:(UIImage*)image;
 @end
 
 @implementation XenraGameCell {
   UIView* card_;
+  XenraPanelView* row_;
+  UILabel* unknown_;
   NSArray<NSLayoutConstraint*>* gridConstraints_;
   NSArray<NSLayoutConstraint*>* listConstraints_;
 }
@@ -26,6 +30,12 @@
 - (instancetype)initWithFrame:(CGRect)frame {
   self = [super initWithFrame:frame];
   if (self) {
+    row_ = [[XenraPanelView alloc] initWithFrame:CGRectZero];
+    row_.chamfer = 14;
+    [row_ setFill:XenraPick(0xFF241D0B, 0xA0D8E8A4, 0xFF171719)];
+    row_.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:row_];
+
     card_ = [[UIView alloc] init];
     card_.backgroundColor = XenraBladeFill();
     card_.layer.cornerRadius = 18;
@@ -34,6 +44,11 @@
     card_.clipsToBounds = YES;
     card_.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:card_];
+
+    // The same "no art yet" mark as Android's list.
+    unknown_ = XenraMakeLabel(@"?", 34, UIFontWeightBold, XenraAccent());
+    unknown_.textAlignment = NSTextAlignmentCenter;
+    [card_ addSubview:unknown_];
 
     _cover = [[UIImageView alloc] init];
     _cover.contentMode = UIViewContentModeScaleAspectFit;
@@ -47,6 +62,12 @@
     [self.contentView addSubview:_detail];
 
     [NSLayoutConstraint activateConstraints:@[
+      [unknown_.centerXAnchor constraintEqualToAnchor:card_.centerXAnchor],
+      [unknown_.centerYAnchor constraintEqualToAnchor:card_.centerYAnchor],
+      [row_.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
+      [row_.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor],
+      [row_.topAnchor constraintEqualToAnchor:self.contentView.topAnchor],
+      [row_.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor],
       [_cover.leadingAnchor constraintEqualToAnchor:card_.leadingAnchor],
       [_cover.trailingAnchor constraintEqualToAnchor:card_.trailingAnchor],
       [_cover.topAnchor constraintEqualToAnchor:card_.topAnchor],
@@ -63,20 +84,27 @@
       [_name.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
     ];
     listConstraints_ = @[
-      [card_.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+      [card_.leadingAnchor constraintEqualToAnchor:content.leadingAnchor
+                                          constant:16],
       [card_.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
-      [card_.widthAnchor constraintEqualToConstant:56],
-      [card_.heightAnchor constraintEqualToConstant:56],
+      [card_.widthAnchor constraintEqualToConstant:60],
+      [card_.heightAnchor constraintEqualToConstant:60],
       [_name.leadingAnchor constraintEqualToAnchor:card_.trailingAnchor
                                           constant:14],
-      [_name.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-      [_name.bottomAnchor constraintEqualToAnchor:content.centerYAnchor],
-      [_detail.leadingAnchor constraintEqualToAnchor:_name.leadingAnchor],
-      [_detail.topAnchor constraintEqualToAnchor:content.centerYAnchor
-                                        constant:2],
+      [_name.trailingAnchor constraintLessThanOrEqualToAnchor:_detail.leadingAnchor
+                                                     constant:-12],
+      [_name.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
+      [_detail.trailingAnchor constraintEqualToAnchor:content.trailingAnchor
+                                             constant:-24],
+      [_detail.centerYAnchor constraintEqualToAnchor:content.centerYAnchor],
     ];
   }
   return self;
+}
+
+- (void)setCoverImage:(UIImage*)image {
+  _cover.image = image;
+  unknown_.hidden = image != nil;
 }
 
 - (void)useListLayout:(BOOL)list {
@@ -85,6 +113,8 @@
   [NSLayoutConstraint activateConstraints:list ? listConstraints_
                                                : gridConstraints_];
   _detail.hidden = !list;
+  row_.hidden = !list;
+  card_.layer.borderWidth = list ? 0 : 1;
   _name.textAlignment = list ? NSTextAlignmentLeft : NSTextAlignmentCenter;
   _name.numberOfLines = list ? 1 : 2;
 }
@@ -99,6 +129,8 @@
 @implementation XenraLibraryController {
   UICollectionView* collection_;
   UILabel* stats_;
+  UIButton* listButton_;
+  UIButton* gridButton_;
   UILabel* empty_;
   UIActivityIndicatorView* spinner_;
   XenraGameScanner* scanner_;
@@ -108,26 +140,23 @@
 }
 
 static NSString* GamesDir(void) {
-  NSString* docs = NSSearchPathForDirectoriesInDomains(
-                       NSDocumentDirectory, NSUserDomainMask, YES)
-                       .firstObject;
-  return [docs stringByAppendingPathComponent:@"Games"];
+  return [XenraSettings gameFolders].firstObject;
 }
 
 static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
   UIButton* button = [UIButton buttonWithType:UIButtonTypeSystem];
   [button setImage:[UIImage systemImageNamed:symbol] forState:UIControlStateNormal];
   button.tintColor = XenraAccent();
-  button.layer.cornerRadius = 10;
-  button.layer.borderWidth = 1;
-  button.layer.borderColor = XenraAccentAlpha(0x66).CGColor;
+  button.layer.cornerRadius = 22;
+  button.layer.borderWidth = 2;
+  button.layer.borderColor = XenraAccent().CGColor;
   [button addTarget:target
                 action:action
       forControlEvents:UIControlEventTouchUpInside];
   button.translatesAutoresizingMaskIntoConstraints = NO;
   [NSLayoutConstraint activateConstraints:@[
     [button.widthAnchor constraintEqualToConstant:44],
-    [button.heightAnchor constraintEqualToConstant:40],
+    [button.heightAnchor constraintEqualToConstant:44],
   ]];
   return button;
 }
@@ -164,10 +193,13 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
       initWithArrangedSubviews:@[ title, spring, spinner_, stats_ ]];
   header.spacing = 10;
   header.alignment = UIStackViewAlignmentCenter;
+  listButton_ = ToolButton(@"list.bullet", self, @selector(showList));
+  gridButton_ = ToolButton(@"square.grid.2x2", self, @selector(showGrid));
+  [self updateViewButtons];
   UIStackView* tools = [[UIStackView alloc] initWithArrangedSubviews:@[
     display, spring2,
-    ToolButton(@"list.bullet", self, @selector(showList)),
-    ToolButton(@"square.grid.2x2", self, @selector(showGrid)),
+    listButton_,
+    gridButton_,
     ToolButton(@"ellipsis", self, @selector(showOverflow)),
   ]];
   tools.spacing = 8;
@@ -247,12 +279,11 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
 }
 
 - (void)rescan {
-  if ([XenraSettings console] == XenraConsoleOG) {
-    // Phase 2 of the port. Say so rather than show an empty shelf.
+  if ([XenraSettings console] == XenraConsoleOG && !XenraXemuAvailable()) {
     games_ = @[];
     stats_.text = nil;
-    empty_.text = @"Original Xbox cores are not in this build yet. Switch the "
-                   "console to Xbox 360 on the dashboard.";
+    empty_.text = @"This build has no original Xbox core. Switch the console "
+                   "to Xbox 360 on the dashboard.";
     empty_.hidden = NO;
     [collection_ reloadData];
     return;
@@ -272,7 +303,7 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
                                            (unsigned long)games.count];
   empty_.hidden = games.count > 0;
   empty_.text = @"No supported games found in this folder.\n\nAdd them to "
-                 "Xenra / Games in the Files app, or use Install content "
+                 "Xenra in the Files app, or use Install content "
                  "from the … menu.";
   [collection_ reloadData];
   [collection_ layoutIfNeeded];
@@ -281,9 +312,18 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
 
 // --- View modes -------------------------------------------------------------
 
+- (void)updateViewButtons {
+  for (UIButton* button in @[ listButton_, gridButton_ ]) {
+    const BOOL chosen = (button == listButton_) == listMode_;
+    button.backgroundColor = chosen ? XenraAccent() : UIColor.clearColor;
+    button.tintColor = chosen ? XenraOnAccent() : XenraAccent();
+  }
+}
+
 - (void)setListMode:(BOOL)list {
   listMode_ = list;
   [XenraSettings setString:list ? @"list" : @"grid" forKey:@"library.view"];
+  [self updateViewButtons];
   [collection_ reloadData];
 }
 - (void)showList {
@@ -356,7 +396,7 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
   [cell useListLayout:listMode_];
   cell.name.text = game.name;
   cell.detail.text = game.subtitle;
-  cell.cover.image = [scanner_ coverForEntryNamed:game.name];
+  [cell setCoverImage:[scanner_ coverForEntryNamed:game.name]];
   return cell;
 }
 
@@ -372,7 +412,7 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
                     layout:(UICollectionViewLayout*)layout
     sizeForItemAtIndexPath:(NSIndexPath*)path {
   const CGFloat width = view.bounds.size.width;
-  if (listMode_) return CGSizeMake(width, 68);
+  if (listMode_) return CGSizeMake(width, 84);
   const NSInteger columns = MAX(2, (NSInteger)(width / 170));
   const CGFloat side = floor((width - 14 * (columns - 1)) / columns);
   return CGSizeMake(side, side + 52);
