@@ -52,6 +52,10 @@ jobs:
             echo "applying $p"
             git -C "$HOME/xemu" apply "$PWD/$p"
           done
+          # Meson only runs CMake subprojects (volk, glslang) in a cross build if
+          # the cross file names cmake, and configure does not write it.
+          perl -pi -e 's/^(\s*)echo "\[binaries\]" >> \$cross$/$1echo "[binaries]" >> \$cross\n$1echo "cmake = [\x27cmake\x27]" >> \$cross/' "$HOME/xemu/configure"
+          grep -n "cmake = " "$HOME/xemu/configure"
 
       - name: Restore libraries
         id: libs
