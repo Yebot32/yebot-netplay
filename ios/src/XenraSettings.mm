@@ -101,9 +101,7 @@ static XenraSettingRow* CoreRow() {
           ]) ]),
       Tab(@"Input",
           @[ Section(@"Touch controls", @[
-            Toggle(@"pad.visible", @"Show touch controls",
-                   @"Hidden automatically while a controller is connected.",
-                   YES),
+            Toggle(@"pad.visible", @"Show touch controls", nil, YES),
             Choice(@"pad.scale", @"Controls size", nil,
                    @[ @"Small", @"Normal", @"Large" ],
                    @[ @"0.8", @"1.0", @"1.25" ], @"1.0"),
@@ -119,7 +117,8 @@ static XenraSettingRow* CoreRow() {
           ]),
       Tab(@"Maintenance",
           @[ Section(@"Maintenance", @[
-            Action(@"log.share", @"Share diagnostics log", nil),
+            Action(@"log.share", @"Share logs",
+                   @"Core log, crash reports and device details, as one file."),
             Action(@"cache.clear", @"Clear shader cache",
                    @"Games compile their shaders again on next launch."),
           ]) ]),

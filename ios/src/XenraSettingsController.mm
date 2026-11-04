@@ -1,6 +1,7 @@
 #import "XenraScreens.h"
 
 #import "XenraBladeView.h"
+#import "XenraLogs.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
@@ -229,15 +230,7 @@
   if ([row.key isEqual:@"jit.enable"]) {
     XenraOpenJitEnabler();
   } else if ([row.key isEqual:@"log.share"]) {
-    NSURL* url = [NSURL fileURLWithPath:XenraLogPath()];
-    UIActivityViewController* share =
-        [[UIActivityViewController alloc] initWithActivityItems:@[ url ]
-                                          applicationActivities:nil];
-    share.popoverPresentationController.sourceView = self.view;
-    share.popoverPresentationController.sourceRect =
-        CGRectMake(CGRectGetMidX(self.view.bounds),
-                   CGRectGetMidY(self.view.bounds), 1, 1);
-    [self presentViewController:share animated:YES completion:nil];
+    XenraShareLogs(self, nil);
   } else if ([row.key isEqual:@"cache.clear"]) {
     NSString* caches = NSSearchPathForDirectoriesInDomains(
                            NSCachesDirectory, NSUserDomainMask, YES)

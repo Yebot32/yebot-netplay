@@ -4,6 +4,7 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
+#import "XenraLogs.h"
 #import "XenraScreens.h"
 #include "ios_emu.h"
 #include "xenia/base/memory.h"
@@ -66,6 +67,8 @@ void XenraOpenJitEnabler(void) {
 
 - (BOOL)application:(UIApplication*)application
     didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
+  XenraLogsBegin();
+
   self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
   self.window.backgroundColor = UIColor.blackColor;
 
@@ -78,8 +81,11 @@ void XenraOpenJitEnabler(void) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(
                        NSDocumentDirectory, NSUserDomainMask, YES)
                        .firstObject;
-  const int rc =
-      xe_ios_initialize(docs.UTF8String, NSTemporaryDirectory().UTF8String);
+  NSString* caches = NSSearchPathForDirectoriesInDomains(
+                         NSCachesDirectory, NSUserDomainMask, YES)
+                         .firstObject;
+  const int rc = xe_ios_initialize(docs.UTF8String, caches.UTF8String,
+                                   XenraLogsCorePath().UTF8String);
 
   char model[64] = {0};
   size_t size = sizeof(model) - 1;

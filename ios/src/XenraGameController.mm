@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 
+#import "XenraLogs.h"
 #import "XenraMetalView.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
@@ -118,6 +119,7 @@
   [XenraSettings applyForGame:name_];
   xe_ios_set_game_view(metal_);
   XenraLog([NSString stringWithFormat:@"boot: %@", path_.lastPathComponent]);
+  XenraLogsBeginSession();
   const int rc = xe_ios_boot(path_.UTF8String);
   if (rc != 0) {
     [self showFailure:@(xe_ios_status_detail())];
@@ -132,13 +134,21 @@
 - (void)showFailure:(NSString*)detail {
   XenraLog([NSString stringWithFormat:@"boot failed: %@", detail]);
   __weak XenraGameController* weak = self;
+  XenraBladeItem* share = [XenraBladeItem
+      title:@"Share Logs"
+      action:^{
+        // The sheet closes on any tap, and this screen has no other way out.
+        XenraShareLogs(weak, ^{
+          [weak showFailure:detail];
+        });
+      }];
   [XenraBladeSheet showIn:self.view
                     title:@"Could not start the game"
                   message:detail
-                    items:@[ [XenraBladeItem title:@"Quit App"
-                                            action:^{
-                                              [weak quit];
-                                            }] ]];
+                    items:@[ share, [XenraBladeItem title:@"Quit App"
+                                                   action:^{
+                                                     [weak quit];
+                                                   }] ]];
 }
 
 - (void)tick {
@@ -213,6 +223,10 @@
       action:^{
         pad.hidden = !pad.hidden;
       }];
+  XenraBladeItem* share = [XenraBladeItem title:@"Share Logs"
+                                         action:^{
+                                           XenraShareLogs(weak, nil);
+                                         }];
   // One title per process, so leaving a game ends the app; the same is true
   // of Quit, and Android's Exit to Game Library has no iOS counterpart yet.
   XenraBladeItem* quit = [XenraBladeItem title:@"Quit App"
@@ -223,10 +237,11 @@
   [XenraBladeSheet showIn:self.view
                     title:@"Game Menu"
                   message:nil
-                    items:@[ resume, touch, quit ]];
+                    items:@[ resume, touch, share, quit ]];
 }
 
 - (void)quit {
+  XenraLogsEndSession();
   if (xe_ios_status() == 1) {
     // Boot in flight: the boot thread may be parked in a CallInUIThread
     // marshaled to this very thread, so joining it here would hang.

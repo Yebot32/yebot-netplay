@@ -24,6 +24,7 @@ set(_xe_ios_arc_sources
   "${_xe_ios_dir}/src/XenraAppDelegate.mm"
   "${_xe_ios_dir}/src/XenraDashboardController.mm"
   "${_xe_ios_dir}/src/XenraGameController.mm"
+  "${_xe_ios_dir}/src/XenraLogs.mm"
   "${_xe_ios_dir}/src/XenraLibraryController.mm"
   "${_xe_ios_dir}/src/XenraSettings.mm"
   "${_xe_ios_dir}/src/XenraSettingsController.mm"
@@ -38,6 +39,7 @@ add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/main.mm"
   "${_xe_ios_dir}/src/XenraAudio.h"
   "${_xe_ios_dir}/src/XenraAudio.mm"
+  "${_xe_ios_dir}/src/XenraLogs.h"
   "${_xe_ios_dir}/src/XenraScreens.h"
   "${_xe_ios_dir}/src/XenraSettings.h"
   "${_xe_ios_dir}/src/XenraTouchPad.h"
@@ -165,5 +167,12 @@ set_target_properties(xenra-ios PROPERTIES
 
 # The screens are new code and use ARC. Source options come after the target's
 # -fno-objc-arc on the command line, so they win.
+# Named in shared logs, so a report says which build it came from.
+execute_process(COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY "${_xe_ios_dir}"
+  OUTPUT_VARIABLE _xe_ios_build_id OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+set_source_files_properties("${_xe_ios_dir}/src/XenraLogs.mm" PROPERTIES
+  COMPILE_DEFINITIONS "XENRA_BUILD_ID=\"${_xe_ios_build_id}\"")
 set_source_files_properties(${_xe_ios_arc_sources} PROPERTIES
   COMPILE_OPTIONS "-fobjc-arc")

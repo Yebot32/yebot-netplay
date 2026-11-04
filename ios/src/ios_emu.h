@@ -28,8 +28,9 @@ extern "C" {
 
 // Called once on the main thread before anything else. documents_dir is the
 // app's Documents directory (storage root); caches_dir the app's Caches
-// directory. Returns 0 on success.
-int xe_ios_initialize(const char* documents_dir, const char* caches_dir);
+// directory; log_path where the core log goes. Returns 0 on success.
+int xe_ios_initialize(const char* documents_dir, const char* caches_dir,
+                      const char* log_path);
 
 // Points the emulator's surface at the game view (the CAMetalLayer-backed
 // UIView). Call on the main thread before xe_ios_boot.
@@ -61,6 +62,9 @@ void xe_ios_set_cvar(const char* name, const char* value);
 
 // Shuts the emulator down and releases the window. Call on the main thread.
 void xe_ios_shutdown(void);
+
+// Puts everything logged so far on disk. Safe before init and after shutdown.
+void xe_ios_flush_log(void);
 
 #ifdef __cplusplus
 }

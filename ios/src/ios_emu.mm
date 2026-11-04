@@ -61,6 +61,8 @@
 // backends the iOS shell actually provides.
 DEFINE_string(apu, "nop", "Audio system. Use: [nop]", "APU");
 DEFINE_string(gpu, "metal", "Graphics system. Use: [metal, null]", "GPU");
+DECLARE_path(log_file);
+
 DEFINE_bool(apu_aaudio_log_stats, false, "Log AAudio stats (Android only)",
             "APU");
 DEFINE_bool(log_host_depth_fallback, false,
@@ -523,7 +525,8 @@ class IosEmuApp {
 // The C API.
 // ---------------------------------------------------------------------------
 
-int xe_ios_initialize(const char* documents_dir, const char* caches_dir) {
+int xe_ios_initialize(const char* documents_dir, const char* caches_dir,
+                      const char* log_path) {
   if (g_app) {
     return -1;
   }
@@ -531,9 +534,12 @@ int xe_ios_initialize(const char* documents_dir, const char* caches_dir) {
   g_caches_dir = caches_dir;
 
   std::filesystem::create_directories(g_documents_dir / "config");
-  std::filesystem::create_directories(g_documents_dir / "games");
+  std::filesystem::create_directories(g_documents_dir / "Games");
   std::filesystem::create_directories(g_documents_dir / "content");
 
+  // Before InitializeLogging, which otherwise opens a file in the read-only app
+  // bundle, fails, and logs nowhere without saying so.
+  cvars::log_file = log_path;
   xe::InitializeLogging("xenra-ios");
 
   // The iOS pump never blocks the present thread (see IosWindow).
@@ -559,6 +565,8 @@ int xe_ios_initialize(const char* documents_dir, const char* caches_dir) {
       "", g_documents_dir, g_documents_dir / "content", g_caches_dir);
   return 0;
 }
+
+void xe_ios_flush_log(void) { xe::FlushLog(); }
 
 void xe_ios_set_game_view(UIView* view) { g_game_view = view; }
 

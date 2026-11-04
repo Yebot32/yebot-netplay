@@ -1,6 +1,7 @@
 #import "XenraScreens.h"
 
 #import "XenraBladeView.h"
+#import "XenraLogs.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
@@ -100,6 +101,23 @@
 - (void)viewWillAppear:(BOOL)animated {
   [super viewWillAppear:animated];
   [self updateBlades];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+  [super viewDidAppear:animated];
+  NSString* notice = XenraLogsTakeUncleanExitNotice();
+  if (!notice) return;
+  __weak XenraDashboardController* weak = self;
+  [XenraBladeSheet showIn:self.view
+                    title:@"Last Run"
+                  message:notice
+                    items:@[
+                      [XenraBladeItem title:@"Share Logs"
+                                     action:^{
+                                       XenraShareLogs(weak, nil);
+                                     }],
+                      [XenraBladeItem title:@"Not Now" action:nil],
+                    ]];
 }
 
 - (void)updateBlades {
