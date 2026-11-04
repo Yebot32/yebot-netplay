@@ -111,5 +111,30 @@
 
 	<key>UILaunchScreen</key>
 	<dict/>
+
+	<!-- The in-app orientation lock only applies to a full-screen app. -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
+
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>xenra-icon</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>xenra-icon</string>
+			</array>
+		</dict>
+	</dict>
 </dict>
 </plist>

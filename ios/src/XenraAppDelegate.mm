@@ -6,6 +6,7 @@
 
 #import "XenraLogs.h"
 #import "XenraScreens.h"
+#import "XenraSettings.h"
 #include "ios_emu.h"
 #include "xenia/base/memory.h"
 
@@ -41,8 +42,9 @@ NSString* XenraJitStatusText(void) {
     return @"JIT is on.";
   }
   if (!state.get_task_allow) {
-    return @"This install has no get-task-allow, so JIT cannot be enabled. "
-            "Reinstall with the signer's JIT option on.";
+    return @"This install has no get-task-allow, so iOS will refuse JIT. "
+            "Reinstall with a development certificate, as SideStore, AltStore "
+            "or Sideloadly use. Distribution certificates cannot carry it.";
   }
   return @"Waiting for JIT.\nEnable it in StikDebug, with universal.js assigned "
           "to Xenra, then come back. Keep the tool attached until the game "
@@ -72,10 +74,8 @@ void XenraOpenJitEnabler(void) {
   self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
   self.window.backgroundColor = UIColor.blackColor;
 
-  UINavigationController* navigation = [[UINavigationController alloc]
-      initWithRootViewController:[[XenraDashboardController alloc] init]];
-  navigation.navigationBarHidden = YES;
-  self.window.rootViewController = navigation;
+  [XenraSettings holdGameFolder];
+  self.window.rootViewController = XenraMakeRoot(XenraDashboardEntryPlain);
   [self.window makeKeyAndVisible];
 
   NSString* docs = NSSearchPathForDirectoriesInDomains(

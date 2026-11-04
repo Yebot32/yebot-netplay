@@ -12,7 +12,18 @@
 
 @class XenraGameEntry;
 
+typedef NS_ENUM(NSInteger, XenraDashboardEntry) {
+  XenraDashboardEntryPlain,      // the blades cascade in
+  XenraDashboardEntryCrossfade,  // a console switch: the dissolve is the entrance
+  XenraDashboardEntryArriving,   // from setup: SetupHandoffTransition
+};
+
 @interface XenraDashboardController : UIViewController
+@property(nonatomic, assign) XenraDashboardEntry entry;
+@end
+
+// SetupWizardActivity.
+@interface XenraSetupController : UIViewController
 @end
 
 @interface XenraLibraryController : UIViewController
@@ -27,7 +38,7 @@
 - (instancetype)initWithPath:(NSString*)path name:(NSString*)name;
 @end
 
-// Appends to Documents/xenra-jit-log.txt, which Files can see.
+// Appends a timestamped line to Documents/xenra-jit-log.txt, which Files can see.
 void XenraLog(NSString* line);
 NSString* XenraLogPath(void);
 
@@ -36,3 +47,10 @@ BOOL XenraJitActive(void);
 // A line for the screens: what state JIT is in and what to do about it.
 NSString* XenraJitStatusText(void);
 void XenraOpenJitEnabler(void);
+
+// The window's root: the wizard until setup is finished, then the dashboard.
+// Applies the theme first, since screens read it as they are built.
+UIViewController* XenraMakeRoot(XenraDashboardEntry entry);
+void XenraRestartSetup(UIWindow* window);
+void XenraApplyOrientation(UIViewController* controller);
+void XenraShowPrivacyPolicy(UIView* host);

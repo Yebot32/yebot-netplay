@@ -1,125 +1,161 @@
-/**
- ******************************************************************************
- * Xenra : iOS shell - blade surface + dashboard background (implementation)  *
- ******************************************************************************
- */
-
 #import "XenraBladeView.h"
+
+#import <QuartzCore/QuartzCore.h>
 
 #import "XenraTheme.h"
 
+NSInteger XenraThemeMode = XenraThemeOG;
+
+// dimens.xml: radius_s, blade_rail_width, blade_rail_width_active.
+static const CGFloat kRadius = 8;
+static const CGFloat kRail = 4;
+static const CGFloat kRailActive = 6;
+// The selector's enterFadeDuration and exitFadeDuration.
+static const CFTimeInterval kEnterFade = 0.12;
+static const CFTimeInterval kExitFade = 0.18;
+
 @implementation XenraBladeView {
-  UIBezierPath* path_;
+  CAGradientLayer* fill_;
+  CALayer* rail_;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
   self = [super initWithFrame:frame];
   if (self) {
-    path_ = [[UIBezierPath bezierPath] retain];
     self.backgroundColor = UIColor.clearColor;
-    self.opaque = NO;
+    fill_ = [CAGradientLayer layer];
+    fill_.startPoint = CGPointMake(0, 0.5);
+    fill_.endPoint = CGPointMake(1, 0.5);
+    fill_.cornerRadius = kRadius;
+    [self.layer addSublayer:fill_];
+    rail_ = [CALayer layer];
+    [self.layer addSublayer:rail_];
+    [self apply];
   }
   return self;
 }
 
-- (void)dealloc {
-  [path_ release];
-  [super dealloc];
-}
-
-- (void)layoutSubviews {
-  [super layoutSubviews];
-  // 10dp chamfer at the device scale, exactly like GameBladeView.
-  CGFloat chamfer = 10.0 * self.traitCollection.displayScale;
-  if (chamfer <= 0.0) {
-    chamfer = 10.0;
+- (void)apply {
+  uint8_t start = 0x33, center = 0x1A, end = 0;
+  if (_state == XenraBladePressed) {
+    start = 0xAA, center = 0x55, end = 0x14;
+  } else if (_state == XenraBladeChosen) {
+    start = 0x88, center = 0x4D, end = 0x14;
   }
-  XenraPathBlade(path_, self.bounds, chamfer);
-  [self setNeedsDisplay];
-}
-
-- (void)drawRect:(CGRect)rect {
-  if (self.bladeSelected) {
-    // The selected state on Android is a vertical gradient from the deep
-    // selected-end colour up to the bright stroke colour.
-    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-    CGFloat comps[2][4] = {
-        {0xA6 / 255.0, 0x6B / 255.0, 0.0, 1.0},
-        {0xFF / 255.0, 0xF0 / 255.0, 0xA0 / 255.0, 1.0},
-    };
-    CGFloat locations[2] = {0.0, 1.0};
-    CGGradientRef gradient =
-        CGGradientCreateWithColorComponents(space, &comps[0][0], locations, 2);
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    CGContextSaveGState(ctx);
-    CGContextAddPath(ctx, path_.CGPath);
-    CGContextClip(ctx);
-    CGPoint top =
-        CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMinY(self.bounds));
-    CGPoint bottom =
-        CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMaxY(self.bounds));
-    CGContextDrawLinearGradient(ctx, gradient, top, bottom, 0);
-    CGContextRestoreGState(ctx);
-    CGGradientRelease(gradient);
-    CGColorSpaceRelease(space);
-  } else {
-    [XenraBladeFill() setFill];
-    [path_ fill];
+  if (_primary) {
+    start = 0xFF, center = 0xCC, end = 0x88;
+    if (_state == XenraBladePressed) center = end = 0xFF;
   }
-  [XenraAccent55() setStroke];
-  path_.lineWidth = 1.5;
-  [path_ stroke];
+  fill_.colors = @[
+    (id)XenraAccentAlpha(start).CGColor, (id)XenraAccentAlpha(center).CGColor,
+    (id)XenraAccentAlpha(end).CGColor
+  ];
+  rail_.backgroundColor =
+      XenraAccentAlpha(_state == XenraBladeResting ? 0xCC : 0xFF).CGColor;
+  [self placeRail];
 }
 
-@end
-
-@implementation XenraDashboardBackground {
-  CAGradientLayer* gradient_;
-  CAGradientLayer* glow_;
+- (void)placeRail {
+  rail_.frame = CGRectMake(0, 0, _state == XenraBladeResting ? kRail : kRailActive,
+                           self.bounds.size.height);
 }
 
-- (instancetype)initWithFrame:(CGRect)frame {
-  self = [super initWithFrame:frame];
-  if (self) {
-    self.backgroundColor = XenraBlack();
-
-    gradient_ = [CAGradientLayer layer];
-    gradient_.colors = @[ (id)XenraBgGradStart().CGColor,
-                          (id)XenraBgGradCenter().CGColor,
-                          (id)XenraBgGradEnd().CGColor ];
-    gradient_.locations = @[ @0.0, @0.45, @1.0 ];
-    [self.layer addSublayer:gradient_];
-
-    // The radial gold glow sits behind the header, like the Android
-    // dashboard's radial gold. Centered near the top, wide and soft.
-    glow_ = [CAGradientLayer layer];
-    glow_.type = kCAGradientLayerRadial;
-    UIColor* clearStop = [XenraColor(0, 0, 0, 0) autorelease];
-    glow_.colors = @[ (id)XenraGlowStrong().CGColor,
-                      (id)XenraGlowSoft().CGColor,
-                      (id)XenraGlowFloor().CGColor,
-                      (id)clearStop.CGColor ];
-    glow_.locations = @[ @0.0, @0.35, @0.7, @1.0 ];
-    glow_.startPoint = CGPointMake(0.5, 0.5);
-    glow_.endPoint = CGPointMake(0.5, 1.0);
-    [self.layer addSublayer:glow_];
-  }
-  return self;
+- (void)setState:(XenraBladeState)state {
+  if (state == _state) return;
+  const BOOL lighting = state > _state;
+  _state = state;
+  [CATransaction begin];
+  [CATransaction setAnimationDuration:lighting ? kEnterFade : kExitFade];
+  [self apply];
+  [CATransaction commit];
 }
 
-- (void)dealloc {
-  [gradient_ release];
-  [glow_ release];
-  [super dealloc];
+- (void)setPrimary:(BOOL)primary {
+  _primary = primary;
+  [self apply];
 }
 
 - (void)layoutSubviews {
   [super layoutSubviews];
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
-  gradient_.frame = self.bounds;
-  CGFloat w = self.bounds.size.width;
-  glow_.frame = CGRectMake(-w * 0.25, -w * 0.25, w * 1.5, w * 1.5);
+  fill_.frame = self.bounds;
+  [self placeRail];
+  [CATransaction commit];
+}
+
+@end
+
+// A radial gradient is drawn in a square layer, so that its circle stays one.
+static CAGradientLayer* Bloom(NSArray* colors) {
+  CAGradientLayer* layer = [CAGradientLayer layer];
+  layer.type = kCAGradientLayerRadial;
+  layer.colors = colors;
+  layer.startPoint = CGPointMake(0.5, 0.5);
+  layer.endPoint = CGPointMake(1, 1);
+  return layer;
+}
+
+@implementation XenraDashboardBackground {
+  CAGradientLayer* across_;
+  CAGradientLayer* vignette_;
+  CAGradientLayer* bloom_;
+  CAGradientLayer* floor_;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+  self = [super initWithFrame:frame];
+  if (self) {
+    self.backgroundColor = XenraCharcoal();
+    self.clipsToBounds = YES;
+    id clear = (id)XenraAccentAlpha(0).CGColor;
+    bloom_ = Bloom(@[
+      (id)XenraAccentAlpha(0x4D).CGColor, (id)XenraAccentAlpha(0x1A).CGColor,
+      clear
+    ]);
+    floor_ = Bloom(@[ (id)XenraAccentAlpha(0x14).CGColor, clear ]);
+    [self.layer addSublayer:bloom_];
+    [self.layer addSublayer:floor_];
+  }
+  return self;
+}
+
+- (instancetype)initForDashboardWithFrame:(CGRect)frame {
+  self = [super initWithFrame:frame];
+  if (self) {
+    self.backgroundColor = XenraBgGradStart();
+    across_ = [CAGradientLayer layer];
+    across_.colors = @[
+      (id)XenraBgGradStart().CGColor, (id)XenraBgGradCenter().CGColor,
+      (id)XenraBgGradEnd().CGColor
+    ];
+    across_.startPoint = CGPointMake(0, 0.5);
+    across_.endPoint = CGPointMake(1, 0.5);
+    [self.layer addSublayer:across_];
+    vignette_ = [CAGradientLayer layer];
+    vignette_.colors = @[
+      (id)XenraVignetteBottom().CGColor, (id)UIColor.clearColor.CGColor,
+      (id)XenraVignetteTop().CGColor
+    ];
+    [self.layer addSublayer:vignette_];
+  }
+  return self;
+}
+
+- (void)layoutSubviews {
+  [super layoutSubviews];
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  across_.frame = self.bounds;
+  vignette_.frame = self.bounds;
+  const CGSize size = self.bounds.size;
+  // gradientRadius 115%p and 95%p, around y = 0.18 and y = 1.05.
+  const CGFloat side = MIN(size.width, size.height);
+  const CGFloat bloom = side * 2.3, floor = side * 1.9;
+  bloom_.frame = CGRectMake(size.width / 2 - bloom / 2,
+                            size.height * 0.18 - bloom / 2, bloom, bloom);
+  floor_.frame = CGRectMake(size.width / 2 - floor / 2,
+                            size.height * 1.05 - floor / 2, floor, floor);
   [CATransaction commit];
 }
 

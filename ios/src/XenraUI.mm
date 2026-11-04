@@ -1,6 +1,8 @@
 #import "XenraUI.h"
 
 #import "XenraBladeView.h"
+#import "XenraMotion.h"
+#import "XenraScreens.h"
 #import "XenraTheme.h"
 
 UIImage* XenraBundleImage(NSString* name) {
@@ -46,8 +48,8 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
     self.backgroundColor = UIColor.clearColor;
     shape_ = [CAShapeLayer layer];
     shape_.fillColor = XenraPanelFill().CGColor;
-    shape_.strokeColor = [XenraAccent() colorWithAlphaComponent:0.4].CGColor;
-    shape_.lineWidth = 1;
+    shape_.strokeColor = XenraAccent().CGColor;
+    shape_.lineWidth = 2;
     [self.layer insertSublayer:shape_ atIndex:0];
   }
   return self;
@@ -55,9 +57,9 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
 
 - (void)layoutSubviews {
   [super layoutSubviews];
-  UIBezierPath* path = [UIBezierPath bezierPath];
-  XenraPathBlade(path, self.bounds, 20);
-  shape_.path = path.CGPath;
+  shape_.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds
+                                           cornerRadius:24]
+                    .CGPath;
   shape_.frame = self.bounds;
 }
 
@@ -77,7 +79,7 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
     blade_.userInteractionEnabled = NO;
     blade_.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:blade_];
-    title_ = XenraMakeLabel(nil, 16, UIFontWeightSemibold, XenraText());
+    title_ = XenraMakeLabel(nil, 17, UIFontWeightSemibold, XenraText());
     subtitle_ = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
     subtitle_.numberOfLines = 2;
     UIStackView* stack =
@@ -93,11 +95,11 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
       [blade_.topAnchor constraintEqualToAnchor:self.topAnchor],
       [blade_.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
       [stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor
-                                          constant:22],
+                                          constant:24],
       [stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor
-                                           constant:-22],
+                                           constant:-24],
       [stack.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
-      [self.heightAnchor constraintGreaterThanOrEqualToConstant:56],
+      [self.heightAnchor constraintGreaterThanOrEqualToConstant:64],
     ]];
     self.title = title;
     _action = [action copy];
@@ -110,7 +112,7 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
 
 - (void)setTitle:(NSString*)title {
   _title = [title copy];
-  title_.attributedText = XenraTracked(title ?: @"", 15, [self titleColor]);
+  title_.attributedText = XenraTracked(title ?: @"", 16, [self titleColor]);
 }
 
 - (void)setSubtitle:(NSString*)subtitle {
@@ -120,18 +122,23 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
 }
 
 - (UIColor*)titleColor {
-  const BOOL lit = self.isHighlighted || _chosen;
-  if (lit) return XenraBladeSelectedText();
+  if (_primary) return XenraOnAccent();
   if (_destructive) return XenraError();
   return _dimmed ? XenraTextMuted() : XenraText();
 }
 
 - (void)refresh {
-  blade_.bladeSelected = self.isHighlighted || _chosen;
-  [blade_ setNeedsDisplay];
+  blade_.state = self.isHighlighted ? XenraBladePressed
+                 : _chosen          ? XenraBladeChosen
+                                    : XenraBladeResting;
+  blade_.primary = _primary;
   self.title = _title;
-  subtitle_.textColor = blade_.bladeSelected ? XenraBladeSelectedText()
-                                             : XenraTextMuted();
+  subtitle_.textColor = _primary ? XenraOnAccent() : XenraTextMuted();
+}
+
+- (void)setPrimary:(BOOL)primary {
+  _primary = primary;
+  [self refresh];
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -152,6 +159,7 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
 }
 
 - (void)fire {
+  XenraLog([NSString stringWithFormat:@"tap: %@", _title]);
   if (_action) _action();
 }
 
@@ -249,14 +257,25 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
   ]];
 
   sheet.alpha = 0;
+  panel.transform = CGAffineTransformMakeScale(0.94, 0.94);
   [host addSubview:sheet];
-  [UIView animateWithDuration:0.15 animations:^{ sheet.alpha = 1; }];
+  XenraAnimate(0.22, 0, XenraCurveDecelerate,
+               ^{
+                 sheet.alpha = 1;
+                 panel.transform = CGAffineTransformIdentity;
+               },
+               nil);
 }
 
 - (void)dismiss {
-  [UIView animateWithDuration:0.12
-      animations:^{ self.alpha = 0; }
-      completion:^(BOOL) { [self removeFromSuperview]; }];
+  self.userInteractionEnabled = NO;
+  XenraAnimate(0.15, 0, XenraCurveStandard,
+               ^{
+                 self.alpha = 0;
+               },
+               ^{
+                 [self removeFromSuperview];
+               });
 }
 
 @end
@@ -266,7 +285,7 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
 }
 
 static UIView* HintPill(NSString* letter, NSString* text, UIColor* color) {
-  UILabel* badge = XenraMakeLabel(letter, 14, UIFontWeightBold, UIColor.blackColor);
+  UILabel* badge = XenraMakeLabel(letter, 14, UIFontWeightBold, XenraOnAccent());
   badge.textAlignment = NSTextAlignmentCenter;
   badge.backgroundColor = color;
   badge.layer.cornerRadius = 15;

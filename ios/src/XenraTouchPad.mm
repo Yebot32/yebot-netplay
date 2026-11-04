@@ -25,7 +25,7 @@ struct Control {
   CGFloat radius;
   Shape shape;
   CGFloat width, height;
-  UIColor* ring;  // nil: gold
+  UIColor* ring;  // nil: the accent
   bool pressed;
 };
 
@@ -166,14 +166,14 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
 
 - (void)drawStick:(const Stick&)stick {
   const bool active = stick.touch != nil;
-  UIColor* gold = Rgb(255, 208, 38, 0.92);
+  UIColor* accent = Rgb(95, 211, 95, 0.92);
   CGRect outer = CGRectMake(stick.center.x - stick.radius,
                             stick.center.y - stick.radius, stick.radius * 2,
                             stick.radius * 2);
   UIBezierPath* ring = [UIBezierPath bezierPathWithOvalInRect:outer];
   [Rgb(18, 16, 10, active ? 0.8 : 0.59) setFill];
   [ring fill];
-  [(active ? gold : Rgb(255, 248, 232, 0.47)) setStroke];
+  [(active ? accent : Rgb(255, 248, 232, 0.47)) setStroke];
   ring.lineWidth = stick.radius * 0.035;
   [ring stroke];
 

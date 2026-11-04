@@ -1,9 +1,13 @@
 #import "XenraLogs.h"
 
+#import <Metal/Metal.h>
+
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <initializer_list>
 #include <mach-o/dyld.h>
@@ -160,6 +164,32 @@ static NSString* CrashHistoryPath(void) {
 }
 static NSString* SessionPath(void) { return LogPath(@"session-open"); }
 
+// Names for the frames, which the handler could not safely look up. System
+// libraries keep their addresses until a reboot, so this still works a launch
+// later; the app's own frames are named by file offset from "image slide".
+static NSString* Symbolicate(NSData* crash) {
+  NSString* text = [[NSString alloc] initWithData:crash
+                                         encoding:NSUTF8StringEncoding];
+  NSMutableString* names = [NSMutableString stringWithString:@"symbols:\n"];
+  for (NSString* line in [text componentsSeparatedByString:@"\n"]) {
+    NSString* field = [line componentsSeparatedByString:@" "].lastObject;
+    if (![field hasPrefix:@"0x"] || [line hasPrefix:@"si_code"]) continue;
+    const uint64_t address = strtoull(field.UTF8String, nullptr, 16);
+    Dl_info info;
+    if (!address || !dladdr(reinterpret_cast<void*>(address), &info) ||
+        !info.dli_fname) {
+      continue;
+    }
+    [names appendFormat:@"%@ %s %s+0x%llx\n", field,
+                        strrchr(info.dli_fname, '/')
+                            ? strrchr(info.dli_fname, '/') + 1
+                            : info.dli_fname,
+                        info.dli_sname ?: "?",
+                        address - uint64_t(info.dli_saddr ?: info.dli_fbase)];
+  }
+  return names;
+}
+
 // A new crash moves into the history at the next launch, stamped then: the
 // handler has no safe way to format a date.
 static BOOL ArchiveCrash(void) {
@@ -171,6 +201,7 @@ static BOOL ArchiveCrash(void) {
   NSMutableData* entry = [[[NSString stringWithFormat:@"--- %@\n", date]
       dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
   [entry appendData:crash];
+  [entry appendData:[Symbolicate(crash) dataUsingEncoding:NSUTF8StringEncoding]];
   if (FILE* f = fopen(CrashHistoryPath().fileSystemRepresentation, "a")) {
     fwrite(entry.bytes, 1, entry.length, f);
     fclose(f);
@@ -285,6 +316,17 @@ static NSString* Summary(void) {
                      free_bytes.doubleValue / 1073741824.0];
   [text appendFormat:@"JIT: get-task-allow=%d cs_debugged=%d\n",
                      jit.get_task_allow, jit.cs_debugged];
+  int lse = 0;
+  size_t lse_size = sizeof(lse);
+  sysctlbyname("hw.optional.armv8_1_atomics", &lse, &lse_size, nullptr, 0);
+  id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();
+  int family = 0;
+  for (int i = 1; i <= 9; i++) {
+    if ([gpu supportsFamily:MTLGPUFamily(MTLGPUFamilyApple1 + i - 1)]) family = i;
+  }
+  [text appendFormat:@"CPU: LSE=%d. GPU: %@, Apple%d, argument buffers tier %d\n",
+                     lse, gpu.name, family,
+                     int(gpu.argumentBuffersSupport) + 1];
   [text appendFormat:@"Core status: %d %s\n", xe_ios_status(),
                      xe_ios_status_detail()];
 

@@ -1,21 +1,24 @@
 /**
  ******************************************************************************
- * Xenra : iOS theme - the Android palette, byte for byte                     *
+ * Xenra : iOS theme - the Android green skin                                 *
  ******************************************************************************
  *
- * Mirrors main/res/values/colors.xml (the original-Xbox gold skin) so the iOS
- * shell renders the same screens as the Android app. Every constant here is
- * the Android literal, with the source name in the comment. If Android changes
- * a colour, change it here too - a divergence is a UI-parity bug.
- *
- * Deliberately functions, not +getColor class methods: the shell compiles
- * with -fno-objc-arc (see ios/CMakeLists.txt) and UIColor class methods
- * return autoreleased objects. These return retained objects; callers own
- * them (or use the convenience that leaks nothing: constants are cheap to
- * re-create, and screens are built once).
+ * Mirrors main/res-green/values/colors.xml over main/res/values/colors.xml.
+ * Three palettes, as on Android: Xbox is dark green, Xbox 360 is LIGHT green,
+ * and the setup wizard is silver (colors_setup_gray.xml). Every colour is read
+ * when a screen is built, so changing the mode means rebuilding the screens;
+ * Android's recreate() works the same way.
  */
 
 #import <UIKit/UIKit.h>
+
+typedef NS_ENUM(NSInteger, XenraThemeModeValue) {
+  XenraThemeOG,
+  XenraThemeX360,
+  XenraThemeSetup,
+};
+
+extern NSInteger XenraThemeMode;
 
 static inline UIColor* XenraColor(uint8_t r, uint8_t g, uint8_t b,
                                   uint8_t a) {
@@ -25,128 +28,79 @@ static inline UIColor* XenraColor(uint8_t r, uint8_t g, uint8_t b,
                                 alpha:a / 255.0];
 }
 
-// xaniteog_black - the dashboard base.
-static inline UIColor* XenraBlack(void) {
-  return XenraColor(0x0B, 0x08, 0x08, 0xFF);
+// Android's #AARRGGBB.
+static inline UIColor* XenraHex(uint32_t argb) {
+  return XenraColor((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF,
+                    argb >> 24);
 }
-// xaniteog_charcoal.
+
+static inline UIColor* XenraPick(uint32_t og, uint32_t x360, uint32_t setup) {
+  return XenraHex(XenraThemeMode == XenraThemeX360    ? x360
+                  : XenraThemeMode == XenraThemeSetup ? setup
+                                                      : og);
+}
+
+static inline uint32_t XenraAccentRGB(void) {
+  return XenraThemeMode == XenraThemeX360    ? 0x74A81A
+         : XenraThemeMode == XenraThemeSetup ? 0xB9C0C4
+                                             : 0x5FD35F;
+}
+
+// xanite_accent_*_NN: the accent at any step of the alpha ramp.
+static inline UIColor* XenraAccentAlpha(uint8_t alpha) {
+  return XenraHex(uint32_t(alpha) << 24 | XenraAccentRGB());
+}
+static inline UIColor* XenraAccent(void) { return XenraAccentAlpha(0xFF); }
+
 static inline UIColor* XenraCharcoal(void) {
-  return XenraColor(0x0D, 0x0B, 0x08, 0xFF);
+  return XenraPick(0xFF0D0B08, 0xFFCBE09A, 0xFF0B0B0C);
 }
-// xaniteog_surface.
-static inline UIColor* XenraSurface(void) {
-  return XenraColor(0x14, 0x12, 0x0D, 0xFF);
-}
-// xaniteog_surface_variant.
-static inline UIColor* XenraSurfaceVariant(void) {
-  return XenraColor(0x1D, 0x19, 0x15, 0xFF);
-}
-// xaniteog_surface_container.
-static inline UIColor* XenraSurfaceContainer(void) {
-  return XenraColor(0x26, 0x1F, 0x1A, 0xFF);
-}
-// xaniteog_surface_container_high.
-static inline UIColor* XenraSurfaceContainerHigh(void) {
-  return XenraColor(0x2E, 0x25, 0x1E, 0xFF);
-}
-// xaniteog_card_fill - game-list blade fill for cards.
-static inline UIColor* XenraCardFill(void) {
-  return XenraColor(0x1A, 0x17, 0x0D, 0xFF);
-}
-// xaniteog_blade_fill.
 static inline UIColor* XenraBladeFill(void) {
-  return XenraColor(0x24, 0x1D, 0x0B, 0xFF);
+  return XenraPick(0xFF241D0B, 0xA0D8E8A4, 0xFF171719);
 }
-// xaniteog_panel_fill (alpha 0xE6 of #0D0A04).
+// The panel as it lands on screen: xaniteog_panel_fill over the green bloom.
 static inline UIColor* XenraPanelFill(void) {
-  return XenraColor(0x0D, 0x0A, 0x04, 0xE6);
+  return XenraPick(0xFF1F2B1A, 0xC4E2EFB4, 0xFF232427);
 }
-
-// xanite_accent_og - the gold everything is drawn with.
-static inline UIColor* XenraAccent(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0xFF);
+static inline UIColor* XenraDialogFill(void) {
+  return XenraPick(0xF20A0F08, 0xF2E8F4C2, 0xF20A0A0B);
 }
-// xanite_accent_og_55 - the unselected blade stroke.
-static inline UIColor* XenraAccent55(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0x55);
+static inline UIColor* XenraAccentContainer(void) {
+  return XenraPick(0xFF1E4A1E, 0xFFB0CE70, 0xFF2A2F32);
 }
-// xanite_accent_og_33.
-static inline UIColor* XenraAccent33(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0x33);
+static inline UIColor* XenraOutlineVariant(void) {
+  return XenraPick(0xFF2E251E, 0xA67E9E48, 0xFF333437);
 }
-// xanite_accent_og_22.
-static inline UIColor* XenraAccent22(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0x22);
-}
-// xaniteog_blade_selected_end - selected blade gradient end.
-static inline UIColor* XenraBladeSelectedEnd(void) {
-  return XenraColor(0xA6, 0x6B, 0x00, 0xFF);
-}
-// xaniteog_blade_selected_stroke.
-static inline UIColor* XenraBladeSelectedStroke(void) {
-  return XenraColor(0xFF, 0xF0, 0xA0, 0xFF);
-}
-// xaniteog_blade_selected_text - dark text on a selected blade.
-static inline UIColor* XenraBladeSelectedText(void) {
-  return XenraColor(0x12, 0x0D, 0x00, 0xFF);
-}
-// xaniteog_text.
 static inline UIColor* XenraText(void) {
-  return XenraColor(0xFF, 0xF6, 0xEB, 0xFF);
+  return XenraPick(0xFFFFF6EB, 0xFF1B2408, 0xFFF4F5F6);
 }
-// xaniteog_text_muted.
 static inline UIColor* XenraTextMuted(void) {
-  return XenraColor(0xBF, 0xA8, 0x98, 0xFF);
+  return XenraPick(0xFFBFA898, 0xFF4C5A2E, 0xFFA9ACB0);
 }
-// xaniteog_success.
+// Text on a filled accent blade or badge.
+static inline UIColor* XenraOnAccent(void) {
+  return XenraPick(0xFF0B1A0B, 0xFFFBFEF4, 0xFF0B0B0C);
+}
 static inline UIColor* XenraSuccess(void) {
-  return XenraColor(0x7C, 0xFF, 0x6B, 0xFF);
+  return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410)
+                                          : XenraHex(0xFF7CFF6B);
 }
-// xaniteog_error.
-static inline UIColor* XenraError(void) {
-  return XenraColor(0xFF, 0x52, 0x52, 0xFF);
-}
-// xaniteog_warning (Material colorError shade).
-static inline UIColor* XenraWarning(void) {
-  return XenraColor(0xFF, 0x6B, 0x6B, 0xFF);
-}
+static inline UIColor* XenraError(void) { return XenraHex(0xFFFF5252); }
+static inline UIColor* XenraWarning(void) { return XenraHex(0xFFFF6B6B); }
 
-// xanite_bg_grad_og_* - the dashboard background gradient, top to bottom.
+// xanite_bg_grad_*: the dashboard, left to right.
 static inline UIColor* XenraBgGradStart(void) {
-  return XenraColor(0x03, 0x03, 0x03, 0xFF);
+  return XenraPick(0xFF030503, 0xFFDCEAB8, 0xFF030503);
 }
 static inline UIColor* XenraBgGradCenter(void) {
-  return XenraColor(0x18, 0x12, 0x04, 0xFF);
+  return XenraPick(0xFF0A1A0C, 0xFFAFD26F, 0xFF0A1A0C);
 }
 static inline UIColor* XenraBgGradEnd(void) {
-  return XenraColor(0x5A, 0x41, 0x00, 0xFF);
+  return XenraPick(0xFF145A22, 0xFF6DA524, 0xFF145A22);
 }
-
-// xaniteog_glow_* - the radial dashboard glow.
-static inline UIColor* XenraGlowStrong(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0x4D);
+static inline UIColor* XenraVignetteTop(void) {
+  return XenraPick(0x66000000, 0x1A3F5C14, 0x66000000);
 }
-static inline UIColor* XenraGlowSoft(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0x1A);
-}
-static inline UIColor* XenraGlowFloor(void) {
-  return XenraColor(0xFF, 0xD7, 0x00, 0x14);
-}
-
-/// The Android blade octagon (GameBladeView.buildBladePath, 10dp chamfer at
-/// the density of the device). Fills `rect` of `layer`; chamfer is inset.
-static inline void XenraPathBlade(UIBezierPath* path, CGRect rect,
-                                  CGFloat chamfer) {
-  [path removeAllPoints];
-  CGFloat x = rect.origin.x, y = rect.origin.y;
-  CGFloat w = rect.size.width, h = rect.size.height;
-  [path moveToPoint:CGPointMake(x + chamfer, y)];
-  [path addLineToPoint:CGPointMake(x + w - chamfer, y)];
-  [path addLineToPoint:CGPointMake(x + w, y + chamfer)];
-  [path addLineToPoint:CGPointMake(x + w, y + h - chamfer)];
-  [path addLineToPoint:CGPointMake(x + w - chamfer, y + h)];
-  [path addLineToPoint:CGPointMake(x + chamfer, y + h)];
-  [path addLineToPoint:CGPointMake(x, y + h - chamfer)];
-  [path addLineToPoint:CGPointMake(x, y + chamfer)];
-  [path closePath];
+static inline UIColor* XenraVignetteBottom(void) {
+  return XenraPick(0x55000000, 0x143F5C14, 0x55000000);
 }

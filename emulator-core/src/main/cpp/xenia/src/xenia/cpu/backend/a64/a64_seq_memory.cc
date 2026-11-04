@@ -1392,6 +1392,14 @@ static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
   return e.GetBackendCtxReg();
 }
 
+// The native path validates stwcx. with CASAL, an LSE instruction. Without LSE
+// (Apple A10 and older, Cortex-A53/A73) it would raise SIGILL at the first
+// guest reservation, so those CPUs take the software path.
+static bool UseNativeReservedOps(A64Emitter& e, const hir::Instr* i) {
+  return cvars::a64_native_reserved_ops && e.IsFeatureEnabled(kA64EmitLSE) &&
+         !IsPossibleMMIOInstruction(e, i);
+}
+
 // Two paths, selected by a64_native_reserved_ops:
 //  - Software (cvar off): RESERVED_LOAD/STORE call host helpers that share a
 //    per-granule generation counter, so a stwcx. on one thread invalidates
@@ -1413,7 +1421,7 @@ static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
 struct RESERVED_LOAD_I32
     : Sequence<RESERVED_LOAD_I32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (cvars::a64_native_reserved_ops && !IsPossibleMMIOInstruction(e, i.instr)) {
+    if (UseNativeReservedOps(e, i.instr)) {
       // Plain load + capture (value, reserve flag). The matching stwcx.
       // validates with one CASAL; no hardware monitor spans the window.
       auto addr = ComputeMemoryAddress(e, i.src1);
@@ -1446,7 +1454,7 @@ struct RESERVED_LOAD_I32
 struct RESERVED_LOAD_I64
     : Sequence<RESERVED_LOAD_I64, I<OPCODE_RESERVED_LOAD, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (cvars::a64_native_reserved_ops && !IsPossibleMMIOInstruction(e, i.instr)) {
+    if (UseNativeReservedOps(e, i.instr)) {
       // Plain load + capture (value, reserve flag). The matching stwcx.
       // validates with one CASAL; no hardware monitor spans the window.
       auto addr = ComputeMemoryAddress(e, i.src1);
@@ -1491,7 +1499,7 @@ struct RESERVED_STORE_I32
     : Sequence<RESERVED_STORE_I32,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (cvars::a64_native_reserved_ops && !IsPossibleMMIOInstruction(e, i.instr)) {
+    if (UseNativeReservedOps(e, i.instr)) {
       // Stage the value before clobbering w0 via ComputeMemoryAddress.
       if (i.src2.is_constant) {
         e.mov(e.w3, static_cast<uint32_t>(i.src2.constant()));
@@ -1551,7 +1559,7 @@ struct RESERVED_STORE_I64
     : Sequence<RESERVED_STORE_I64,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (cvars::a64_native_reserved_ops && !IsPossibleMMIOInstruction(e, i.instr)) {
+    if (UseNativeReservedOps(e, i.instr)) {
       if (i.src2.is_constant) {
         e.mov(e.x3, static_cast<uint64_t>(i.src2.constant()));
       } else {

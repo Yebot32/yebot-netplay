@@ -20,6 +20,7 @@
 @property(nonatomic, assign) BOOL destructive;
 @property(nonatomic, assign) BOOL dimmed;  // shown, but says it is unavailable
 @property(nonatomic, assign) BOOL chosen;  // the current settings tab
+@property(nonatomic, assign) BOOL primary;  // the default action, filled
 @property(nonatomic, copy) void (^action)(void);
 - (instancetype)initWithTitle:(NSString*)title action:(void (^)(void))action;
 @end

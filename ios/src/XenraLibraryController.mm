@@ -4,6 +4,7 @@
 
 #import "XenraBladeView.h"
 #import "XenraGameScanner.h"
+#import "XenraMotion.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
@@ -29,7 +30,7 @@
     card_.backgroundColor = XenraBladeFill();
     card_.layer.cornerRadius = 18;
     card_.layer.borderWidth = 1;
-    card_.layer.borderColor = [XenraAccent() colorWithAlphaComponent:0.4].CGColor;
+    card_.layer.borderColor = XenraAccentAlpha(0x66).CGColor;
     card_.clipsToBounds = YES;
     card_.translatesAutoresizingMaskIntoConstraints = NO;
     [self.contentView addSubview:card_];
@@ -103,6 +104,7 @@
   XenraGameScanner* scanner_;
   NSArray<XenraGameEntry*>* games_;
   BOOL listMode_;
+  BOOL entering_;
 }
 
 static NSString* GamesDir(void) {
@@ -118,7 +120,7 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
   button.tintColor = XenraAccent();
   button.layer.cornerRadius = 10;
   button.layer.borderWidth = 1;
-  button.layer.borderColor = [XenraAccent() colorWithAlphaComponent:0.4].CGColor;
+  button.layer.borderColor = XenraAccentAlpha(0x66).CGColor;
   [button addTarget:target
                 action:action
       forControlEvents:UIControlEventTouchUpInside];
@@ -236,6 +238,7 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
                                              attributes:nil
                                                   error:nil];
   scanner_ = [[XenraGameScanner alloc] init];
+  entering_ = YES;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -272,6 +275,8 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
                  "Xenra / Games in the Files app, or use Install content "
                  "from the … menu.";
   [collection_ reloadData];
+  [collection_ layoutIfNeeded];
+  entering_ = NO;
 }
 
 // --- View modes -------------------------------------------------------------
@@ -353,6 +358,14 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
   cell.detail.text = game.subtitle;
   cell.cover.image = [scanner_ coverForEntryNamed:game.name];
   return cell;
+}
+
+// layout_anim_cards, for the first fill only: scrolling must not replay it.
+- (void)collectionView:(UICollectionView*)view
+       willDisplayCell:(UICollectionViewCell*)cell
+    forItemAtIndexPath:(NSIndexPath*)path {
+  if (!entering_) return;
+  XenraEnter(@[ cell ], 0, 14, path.item * 0.018, 0, 0.22, XenraCurveQuint);
 }
 
 - (CGSize)collectionView:(UICollectionView*)view

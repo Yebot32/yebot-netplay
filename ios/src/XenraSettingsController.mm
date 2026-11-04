@@ -1,7 +1,9 @@
 #import "XenraScreens.h"
 
+#import "XenraAmbient.h"
 #import "XenraBladeView.h"
 #import "XenraLogs.h"
+#import "XenraMotion.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
@@ -153,6 +155,8 @@
                }];
     [content_ addArrangedSubview:clear];
   }
+  // layout_anim_cards: a short rise, staggered down the list.
+  XenraEnter(content_.arrangedSubviews, 0, 14, 0, 0.018, 0.22, XenraCurveQuint);
 }
 
 - (void)clearOverrides {
@@ -184,6 +188,7 @@
                                                                     : @"false"
                                   row:row
                                  game:nil];
+              if ([row.key hasPrefix:@"music."]) XenraAmbientStart();
             }]
         forControlEvents:UIControlEventValueChanged];
     UIStackView* line =
@@ -221,13 +226,20 @@
                                         [XenraSettings setValue:value
                                                             row:row
                                                            game:game];
+                                        if ([row.key hasPrefix:@"music."]) {
+                                          XenraAmbientStart();
+                                        }
                                         [weak rebuild];
                                       }]];
     }
     [XenraBladeSheet showIn:self.view title:row.title message:nil items:items];
     return;
   }
-  if ([row.key isEqual:@"jit.enable"]) {
+  if ([row.key isEqual:@"setup.rerun"]) {
+    XenraRestartSetup(self.view.window);
+  } else if ([row.key isEqual:@"privacy"]) {
+    XenraShowPrivacyPolicy(self.view);
+  } else if ([row.key isEqual:@"jit.enable"]) {
     XenraOpenJitEnabler();
   } else if ([row.key isEqual:@"log.share"]) {
     XenraShareLogs(self, nil);

@@ -61,6 +61,19 @@ typedef NS_ENUM(NSInteger, XenraRowKind) {
 + (NSString*)stringForKey:(NSString*)key fallback:(NSString*)fallback;
 + (void)setString:(NSString*)value forKey:(NSString*)key;
 
+// Sets XenraThemeMode from the console and whether setup has finished.
++ (void)applyTheme;
++ (BOOL)setupComplete;
++ (void)setSetupComplete:(BOOL)complete;
+
+// Files and folders picked in setup, kept across launches.
++ (void)storeBookmark:(NSURL*)url key:(NSString*)key;
++ (NSURL*)urlForBookmark:(NSString*)key;
+// Opens the picked 360 folder for the life of the process, which a boot and a
+// scan both need.
++ (void)holdGameFolder;
++ (NSArray<NSString*>*)gameFolders;
+
 // Pushes every cvar row into the core. Call right before boot.
 + (void)applyForGame:(NSString*)game;
 @end

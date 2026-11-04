@@ -6,6 +6,8 @@
 
 #import "XenraGameScanner.h"
 
+#import "XenraSettings.h"
+
 #import <UIKit/UIKit.h>
 
 static NSArray<NSString*>* XenraGameExtensions() {
@@ -73,17 +75,18 @@ static NSString* XenraCoversDir() {
 
 - (void)scanWithCompletion:(void (^)(NSArray<XenraGameEntry*>* games))completion {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    NSString* dir = [NSSearchPathForDirectoriesInDomains(
-        NSDocumentDirectory, NSUserDomainMask, YES).firstObject
-        stringByAppendingPathComponent:@"Games"];
 
     NSFileManager* fm = [NSFileManager defaultManager];
-    NSArray<NSURL*>* contents = [fm contentsOfDirectoryAtURL:
-        [NSURL fileURLWithPath:dir]
-        includingPropertiesForKeys:@[ NSURLIsRegularFileKey,
-                                      NSURLFileSizeKey ]
-                            options:0
-                              error:nil];
+    NSMutableArray<NSURL*>* contents = [NSMutableArray array];
+    for (NSString* dir in [XenraSettings gameFolders]) {
+      NSArray<NSURL*>* found = [fm contentsOfDirectoryAtURL:
+          [NSURL fileURLWithPath:dir]
+          includingPropertiesForKeys:@[ NSURLIsRegularFileKey,
+                                        NSURLFileSizeKey ]
+                              options:0
+                                error:nil];
+      if (found) [contents addObjectsFromArray:found];
+    }
 
     NSArray<NSString*>* extensions = XenraGameExtensions();
     NSMutableArray<XenraGameEntry*>* entries = [NSMutableArray array];

@@ -1,5 +1,7 @@
 #import "XenraSettings.h"
 
+#import "XenraTheme.h"
+
 #include "ios_emu.h"
 
 @implementation XenraSettingRow
@@ -110,6 +112,12 @@ static XenraSettingRow* CoreRow() {
       Tab(@"System",
           @[
             Section(@"Console", @[ CoreRow() ]),
+            Section(@"Audio", @[
+              Toggle(@"music.enabled", @"Menu music", nil, YES),
+              Choice(@"music.volume", @"Music volume", nil,
+                     @[ @"25%", @"55%", @"75%", @"100%" ],
+                     @[ @"25", @"55", @"75", @"100" ], @"55"),
+            ]),
             Section(@"JIT", @[
               Action(@"jit.enable", @"Enable JIT",
                      @"Opens StikDebug. Needed once per launch."),
@@ -117,6 +125,8 @@ static XenraSettingRow* CoreRow() {
           ]),
       Tab(@"Maintenance",
           @[ Section(@"Maintenance", @[
+            Action(@"setup.rerun", @"Setup Wizard", nil),
+            Action(@"privacy", @"Privacy policy", nil),
             Action(@"log.share", @"Share logs",
                    @"Core log, crash reports and device details, as one file."),
             Action(@"cache.clear", @"Clear shader cache",
@@ -144,6 +154,59 @@ static XenraSettingRow* CoreRow() {
 + (void)setConsole:(XenraConsole)console {
   [NSUserDefaults.standardUserDefaults setInteger:console
                                            forKey:@"xenra.console"];
+}
+
++ (void)applyTheme {
+  XenraThemeMode = ![self setupComplete]                ? XenraThemeSetup
+                   : [self console] == XenraConsole360 ? XenraThemeX360
+                                                       : XenraThemeOG;
+}
+
++ (BOOL)setupComplete {
+  return [NSUserDefaults.standardUserDefaults boolForKey:@"setup_complete"];
+}
+
++ (void)setSetupComplete:(BOOL)complete {
+  [NSUserDefaults.standardUserDefaults setBool:complete
+                                        forKey:@"setup_complete"];
+}
+
++ (void)storeBookmark:(NSURL*)url key:(NSString*)key {
+  NSData* bookmark = [url bookmarkDataWithOptions:0
+                   includingResourceValuesForKeys:nil
+                                    relativeToURL:nil
+                                            error:nil];
+  [NSUserDefaults.standardUserDefaults
+      setObject:bookmark
+         forKey:[@"bookmark." stringByAppendingString:key]];
+}
+
++ (NSURL*)urlForBookmark:(NSString*)key {
+  NSData* bookmark = [NSUserDefaults.standardUserDefaults
+      dataForKey:[@"bookmark." stringByAppendingString:key]];
+  if (!bookmark) return nil;
+  BOOL stale = NO;
+  return [NSURL URLByResolvingBookmarkData:bookmark
+                                   options:0
+                             relativeToURL:nil
+                       bookmarkDataIsStale:&stale
+                                     error:nil];
+}
+
+static NSURL* g_game_folder;
+
++ (void)holdGameFolder {
+  [g_game_folder stopAccessingSecurityScopedResource];
+  g_game_folder = [self urlForBookmark:@"games.360"];
+  [g_game_folder startAccessingSecurityScopedResource];
+}
+
++ (NSArray<NSString*>*)gameFolders {
+  NSString* docs = NSSearchPathForDirectoriesInDomains(
+                       NSDocumentDirectory, NSUserDomainMask, YES)
+                       .firstObject;
+  NSString* own = [docs stringByAppendingPathComponent:@"Games"];
+  return g_game_folder ? @[ own, g_game_folder.path ] : @[ own ];
 }
 
 + (NSString*)gameKey:(NSString*)game row:(NSString*)key {

@@ -21,17 +21,26 @@ set(_xe_ios_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_xe_root "${CMAKE_CURRENT_SOURCE_DIR}/../emulator-core/src/main/cpp/xenia")
 
 set(_xe_ios_arc_sources
+  "${_xe_ios_dir}/src/XenraAmbient.mm"
   "${_xe_ios_dir}/src/XenraAppDelegate.mm"
+  "${_xe_ios_dir}/src/XenraBladeView.mm"
   "${_xe_ios_dir}/src/XenraDashboardController.mm"
   "${_xe_ios_dir}/src/XenraGameController.mm"
   "${_xe_ios_dir}/src/XenraLogs.mm"
+  "${_xe_ios_dir}/src/XenraMotion.mm"
   "${_xe_ios_dir}/src/XenraLibraryController.mm"
   "${_xe_ios_dir}/src/XenraSettings.mm"
   "${_xe_ios_dir}/src/XenraSettingsController.mm"
+  "${_xe_ios_dir}/src/XenraSetupController.mm"
   "${_xe_ios_dir}/src/XenraTouchPad.mm"
   "${_xe_ios_dir}/src/XenraUI.mm"
 )
-set(_xe_ios_resources "${_xe_ios_dir}/res/xanite_gold_x.png")
+set(_xe_ios_resources
+  "${_xe_ios_dir}/res/setup_logo_x.png"
+  "${_xe_ios_dir}/res/xenra-icon.png"
+  "${_xe_ios_dir}/res/xenra_x.png"
+  "${_xe_ios_dir}/res/xenra_x_360.png"
+)
 set_source_files_properties(${_xe_ios_resources} PROPERTIES
   MACOSX_PACKAGE_LOCATION "Resources")
 
@@ -39,7 +48,9 @@ add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/main.mm"
   "${_xe_ios_dir}/src/XenraAudio.h"
   "${_xe_ios_dir}/src/XenraAudio.mm"
+  "${_xe_ios_dir}/src/XenraAmbient.h"
   "${_xe_ios_dir}/src/XenraLogs.h"
+  "${_xe_ios_dir}/src/XenraMotion.h"
   "${_xe_ios_dir}/src/XenraScreens.h"
   "${_xe_ios_dir}/src/XenraSettings.h"
   "${_xe_ios_dir}/src/XenraTouchPad.h"
@@ -48,7 +59,6 @@ add_executable(xenra-ios MACOSX_BUNDLE
   ${_xe_ios_resources}
   "${_xe_ios_dir}/src/XenraAppDelegate.h"
   "${_xe_ios_dir}/src/XenraBladeView.h"
-  "${_xe_ios_dir}/src/XenraBladeView.mm"
   "${_xe_ios_dir}/src/XenraGameScanner.h"
   "${_xe_ios_dir}/src/XenraGameScanner.mm"
   "${_xe_ios_dir}/src/XenraMetalView.h"
@@ -158,6 +168,8 @@ set_target_properties(xenra-ios PROPERTIES
 
 set_target_properties(xenra-ios PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${_xe_ios_dir}/Info.plist"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "0.4.5"
+  MACOSX_BUNDLE_BUNDLE_VERSION "33"
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "Ali.Xanite.green.ios"
   # A device build only. The simulator has no JIT story worth testing and no
   # real GPU, which are the two things this app exists to measure.
@@ -165,8 +177,6 @@ set_target_properties(xenra-ios PROPERTIES
   XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
 )
 
-# The screens are new code and use ARC. Source options come after the target's
-# -fno-objc-arc on the command line, so they win.
 # Named in shared logs, so a report says which build it came from.
 execute_process(COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY "${_xe_ios_dir}"
@@ -174,5 +184,7 @@ execute_process(COMMAND git rev-parse --short HEAD
   ERROR_QUIET)
 set_source_files_properties("${_xe_ios_dir}/src/XenraLogs.mm" PROPERTIES
   COMPILE_DEFINITIONS "XENRA_BUILD_ID=\"${_xe_ios_build_id}\"")
+# The screens are new code and use ARC. Source options come after the target's
+# -fno-objc-arc on the command line, so they win.
 set_source_files_properties(${_xe_ios_arc_sources} PROPERTIES
   COMPILE_OPTIONS "-fobjc-arc")

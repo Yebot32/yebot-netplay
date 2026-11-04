@@ -75,7 +75,7 @@
   [self.view addSubview:pad_];
 
 
-  status_ = XenraMakeLabel(nil, 14, UIFontWeightRegular, XenraText());
+  status_ = XenraMakeLabel(nil, 14, UIFontWeightRegular, UIColor.whiteColor);
   status_.numberOfLines = 0;
   status_.textAlignment = NSTextAlignmentCenter;
   [self.view addSubview:status_];
