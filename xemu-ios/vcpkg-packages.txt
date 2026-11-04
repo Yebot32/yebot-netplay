@@ -1,0 +1,7 @@
+glib
+pixman
+zlib
+libepoxy
+libpcap
+libsamplerate
+openssl

@@ -1,0 +1,153 @@
+name: xemu-ios-core
+
+# The original Xbox core for iOS: DukeX's xemu tree plus xemu-ios/patches, built
+# as a dylib the app loads. See xemu-ios/README.md. No secrets in this workflow,
+# and none should be added: it compiles third-party code.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: main
+    paths:
+      - 'xemu-ios/**'
+      - '.github/workflows/xemu-ios-core.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xemu-ios-core
+  cancel-in-progress: true
+
+env:
+  VCPKG_TAG: '2025.10.17'
+  MOLTENVK_TAG: 'v1.4.0'
+  IOS_DEPLOYMENT_TARGET: '16.0'
+
+jobs:
+  core:
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Tools
+        run: |
+          brew install ninja autoconf automake libtool pkg-config nasm ccache
+          pip install pyyaml meson
+
+      - name: Fetch DukeX
+        run: |
+          PIN=$(cat xemu-ios/dukex.pin)
+          git init "$HOME/xemu"
+          git -C "$HOME/xemu" remote add origin https://github.com/MaftyManicEMU/DukeX
+          git -C "$HOME/xemu" fetch --depth 1 origin "$PIN" || git -C "$HOME/xemu" fetch origin
+          git -C "$HOME/xemu" checkout -q "$PIN"
+          for p in xemu-ios/patches/*.patch; do
+            [ -e "$p" ] || continue
+            echo "applying $p"
+            git -C "$HOME/xemu" apply "$PWD/$p"
+          done
+
+      - name: Restore libraries
+        id: libs
+        uses: actions/cache@v4
+        with:
+          path: ~/vcpkg-prefix
+          key: vcpkg-arm64-ios-${{ env.VCPKG_TAG }}-${{ hashFiles('xemu-ios/vcpkg-packages.txt') }}
+
+      - name: Build libraries
+        if: steps.libs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$VCPKG_TAG" https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          mkdir -p "$HOME/triplets"
+          cat > "$HOME/triplets/arm64-ios.cmake" <<EOF
+          set(VCPKG_TARGET_ARCHITECTURE arm64)
+          set(VCPKG_CRT_LINKAGE dynamic)
+          set(VCPKG_LIBRARY_LINKAGE static)
+          set(VCPKG_CMAKE_SYSTEM_NAME iOS)
+          set(VCPKG_OSX_DEPLOYMENT_TARGET $IOS_DEPLOYMENT_TARGET)
+          set(VCPKG_BUILD_TYPE release)
+          EOF
+          failed=""
+          for pkg in $(cat xemu-ios/vcpkg-packages.txt); do
+            "$HOME/vcpkg/vcpkg" install "$pkg" --triplet arm64-ios \
+              --overlay-triplets="$HOME/triplets" \
+              --x-install-root="$HOME/vcpkg-installed" || failed="$failed $pkg"
+          done
+          echo "failed:$failed"
+          mkdir -p "$HOME/vcpkg-prefix"
+          cp -R "$HOME/vcpkg-installed/arm64-ios/." "$HOME/vcpkg-prefix/"
+          [ -z "$failed" ]
+
+      - name: Upload library logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-logs
+          path: |
+            ~/vcpkg/buildtrees/*/*.log
+          if-no-files-found: ignore
+
+      - name: MoltenVK
+        run: |
+          mkdir -p "$HOME/mvk"
+          curl -fsSL "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_TAG/MoltenVK-ios.tar" | tar -x -C "$HOME/mvk"
+          find "$HOME/mvk" -maxdepth 5 | head -30
+          ROOT=$(dirname "$(find "$HOME/mvk" -type f -path '*include/vulkan/vulkan.h' | head -1)")
+          ROOT=$(dirname "$(dirname "$ROOT")")
+          FW=$(find "$HOME/mvk" -type d -path '*ios-arm64/MoltenVK.framework' | head -1)
+          echo "MOLTENVK_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "MOLTENVK_FRAMEWORK=$FW" >> "$GITHUB_ENV"
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache-xemu
+          key: ccache-xemu-${{ github.sha }}
+          restore-keys: ccache-xemu-
+
+      - name: Build core
+        env:
+          XEMU_IOS_VCPKG_PREFIX: ${{ runner.temp }}/unused
+          XEMU_IOS_NINJA_TARGETS: libxemu-ios-core.dylib
+          CCACHE_DIR: /Users/runner/.ccache-xemu
+        run: |
+          export XEMU_IOS_VCPKG_PREFIX="$HOME/vcpkg-prefix"
+          cd "$HOME/xemu"
+          bash ios/scripts/build-core-ios.sh -k 0 2>&1 | tee "$HOME/core-build.log"
+          test "${PIPESTATUS[0]}" = 0
+
+      - name: Package
+        run: |
+          B="$HOME/xemu/build-ios-arm64"
+          mkdir -p core
+          cp "$B/libxemu-ios-core.dylib" core/
+          cp "$(find "$B/subprojects" -name 'libslirp.0.dylib' | head -1)" core/
+          ditto "$MOLTENVK_FRAMEWORK" core/MoltenVK.framework
+          otool -L core/libxemu-ios-core.dylib
+          otool -l core/libxemu-ios-core.dylib | grep -A2 LC_RPATH || true
+          ls -la core
+          tar -czf xemu-ios-core.tar.gz core
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xemu-ios-core
+          path: xemu-ios-core.tar.gz
+          retention-days: 90
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xemu-ios-core-logs
+          path: |
+            ~/core-build.log
+            ~/xemu/build-ios-arm64/config.log
+            ~/xemu/build-ios-arm64/meson-logs/meson-log.txt
+          if-no-files-found: ignore
