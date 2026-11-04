@@ -180,7 +180,7 @@
 }
 
 - (void)runXemu {
-  const int status = XenraXemuRun(path_, metal_.layer);
+  const int status = XenraXemuRun(path_, name_, metal_.layer);
   XenraLog([NSString stringWithFormat:@"xemu returned %d", status]);
   XenraLogsEndSession();
   exit(0);

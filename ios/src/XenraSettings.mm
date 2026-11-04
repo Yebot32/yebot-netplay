@@ -80,6 +80,15 @@ static XenraSettingRow* FrameLimitRow() {
   return row;
 }
 
+static XenraSettingRow* OgScaleRow() {
+  XenraSettingRow* row = Choice(
+      @"og.scale", @"Original Xbox resolution",
+      @"Above 1x costs GPU time on every frame.",
+      @[ @"1x", @"2x", @"3x" ], @[ @"1", @"2", @"3" ], @"1");
+  row.perGame = YES;
+  return row;
+}
+
 static XenraSettingRow* CoreRow() {
   XenraSettingRow* row = Choice(
       @"og.core", @"Core",
@@ -98,7 +107,7 @@ static XenraSettingRow* CoreRow() {
     tabs = @[
       Tab(@"Video",
           @[ Section(@"Display", @[
-            ResolutionRow(), FrameLimitRow(),
+            ResolutionRow(), FrameLimitRow(), OgScaleRow(),
           ]) ]),
       Tab(@"Input",
           @[ Section(@"Touch controls", @[
@@ -110,7 +119,13 @@ static XenraSettingRow* CoreRow() {
           ]) ]),
       Tab(@"System",
           @[
-            Section(@"Console", @[ CoreRow() ]),
+            Section(@"Console", @[
+              CoreRow(),
+              Choice(@"og.tb", @"Original Xbox code cache",
+                     @"More memory, fewer recompiles.",
+                     @[ @"64 MB", @"128 MB", @"256 MB" ],
+                     @[ @"64", @"128", @"256" ], @"64"),
+            ]),
             Section(@"Audio", @[
               Toggle(@"music.enabled", @"Menu music", nil, YES),
               Choice(@"music.volume", @"Music volume", nil,
@@ -140,7 +155,7 @@ static XenraSettingRow* CoreRow() {
   static NSArray* rows;
   static dispatch_once_t once;
   dispatch_once(&once, ^{
-    rows = @[ ResolutionRow(), FrameLimitRow() ];
+    rows = @[ ResolutionRow(), FrameLimitRow(), OgScaleRow() ];
   });
   return rows;
 }
@@ -241,6 +256,14 @@ static NSMutableArray<NSURL*>* g_held;
 
 + (void)setValue:(NSString*)value row:(XenraSettingRow*)row game:(NSString*)game {
   [self setString:value forKey:game ? [self gameKey:game row:row.key] : row.key];
+}
+
++ (NSString*)valueForKey:(NSString*)key
+                    game:(NSString*)game
+                fallback:(NSString*)fallback {
+  return [NSUserDefaults.standardUserDefaults
+             stringForKey:[self gameKey:game row:key]]
+             ?: [self stringForKey:key fallback:fallback];
 }
 
 + (void)clearOverridesForGame:(NSString*)game {

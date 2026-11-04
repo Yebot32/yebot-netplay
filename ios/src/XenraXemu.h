@@ -23,7 +23,7 @@ NSString* XenraXemuPrepare(void);
 // Runs the game to the end, on the main thread, pumping the run loop itself.
 // Call from a timer rather than a dispatch block: the main queue does not drain
 // inside a block, and the app's own dispatches would wait until the game quit.
-int XenraXemuRun(NSString* game, CALayer* layer);
+int XenraXemuRun(NSString* game, NSString* name, CALayer* layer);
 
 // Takes the on-screen pad's XInput bits and axes. active NO hands the port back
 // to any physical controller.

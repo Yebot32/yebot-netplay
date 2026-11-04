@@ -61,6 +61,11 @@ typedef NS_ENUM(NSInteger, XenraRowKind) {
 + (NSString*)stringForKey:(NSString*)key fallback:(NSString*)fallback;
 + (void)setString:(NSString*)value forKey:(NSString*)key;
 
+// The per-game value of a row, or the global one, by its key.
++ (NSString*)valueForKey:(NSString*)key
+                    game:(NSString*)game
+                fallback:(NSString*)fallback;
+
 // Sets XenraThemeMode from the console and whether setup has finished.
 + (void)applyTheme;
 + (BOOL)setupComplete;

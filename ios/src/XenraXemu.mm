@@ -80,7 +80,7 @@ static NSString* Quoted(NSString* value) {
   return [NSString stringWithFormat:@"\"%@\"", escaped];
 }
 
-static NSString* WriteConfig(NSString* game) {
+static NSString* WriteConfig(NSString* game, NSString* name) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(
                        NSDocumentDirectory, NSUserDomainMask, YES)
                        .firstObject;
@@ -94,6 +94,10 @@ static NSString* WriteConfig(NSString* game) {
                     @"[general]\nshow_welcome = false\nskip_boot_anim = true\n"
                      "games_dir = %@\n\n"
                      "[display]\nrenderer = \"VULKAN\"\n\n"
+                     "[display.quality]
+surface_scale = %@
+
+"
                      "[display.ui]\nshow_menubar = false\n"
                      "show_notifications = false\nhide_cursor = true\n\n"
                      "[perf]\ncache_shaders = true\n\n"
@@ -103,6 +107,9 @@ static NSString* WriteConfig(NSString* game) {
                      "[sys.files]\nbootrom_path = %@\nflashrom_path = %@\n"
                      "hdd_path = %@\ndvd_path = %@\n",
                     Quoted(game.stringByDeletingLastPathComponent),
+                    [XenraSettings valueForKey:@"og.scale"
+                                          game:name
+                                      fallback:@"1"],
                     Quoted([XenraSettings urlForBookmark:@"mcpx"].path),
                     Quoted([XenraSettings urlForBookmark:@"flash"].path),
                     Quoted([XenraSettings urlForBookmark:@"hdd"].path),
@@ -115,7 +122,7 @@ static NSString* WriteConfig(NSString* game) {
   return path;
 }
 
-int XenraXemuRun(NSString* game, CALayer* layer) {
+int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   auto main = reinterpret_cast<int (*)(int, char**)>(
       dlsym(g_core, "xemu_ios_main"));
   auto set_layer = reinterpret_cast<void (*)(void*)>(
@@ -168,10 +175,12 @@ int XenraXemuRun(NSString* game, CALayer* layer) {
   }
   if (set_layer) set_layer((__bridge void*)layer);
 
-  NSString* accel = universal ? @"tcg,thread=single,tb-size=64"
-                              : @"tcg,thread=single,tb-size=64,split-wx=on";
+  NSString* accel = [NSString
+      stringWithFormat:@"tcg,thread=single,tb-size=%@%@",
+                       [XenraSettings stringForKey:@"og.tb" fallback:@"64"],
+                       universal ? @"" : @",split-wx=on"];
   NSArray<NSString*>* arguments =
-      @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game) ];
+      @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game, name) ];
   XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d", accel, universal]);
   std::vector<char*> argv;
   for (NSString* argument in arguments) {
