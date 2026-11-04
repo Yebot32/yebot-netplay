@@ -94,10 +94,7 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
                     @"[general]\nshow_welcome = false\nskip_boot_anim = true\n"
                      "games_dir = %@\n\n"
                      "[display]\nrenderer = \"VULKAN\"\n\n"
-                     "[display.quality]
-surface_scale = %@
-
-"
+                     "[display.quality]\nsurface_scale = %@\n\n"
                      "[display.ui]\nshow_menubar = false\n"
                      "show_notifications = false\nhide_cursor = true\n\n"
                      "[perf]\ncache_shaders = true\n\n"
