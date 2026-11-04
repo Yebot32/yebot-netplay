@@ -88,6 +88,7 @@ jobs:
           for pkg in $(cat xemu-ios/vcpkg-packages.txt); do
             "$HOME/vcpkg/vcpkg" install "$pkg" --triplet arm64-ios \
               --overlay-triplets="$HOME/triplets" \
+              --overlay-ports="$HOME/overlay" \
               --x-install-root="$HOME/vcpkg-installed" || failed="$failed $pkg"
           done
           echo "failed:$failed"
