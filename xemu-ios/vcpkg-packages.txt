@@ -4,4 +4,3 @@ zlib
 libepoxy
 libpcap
 libsamplerate
-openssl
