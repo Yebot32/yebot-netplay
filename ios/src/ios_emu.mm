@@ -22,6 +22,7 @@
 #include <thread>
 
 #include "ios_emu.h"
+#include "XenraAudio.h"
 
 #include "xenia/apu/nop/nop_audio_system.h"
 #include "xenia/base/assert.h"
@@ -423,9 +424,7 @@ class IosEmuApp {
  private:
   static std::unique_ptr<xe::apu::AudioSystem> CreateAudioSystem(
       xe::cpu::Processor* processor) {
-    // iOS audio (AVAudioEngine/SDL) is a follow-up; silent-for-now beats
-    // not-booting.
-    return std::make_unique<xe::apu::nop::NopAudioSystem>(processor);
+    return XenraCreateAudioSystem(processor);
   }
 
   static std::unique_ptr<xe::gpu::GraphicsSystem> CreateGraphicsSystem() {
@@ -562,6 +561,16 @@ int xe_ios_initialize(const char* documents_dir, const char* caches_dir) {
 }
 
 void xe_ios_set_game_view(UIView* view) { g_game_view = view; }
+
+void xe_ios_set_cvar(const char* name, const char* value) {
+  auto it = cvar::ConfigVars->find(name);
+  if (it == cvar::ConfigVars->end()) {
+    XELOGW("iOS: no such setting: {}", name);
+    return;
+  }
+  toml::table table = toml::parse(fmt::format("value = {}", value));
+  it->second->LoadConfigValue(table.get("value"));
+}
 
 int xe_ios_boot(const char* path) {
   if (!g_app || !g_app->emu_) {

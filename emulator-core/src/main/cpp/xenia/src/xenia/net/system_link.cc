@@ -17,9 +17,9 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
+#include <atomic>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -371,7 +371,8 @@ struct SystemLink::State {
   // Only the worker touches them.
   std::deque<std::pair<uint64_t, size_t>> recent;
   bool reported_repeat = false;
-  std::jthread worker;
+  std::atomic<bool> stop_requested{false};
+  std::thread worker;
 
   State(std::shared_ptr<secure::PacketTransport> io, AssociationConfig config)
       : transport(std::move(io)),
@@ -379,7 +380,7 @@ struct SystemLink::State {
         broadcast_auth(config.broadcast.authentication),
         cross_platform(config.cross_platform),
         associations(WithCredential(std::move(config), keys)) {
-    worker = std::jthread([this](std::stop_token stop) { Run(stop); });
+    worker = std::thread([this] { Run(); });
   }
 
   // Associations only ask for a credential with mutex held.
@@ -394,9 +395,9 @@ struct SystemLink::State {
 
   // Only this thread sends and receives on the transport so calls that queue
   // frames wake it.
-  void Run(std::stop_token stop) {
+  void Run() {
     threading::set_name("XNet System Link");
-    while (!stop.stop_requested()) {
+    while (!stop_requested) {
       std::vector<uint8_t> wire;
       const bool arrived = transport->Receive(wire, 25);
       // Repeats too, since a guest stack can send the same frame twice.
@@ -1602,7 +1603,7 @@ SystemLink::SystemLink(uint32_t address,
 
 SystemLink::~SystemLink() {
   // Bound ports keep the state alive, but nothing may run it any more.
-  state_->worker.request_stop();
+  state_->stop_requested = true;
   state_->transport->Wake();
   state_->worker.join();
   std::shared_ptr<secure::PacketTransport> transport;

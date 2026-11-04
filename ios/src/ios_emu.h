@@ -55,6 +55,10 @@ void xe_ios_input_set(int buttons, short lx, short ly, short rx, short ry,
 int xe_ios_status(void);
 const char* xe_ios_status_detail(void);
 
+// Sets a core setting by name; value is TOML, so strings carry their quotes.
+// Takes effect on the next boot. Unknown names are logged and ignored.
+void xe_ios_set_cvar(const char* name, const char* value);
+
 // Shuts the emulator down and releases the window. Call on the main thread.
 void xe_ios_shutdown(void);
 

@@ -20,12 +20,31 @@
 set(_xe_ios_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_xe_root "${CMAKE_CURRENT_SOURCE_DIR}/../emulator-core/src/main/cpp/xenia")
 
+set(_xe_ios_arc_sources
+  "${_xe_ios_dir}/src/XenraAppDelegate.mm"
+  "${_xe_ios_dir}/src/XenraDashboardController.mm"
+  "${_xe_ios_dir}/src/XenraGameController.mm"
+  "${_xe_ios_dir}/src/XenraLibraryController.mm"
+  "${_xe_ios_dir}/src/XenraSettings.mm"
+  "${_xe_ios_dir}/src/XenraSettingsController.mm"
+  "${_xe_ios_dir}/src/XenraTouchPad.mm"
+  "${_xe_ios_dir}/src/XenraUI.mm"
+)
+set(_xe_ios_resources "${_xe_ios_dir}/res/xanite_gold_x.png")
+set_source_files_properties(${_xe_ios_resources} PROPERTIES
+  MACOSX_PACKAGE_LOCATION "Resources")
+
 add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/main.mm"
+  "${_xe_ios_dir}/src/XenraAudio.h"
+  "${_xe_ios_dir}/src/XenraAudio.mm"
+  "${_xe_ios_dir}/src/XenraScreens.h"
+  "${_xe_ios_dir}/src/XenraSettings.h"
+  "${_xe_ios_dir}/src/XenraTouchPad.h"
+  "${_xe_ios_dir}/src/XenraUI.h"
+  ${_xe_ios_arc_sources}
+  ${_xe_ios_resources}
   "${_xe_ios_dir}/src/XenraAppDelegate.h"
-  "${_xe_ios_dir}/src/XenraAppDelegate.mm"
-  "${_xe_ios_dir}/src/XenraBladeCell.h"
-  "${_xe_ios_dir}/src/XenraBladeCell.mm"
   "${_xe_ios_dir}/src/XenraBladeView.h"
   "${_xe_ios_dir}/src/XenraBladeView.mm"
   "${_xe_ios_dir}/src/XenraGameScanner.h"
@@ -103,6 +122,7 @@ target_link_libraries(xenra-ios PRIVATE
   "-framework Foundation"
   "-framework CoreGraphics"
   "-framework GameController"
+  "-framework UniformTypeIdentifiers"
   "-framework AudioToolbox"
   "-framework AVFoundation"
   "-framework CoreMedia"
@@ -142,3 +162,8 @@ set_target_properties(xenra-ios PROPERTIES
   XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
   XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
 )
+
+# The screens are new code and use ARC. Source options come after the target's
+# -fno-objc-arc on the command line, so they win.
+set_source_files_properties(${_xe_ios_arc_sources} PROPERTIES
+  COMPILE_OPTIONS "-fobjc-arc")
