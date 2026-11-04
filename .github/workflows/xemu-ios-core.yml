@@ -74,6 +74,16 @@ jobs:
           set(VCPKG_OSX_DEPLOYMENT_TARGET $IOS_DEPLOYMENT_TARGET)
           set(VCPKG_BUILD_TYPE release)
           EOF
+          # Autotools sees an arm64 host building for arm64 and tries to run what
+          # it compiled, unless told this is a cross build.
+          echo 'set(VCPKG_MAKE_BUILD_TRIPLET "--host=aarch64-apple-darwin --build=x86_64-apple-darwin")' >> "$HOME/triplets/arm64-ios.cmake"
+          # Neither port knows iOS. epoxy gets the macOS options; pcap gets the
+          # null backend, since the sandbox cannot capture packets anyway.
+          mkdir -p "$HOME/overlay"
+          cp -R "$HOME/vcpkg/ports/libepoxy" "$HOME/vcpkg/ports/libpcap" "$HOME/overlay/"
+          sed -i '' 's/VCPKG_TARGET_IS_WINDOWS OR VCPKG_TARGET_IS_OSX/VCPKG_TARGET_IS_WINDOWS OR VCPKG_TARGET_IS_OSX OR VCPKG_TARGET_IS_IOS/' "$HOME/overlay/libepoxy/portfile.cmake"
+          sed -i '' 's/^if(VCPKG_TARGET_IS_WINDOWS AND NOT VCPKG_CMAKE_CONFIGURE_OPTIONS MATCHES "Packet_ROOT")/if(VCPKG_TARGET_IS_IOS OR (VCPKG_TARGET_IS_WINDOWS AND NOT VCPKG_CMAKE_CONFIGURE_OPTIONS MATCHES "Packet_ROOT"))/' "$HOME/overlay/libpcap/portfile.cmake"
+          sed -i '' 's/"platform": "!osx & !windows"/"platform": "!osx \& !windows \& !ios"/' "$HOME/overlay/libepoxy/vcpkg.json"
           failed=""
           for pkg in $(cat xemu-ios/vcpkg-packages.txt); do
             "$HOME/vcpkg/vcpkg" install "$pkg" --triplet arm64-ios \
