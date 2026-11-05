@@ -65,6 +65,10 @@ void XenraOpenJitEnabler(void) {
                          completionHandler:nil];
 }
 
+#ifdef XENRA_UITEST
+void XenraTourStart(UIWindow* window);
+#endif
+
 @implementation XenraAppDelegate
 
 - (BOOL)application:(UIApplication*)application
@@ -76,6 +80,9 @@ void XenraOpenJitEnabler(void) {
 
   [XenraSettings holdPickedFiles];
   self.window.rootViewController = XenraMakeRoot(XenraDashboardEntryPlain);
+#ifdef XENRA_UITEST
+  XenraTourStart(self.window);
+#endif
   [self.window makeKeyAndVisible];
 
   NSString* docs = NSSearchPathForDirectoriesInDomains(
