@@ -1,6 +1,7 @@
 #import "XenraJitProbe.h"
 
 #include <atomic>
+#include <initializer_list>
 #include <cstdint>
 #include <cstring>
 #include <libkern/OSCacheControl.h>

@@ -4,6 +4,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <cstdlib>
+#include <initializer_list>
 
 #import "XenraLogs.h"
 #import "XenraMetalView.h"
@@ -177,6 +178,10 @@
                                                   "them in the Setup Wizard, "
                                                   "from Settings.",
                                                  missing]];
+    return;
+  }
+  if (NSString* problem = XenraXemuFileProblem()) {
+    [self showFailure:problem];
     return;
   }
   XenraLog([NSString stringWithFormat:@"boot: %@", path_.lastPathComponent]);

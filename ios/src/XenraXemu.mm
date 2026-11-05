@@ -2,6 +2,8 @@
 
 #include <cstdlib>
 #include <dlfcn.h>
+#import <AVFoundation/AVFoundation.h>
+#import <GameController/GameController.h>
 #include <initializer_list>
 #include <sys/sysctl.h>
 #include <unistd.h>
@@ -118,6 +120,76 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
   return path;
 }
 
+// The core reads neither of these from the environment: DukeX sets them on the
+// layer itself, through selectors the public header does not declare.
+static void ApplyPacing(CALayer* layer) {
+  SEL sync = NSSelectorFromString(@"setDisplaySyncEnabled:");
+  if ([layer respondsToSelector:sync]) {
+    reinterpret_cast<void (*)(id, SEL, BOOL)>(
+        [layer methodForSelector:sync])(layer, sync, YES);
+  }
+  SEL nominal = NSSelectorFromString(@"setNominalFramesPerSecond:");
+  if ([layer respondsToSelector:nominal]) {
+    reinterpret_cast<void (*)(id, SEL, NSInteger)>(
+        [layer methodForSelector:nominal])(layer, nominal, 60);
+  }
+}
+
+NSString* XenraXemuFileProblem(void) {
+  // A wrong MCPX is the one mistake the core reports only to a menu we do not
+  // show: it carries on from the flash image and the guest never starts.
+  NSURL* mcpx = [XenraSettings urlForBookmark:@"mcpx"];
+  NSURL* flash = [XenraSettings urlForBookmark:@"flash"];
+  NSURL* hdd = [XenraSettings urlForBookmark:@"hdd"];
+  NSMutableString* sizes = [NSMutableString stringWithString:@"system files:"];
+  NSString* problem = nil;
+  NSDictionary* names = @{@"MCPX" : mcpx ?: NSNull.null,
+                          @"Flash" : flash ?: NSNull.null,
+                          @"HDD" : hdd ?: NSNull.null};
+  for (NSString* name in names) {
+    NSURL* url = names[name];
+    if ((id)url == NSNull.null) continue;
+    NSNumber* size = nil;
+    [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+    [sizes appendFormat:@" %@=%@ %@", name, size ?: @"unreadable",
+                        url.lastPathComponent];
+    if (!size) {
+      problem = [NSString stringWithFormat:@"%@ cannot be read. It may have "
+                                            "moved. Choose it again in the "
+                                            "Setup Wizard.",
+                                           url.lastPathComponent];
+    } else if ([name isEqual:@"MCPX"] && size.longLongValue != 512) {
+      problem = [NSString stringWithFormat:@"%@ is not an MCPX boot ROM, which "
+                                            "is exactly 512 bytes. Choose "
+                                            "mcpx_1.0.bin in the Setup Wizard.",
+                                           url.lastPathComponent];
+    }
+  }
+  XenraLog(sizes);
+  return problem;
+}
+
+void XenraXemuSetPaused(BOOL paused) {
+  static auto lock =
+      reinterpret_cast<void (*)(void)>(dlsym(g_core, "xemu_main_loop_lock"));
+  static auto unlock =
+      reinterpret_cast<void (*)(void)>(dlsym(g_core, "xemu_main_loop_unlock"));
+  static auto stop = reinterpret_cast<int (*)(int)>(dlsym(g_core, "vm_stop"));
+  static auto start = reinterpret_cast<void (*)(void)>(dlsym(g_core, "vm_start"));
+  static auto running =
+      reinterpret_cast<bool (*)(void)>(dlsym(g_core, "runstate_is_running"));
+  if (!lock || !unlock || !stop || !start || !running) return;
+  // RUN_STATE_PAUSED, as xemu's own pause action does it.
+  constexpr int kRunStatePaused = 4;
+  lock();
+  if (paused && running()) {
+    stop(kRunStatePaused);
+  } else if (!paused && !running()) {
+    start();
+  }
+  unlock();
+}
+
 int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   auto main = reinterpret_cast<int (*)(int, char**)>(
       dlsym(g_core, "xemu_ios_main"));
@@ -183,12 +255,19 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   if ([[XenraSettings stringForKey:@"core.trace" fallback:@"true"]
           isEqual:@"true"]) {
     for (const char* name :
-         {"XEMU_IOS_TCG_TRACE", "XEMU_IOS_IDE_TRACE", "XEMU_IOS_RENDER_TRACE",
-          "XEMU_IOS_FRAMEBUFFER_TRACE", "XEMU_IOS_VK_SWAPCHAIN_TRACE"}) {
+         {"XEMU_IOS_TCG_TRACE", "XEMU_IOS_RR_RETURN_TRACE",
+          "XEMU_IOS_FRAMEBUFFER_TRACE"}) {
       setenv(name, "1", 1);
     }
   }
   if (!universal && scheme == XenraJitRxFirst) setenv("XEMU_IOS_RX_FIRST", "1", 1);
+  ApplyPacing(layer);
+  // Sound through the mute switch, and pads that keep working with our window
+  // key rather than SDL's.
+  [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback
+                                       error:nil];
+  [AVAudioSession.sharedInstance setActive:YES error:nil];
+  GCController.shouldMonitorBackgroundEvents = YES;
   if (set_layer) set_layer((__bridge void*)layer);
 
   NSString* accel = [NSString
