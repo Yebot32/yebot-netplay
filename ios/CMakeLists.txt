@@ -192,3 +192,9 @@ set_source_files_properties("${_xe_ios_dir}/src/XenraLogs.mm" PROPERTIES
 # -fno-objc-arc on the command line, so they win.
 set_source_files_properties(${_xe_ios_arc_sources} PROPERTIES
   COMPILE_OPTIONS "-fobjc-arc")
+
+# UILaunchScreen names a colour, and only a compiled catalogue at the bundle's root
+# can hold one. Not fatal: without it the launch screen is plain, not broken.
+add_custom_command(TARGET xenra-ios POST_BUILD
+  COMMAND sh -c "xcrun actool '${_xe_ios_dir}/res/Launch.xcassets' --compile '$<TARGET_BUNDLE_CONTENT_DIR:xenra-ios>' --platform iphoneos --minimum-deployment-target 16.0 --target-device iphone --target-device ipad --output-format human-readable-text --notices --warnings --errors --output-partial-info-plist '${CMAKE_CURRENT_BINARY_DIR}/launch-assets.plist' || echo 'warning: actool failed, no launch colour'"
+  VERBATIM)

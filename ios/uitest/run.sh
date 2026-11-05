@@ -38,6 +38,11 @@ sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.4.5/; s/${MACOSX_BUNDLE_BUNDLE
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable Xenra' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier Ali.Xanite.ui' "$APP/Info.plist"
 cp ios/res/*.png "$APP/"
+xcrun actool ios/res/Launch.xcassets --compile "$APP" --platform iphonesimulator \
+  --minimum-deployment-target 16.0 --target-device iphone --target-device ipad \
+  --output-format human-readable-text --notices --warnings --errors \
+  --output-partial-info-plist build-ui/launch-assets.plist 2>&1 | tail -5
+ls -la "$APP/Assets.car"
 touch "$APP/Frameworks/libxemu-ios-core.dylib"
 codesign --force --sign - "$APP"
 
@@ -49,26 +54,27 @@ xcrun simctl install "$DEVICE" "$APP" || exit 1
 xcrun simctl io "$DEVICE" recordVideo --codec=h264 "$OUT/tour.mp4" &
 VIDEO=$!
 xcrun simctl launch "$DEVICE" Ali.Xanite.ui
+# The launch screen itself, which only the system can photograph. A simulator is
+# in light mode, the case that used to come up white.
+for i in 1 2 3 4; do
+  xcrun simctl io "$DEVICE" screenshot "$OUT/000-launch-$i.png" >/dev/null 2>&1
+done
 sleep 3
 DATA=$(xcrun simctl get_app_container "$DEVICE" Ali.Xanite.ui data)
 TOUR="$DATA/Documents/tour"
-seen=0
-for i in $(seq 1 1800); do
-  for shot in "$TOUR"/shot-*; do
-    [ -e "$shot" ] || continue
-    name=$(basename "$shot"); id=${name:5:3}
-    [ -e "$TOUR/ack-$id" ] && continue
-    xcrun simctl io "$DEVICE" screenshot "$OUT/${name#shot-}.png" >/dev/null 2>&1
-    touch "$TOUR/ack-$id"; seen=$((seen + 1))
-  done
+# The app photographs itself; see XenraTour.mm for why.
+for i in $(seq 1 1500); do
   [ -e "$TOUR/done" ] && break
-  sleep 0.2
+  sleep 1
 done
 kill -INT $VIDEO; wait $VIDEO
+cp "$TOUR"/*.png "$OUT/" 2>/dev/null
 cp "$DATA/Documents/xenra-jit-log.txt" "$OUT/app-log.txt" 2>/dev/null
 cp -R "$DATA/Documents/logs" "$OUT/logs" 2>/dev/null
 xcrun simctl spawn "$DEVICE" log show --last 3m --predicate 'process == "Xenra"' --style compact 2>/dev/null | tail -200 > "$OUT/system-log.txt"
 ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i xenra | head
 cp ~/Library/Logs/DiagnosticReports/Xenra* "$OUT/" 2>/dev/null
-echo "screens: $seen"
+grep -c "tour: shot" "$OUT/app-log.txt" | sed 's/^/screens: /'
+grep "NO SUCH CONTROL" "$OUT/app-log.txt" | head -20
+grep "tour: press\|tour: early" "$OUT/app-log.txt" | sort | uniq -c
 [ -e "$TOUR/done" ]

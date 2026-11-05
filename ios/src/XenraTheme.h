@@ -63,10 +63,10 @@ static inline UIColor* XenraPanelFill(void) {
   return XenraPick(0xFF1F2B1A, 0xC4E2EFB4, 0xFF232427);
 }
 static inline UIColor* XenraDialogFill(void) {
-  return XenraPick(0xF20A0F08, 0xF2E8F4C2, 0xF20A0A0B);
+  return XenraPick(0xF20A0805, 0xF2E8F4C2, 0xF20A0A0B);
 }
 static inline UIColor* XenraAccentContainer(void) {
-  return XenraPick(0xFF1E4A1E, 0xFFB0CE70, 0xFF2A2F32);
+  return XenraPick(0xFF1E4A1E, 0x3374A81A, 0xFF2A2F32);
 }
 static inline UIColor* XenraOutlineVariant(void) {
   return XenraPick(0xFF2E251E, 0xA67E9E48, 0xFF333437);
@@ -79,14 +79,19 @@ static inline UIColor* XenraTextMuted(void) {
 }
 // Text on a filled accent blade or badge.
 static inline UIColor* XenraOnAccent(void) {
-  return XenraPick(0xFF0B1A0B, 0xFFFBFEF4, 0xFF0B0B0C);
+  return XenraPick(0xFF0B0808, 0xFF1B2408, 0xFF0A0A0B);
 }
 static inline UIColor* XenraSuccess(void) {
   return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410)
                                           : XenraHex(0xFF7CFF6B);
 }
-static inline UIColor* XenraError(void) { return XenraHex(0xFFFF5252); }
-static inline UIColor* XenraWarning(void) { return XenraHex(0xFFFF6B6B); }
+static inline UIColor* XenraError(void) {
+  return XenraPick(0xFFFF5252, 0xFFB3261E, 0xFFFF5252);
+}
+// Text of a destructive row: xaniteog_warning, x360_warning.
+static inline UIColor* XenraWarning(void) {
+  return XenraPick(0xFFFF6B6B, 0xFF8A4B0B, 0xFFFF6B6B);
+}
 
 // xanite_bg_grad_*: the dashboard, left to right.
 static inline UIColor* XenraBgGradStart(void) {
@@ -103,4 +108,66 @@ static inline UIColor* XenraVignetteTop(void) {
 }
 static inline UIColor* XenraVignetteBottom(void) {
   return XenraPick(0x55000000, 0x143F5C14, 0x55000000);
+}
+// The ring the vignette paints, centre clear: xenraVignetteMid, xenraVignetteEdge.
+static inline UIColor* XenraVignetteMid(void) {
+  return XenraPick(0x26000000, 0x0A3F5C14, 0x26000000);
+}
+static inline UIColor* XenraVignetteEdge(void) {
+  return XenraPick(0x8C000000, 0x2E3F5C14, 0x8C000000);
+}
+
+// xenraTextPrimary / Secondary / Tertiary. Blades use secondary, hints and
+// meta lines tertiary. These are the neutral tokens; XenraText and
+// XenraTextMuted are the warmer xenraText and xenraTextMuted, which is what
+// dropdown values and field helpers use.
+static inline UIColor* XenraTextPrimary(void) {
+  return XenraPick(0xFFFFFFFF, 0xDE000000, 0xFFF4F5F6);
+}
+static inline UIColor* XenraTextSecondary(void) {
+  return XenraPick(0xD6FFFFFF, 0xC2000000, 0xFFF4F5F6);
+}
+static inline UIColor* XenraTextTertiary(void) {
+  return XenraPick(0x8AFFFFFF, 0xA3000000, 0xFFA9ACB0);
+}
+
+// xenraBg: also the label colour on a filled accent pill.
+static inline UIColor* XenraBg(void) {
+  return XenraPick(0xFF0B0808, 0xFFD6E8AC, 0xFF0A0A0B);
+}
+static inline UIColor* XenraSurface(void) {
+  return XenraPick(0xFF14120D, 0xFFDFEEB6, 0xFF131314);
+}
+static inline UIColor* XenraSurfaceVariant(void) {
+  return XenraPick(0xFF1D1915, 0xFFD2E4A0, 0xFF1A1A1C);
+}
+static inline UIColor* XenraAccentLight(void) {
+  return XenraPick(0xFF7FE07F, 0xCC74A81A, 0xFFDCE1E4);
+}
+static inline UIColor* XenraAccentDark(void) {
+  return XenraPick(0xFF3FA33F, 0xFF74A81A, 0xFF7E868B);
+}
+// xenraSettingsCardFill: what a XenraCardView is filled with.
+static inline UIColor* XenraCardFill(void) {
+  return XenraPick(0xFF1A170D, 0x0F000000, 0xFF171719);
+}
+static inline UIColor* XenraFocus(void) {
+  return XenraPick(0xFFFFFFFF, 0xFF0E140D, 0xFFFFFFFF);
+}
+static inline UIColor* XenraFocus38(void) {
+  return XenraPick(0x38FFFFFF, 0x380E140D, 0x38FFFFFF);
+}
+static inline UIColor* XenraFocus1F(void) {
+  return XenraPick(0x1FFFFFFF, 0x1F0E140D, 0x1FFFFFFF);
+}
+// xenraShadowSpot. Tinted on the light console: black over pale green is grey.
+static inline UIColor* XenraShadow(void) {
+  return XenraPick(0xFF000000, 0x33313D14, 0xFF000000);
+}
+
+// Whether this palette is the light one, for anything that follows the
+// interface style: switches, spinners, scroll indicators, system pickers.
+static inline UIUserInterfaceStyle XenraInterfaceStyle(void) {
+  return XenraThemeMode == XenraThemeX360 ? UIUserInterfaceStyleLight
+                                          : UIUserInterfaceStyleDark;
 }

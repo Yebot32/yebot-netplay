@@ -37,17 +37,29 @@ void XenraApplyOrientation(UIViewController* controller) {
       [[UIWindowSceneGeometryPreferencesIOS alloc]
           initWithInterfaceOrientations:root.supportedInterfaceOrientations];
   [controller.view.window.windowScene requestGeometryUpdateWithPreferences:geometry
-                                               errorHandler:nil];
+                                               errorHandler:^(NSError* error) {
+                                                 XenraLog([NSString
+                                                     stringWithFormat:
+                                                         @"orientation: %@",
+                                                         error]);
+                                               }];
 }
 
 @implementation XenraDashboardController {
   XenraBladeButton* onlineBlade_;
   XenraBladeButton* consoleBlade_;
   NSArray<XenraBladeButton*>* blades_;
+  NSArray<NSLayoutConstraint*>* bladeHeights_;
   UIImageView* logo_;
+  UIStackView* menu_;
+  XenraChromeButton* orientation_;
   NSLayoutConstraint* logoSize_;
-  UIButton* orientation_;
-  UIStackView* body_;
+  NSLayoutConstraint* logoX_;
+  NSLayoutConstraint* logoY_;
+  NSLayoutConstraint* menuLeft_;
+  NSLayoutConstraint* menuWidth_;
+  NSLayoutConstraint* menuY_;
+  NSLayoutConstraint* hintsBottom_;
   BOOL entered_;
   BOOL settled_;
 }
@@ -66,6 +78,7 @@ void XenraApplyOrientation(UIViewController* controller) {
       initWithImage:XenraBundleImage(x360 ? @"xenra_x_360.png" : @"xenra_x.png")];
   logo_.contentMode = UIViewContentModeScaleAspectFit;
   logo_.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:logo_];
 
   __weak XenraDashboardController* weak = self;
   XenraBladeButton* library =
@@ -94,33 +107,22 @@ void XenraApplyOrientation(UIViewController* controller) {
                                                    }];
   blades_ = @[ library, onlineBlade_, settings, consoleBlade_ ];
 
-  UIStackView* menu = [[UIStackView alloc] initWithArrangedSubviews:blades_];
-  menu.axis = UILayoutConstraintAxisVertical;
-  menu.spacing = 16;
-  menu.translatesAutoresizingMaskIntoConstraints = NO;
+  menu_ = [[UIStackView alloc] initWithArrangedSubviews:blades_];
+  menu_.axis = UILayoutConstraintAxisVertical;
+  menu_.spacing = 12;
+  menu_.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:menu_];
+  NSMutableArray* heights = [NSMutableArray array];
   for (UIView* blade in blades_) {
-    [blade.heightAnchor constraintEqualToConstant:64].active = YES;
+    [heights addObject:[blade.heightAnchor constraintEqualToConstant:64]];
   }
+  bladeHeights_ = heights;
 
-  body_ = [[UIStackView alloc] initWithArrangedSubviews:@[ logo_, menu ]];
-  body_.spacing = 40;
-  body_.translatesAutoresizingMaskIntoConstraints = NO;
-  [self.view addSubview:body_];
-
-  orientation_ = [UIButton buttonWithType:UIButtonTypeSystem];
-  orientation_.tintColor = XenraAccent();
-  orientation_.titleLabel.font = [UIFont systemFontOfSize:13
-                                                   weight:UIFontWeightBold];
-  orientation_.backgroundColor = XenraPick(0xFF12100C, 0xC4E2EFB4, 0xFF12100C);
-  orientation_.layer.cornerRadius = 8;
-  orientation_.layer.borderWidth = 1;
-  orientation_.layer.borderColor = XenraAccentAlpha(0x88).CGColor;
-  orientation_.contentEdgeInsets = UIEdgeInsetsMake(8, 14, 8, 16);
-  orientation_.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, -8);
-  orientation_.translatesAutoresizingMaskIntoConstraints = NO;
-  [orientation_ addTarget:self
-                   action:@selector(cycleOrientation)
-         forControlEvents:UIControlEventTouchUpInside];
+  orientation_ = [[XenraChromeButton alloc] initWithTitle:@""
+                                                     icon:nil
+                                                   action:^{
+                                                     [weak cycleOrientation];
+                                                   }];
   [self.view addSubview:orientation_];
 
   XenraHintBar* hints = [[XenraHintBar alloc] initWithFrame:CGRectZero];
@@ -129,21 +131,32 @@ void XenraApplyOrientation(UIViewController* controller) {
   };
   [self.view addSubview:hints];
 
+  // Every position is a constant worked out in applyLayout, so one layout pass
+  // moves the whole screen and a rotation animates it as one piece.
+  UIView* root = self.view;
   logoSize_ = [logo_.widthAnchor constraintEqualToConstant:240];
-  UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
+  logoX_ = [logo_.centerXAnchor constraintEqualToAnchor:root.leftAnchor];
+  logoY_ = [logo_.centerYAnchor constraintEqualToAnchor:root.topAnchor];
+  menuLeft_ = [menu_.leftAnchor constraintEqualToAnchor:root.leftAnchor];
+  menuWidth_ = [menu_.widthAnchor constraintEqualToConstant:400];
+  menuY_ = [menu_.centerYAnchor constraintEqualToAnchor:root.topAnchor];
+  hintsBottom_ = [hints.bottomAnchor constraintEqualToAnchor:root.bottomAnchor];
+  UILayoutGuide* safe = root.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:bladeHeights_];
   [NSLayoutConstraint activateConstraints:@[
-    [body_.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:32],
-    [body_.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor
-                                         constant:-32],
-    [body_.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
     logoSize_,
     [logo_.heightAnchor constraintEqualToAnchor:logo_.widthAnchor],
+    logoX_,
+    logoY_,
+    menuLeft_,
+    menuWidth_,
+    menuY_,
     [orientation_.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
                                                constant:16],
     [orientation_.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
     [hints.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
     [hints.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-    [hints.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-8],
+    hintsBottom_,
   ]];
   [self updateBlades];
   [self updateOrientationButton];
@@ -151,13 +164,57 @@ void XenraApplyOrientation(UIViewController* controller) {
 
 - (void)viewWillLayoutSubviews {
   [super viewWillLayoutSubviews];
+  [self applyLayout];
+}
+
+// activity_xbox_dashboard.xml and adaptLayoutForOrientation. Landscape: 45% logo
+// column and 55% menu, padding 32 at the sides and 48 under, so the content sits
+// 24 above centre. Portrait: logo over menu as one group, centred, padding
+// 24, 20, 24, 96. Those paddings assume a screen with room to spare, so wherever
+// a screen is short the blades and logo give way rather than reach the hint row.
+- (void)applyLayout {
   const CGSize size = self.view.bounds.size;
-  const BOOL landscape = size.width > size.height;
-  body_.axis = landscape ? UILayoutConstraintAxisHorizontal
-                         : UILayoutConstraintAxisVertical;
-  body_.alignment =
-      landscape ? UIStackViewAlignmentCenter : UIStackViewAlignmentFill;
-  logoSize_.constant = landscape ? 240 : 164;
+  const UIEdgeInsets safe = self.view.safeAreaInsets;
+  const CGFloat spacing = menu_.spacing;
+  const CGFloat hintsInset = XenraHintBarInset(self.view);
+  const CGFloat hintsTop = size.height - 80 - hintsInset;
+  const CGFloat chromeBottom = safe.top + 16 + 44;
+  hintsBottom_.constant = -hintsInset;
+
+  CGFloat blade = 64, logo, logoX, logoY, menuLeft, menuWidth, menuY;
+  if (size.width > size.height) {
+    const CGFloat left = safe.left + 32;
+    const CGFloat width = size.width - safe.right - 32 - left;
+    const CGFloat center = safe.top + (size.height - safe.top - 48) / 2;
+    const CGFloat room = 2 * MIN(center - safe.top - 8, hintsTop - 8 - center);
+    blade = MAX(44, MIN(64, (room - 3 * spacing) / 4));
+    logo = MIN(240, 2 * (center - chromeBottom));
+    logoX = left + width * 0.45 / 2;
+    logoY = center;
+    menuLeft = left + width * 0.45;
+    menuWidth = width * 0.55;
+    menuY = center;
+  } else {
+    const CGFloat top = MAX(safe.top + 20, chromeBottom);
+    const CGFloat bottom = hintsTop - 16;
+    const CGFloat gap = 40;
+    const CGFloat menu = 4 * blade + 3 * spacing;
+    logo = MAX(96, MIN(164, bottom - top - gap - menu));
+    const CGFloat group = logo + gap + menu;
+    const CGFloat start = top + (bottom - top - group) / 2;
+    logoX = size.width / 2;
+    logoY = start + logo / 2;
+    menuLeft = safe.left + 24;
+    menuWidth = size.width - safe.left - safe.right - 48;
+    menuY = start + logo + gap + menu / 2;
+  }
+  for (NSLayoutConstraint* height in bladeHeights_) height.constant = blade;
+  logoSize_.constant = logo;
+  logoX_.constant = logoX;
+  logoY_.constant = logoY;
+  menuLeft_.constant = menuLeft;
+  menuWidth_.constant = menuWidth;
+  menuY_.constant = menuY;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -167,7 +224,8 @@ void XenraApplyOrientation(UIViewController* controller) {
   entered_ = YES;
   switch (_entry) {
     case XenraDashboardEntryPlain:
-      XenraEnter(blades_, 150, 0, 0, 0.1, 0.35, XenraCurveDecelerate);
+      XenraEnter(blades_, XenraTravelDashboard, 0, 0, 0.1, 0.35,
+                 XenraCurveDecelerate);
       settled_ = YES;
       break;
     case XenraDashboardEntryCrossfade:
@@ -181,7 +239,7 @@ void XenraApplyOrientation(UIViewController* controller) {
       logo_.transform = CGAffineTransformMakeScale(0.88, 0.88);
       __weak XenraDashboardController* weak = self;
       UIImageView* logo = logo_;
-      XenraAnimate(0.56, 0.17, XenraCurveDecelerate,
+      XenraAnimate(0.56, 0.17, XenraCurveDecelerate16,
                    ^{
                      logo.alpha = 1;
                      logo.transform = CGAffineTransformIdentity;
@@ -189,7 +247,7 @@ void XenraApplyOrientation(UIViewController* controller) {
                    ^{
                      [weak settle];
                    });
-      XenraEnter(blades_, 28, 0, 0.26, 0.06, 0.34, XenraCurveDecelerate);
+      XenraEnter(blades_, 28, 0, 0.26, 0.06, 0.34, XenraCurveDecelerate14);
       XenraEnter(@[ orientation_ ], 0, 0, 0.48, 0, 0.28, XenraCurveStandard);
       break;
     }
@@ -207,16 +265,14 @@ void XenraApplyOrientation(UIViewController* controller) {
   NSString* notice = XenraLogsTakeUncleanExitNotice();
   if (!notice) return;
   __weak XenraDashboardController* weak = self;
-  [XenraBladeSheet showIn:self.view
-                    title:@"Last Run"
-                  message:notice
-                    items:@[
-                      [XenraBladeItem title:@"Share Logs"
-                                     action:^{
-                                       XenraShareLogs(weak, nil);
-                                     }],
-                      [XenraBladeItem title:@"Not Now" action:nil],
-                    ]];
+  [XenraBladeSheet showConfirmIn:self.view
+                           title:@"Last Run"
+                         message:notice
+                         leading:[XenraBladeItem title:@"Not Now" action:nil]
+                        trailing:[XenraBladeItem title:@"Share Logs"
+                                                action:^{
+                                                  XenraShareLogs(weak, nil);
+                                                }]];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
@@ -263,23 +319,25 @@ void XenraApplyOrientation(UIViewController* controller) {
 - (void)showOnlineNotice {
   [XenraBladeSheet showIn:self.view
                     title:onlineBlade_.title
-                  message:@"Not on iOS yet. It is part of the parity phase in "
-                          "the port plan."
+                  message:@"Online play isn't available on iPad and iPhone yet. "
+                          "Everything else works without it."
                     items:@[]];
 }
 
 // The root screen has nowhere further back to go, so say what the ways out are.
 - (void)showBackChoice {
   __weak XenraDashboardController* weak = self;
-  XenraBladeItem* setup = [XenraBladeItem title:@"Setup Wizard"
-                                         action:^{
-                                           XenraRestartSetup(weak.view.window);
-                                         }];
-  XenraBladeItem* close = [XenraBladeItem title:@"Close App"
-                                         action:^{
-                                           exit(0);
-                                         }];
-  [XenraBladeSheet showIn:self.view title:nil message:nil items:@[ setup, close ]];
+  [XenraBladeSheet showConfirmIn:self.view
+                           title:@"What would you like to do?"
+                         message:nil
+                         leading:[XenraBladeItem title:@"Setup Wizard"
+                                                action:^{
+                                                  XenraRestartSetup(weak.view.window);
+                                                }]
+                        trailing:[XenraBladeItem title:@"Close App"
+                                                action:^{
+                                                  exit(0);
+                                                }]];
 }
 
 - (void)cycleOrientation {
@@ -296,12 +354,10 @@ void XenraApplyOrientation(UIViewController* controller) {
 - (void)updateOrientationButton {
   NSString* current = [XenraSettings stringForKey:@"ui.orientation"
                                          fallback:@"auto"];
-  NSString* symbol = [current isEqual:@"auto"] ? @"arrow.triangle.2.circlepath"
-                     : [current isEqual:@"portrait"] ? @"rectangle.portrait"
-                                                     : @"rectangle";
-  [orientation_ setImage:[UIImage systemImageNamed:symbol]
-                forState:UIControlStateNormal];
-  [orientation_ setTitle:current.uppercaseString forState:UIControlStateNormal];
+  orientation_.title = current;  // shown in capitals
+  orientation_.icon = XenraOrientationIcon(current, 24);
+  orientation_.accessibilityLabel =
+      [NSString stringWithFormat:@"Orientation: %@. Tap to change.", current];
 }
 
 @end

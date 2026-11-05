@@ -109,8 +109,13 @@
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 
+	<!-- The dashboard's darkest colour, compiled from res/Launch.xcassets. An
+	     empty dict here is a white screen on a device in light mode. -->
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 
 	<!-- The in-app orientation lock only applies to a full-screen app. -->
 	<key>UIRequiresFullScreen</key>
