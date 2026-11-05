@@ -38,6 +38,26 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
           }];
 }
 
+@implementation XenraScrollView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+  self = [super initWithFrame:frame];
+  if (self) {
+    // Stock behaviour holds every touch back for 150 ms in case it is a scroll,
+    // so a blade lights up late; and it refuses to scroll a drag that begins on
+    // a control, which on these screens is nearly every drag.
+    self.delaysContentTouches = NO;
+    self.canCancelContentTouches = YES;
+  }
+  return self;
+}
+
+- (BOOL)touchesShouldCancelInContentView:(UIView*)view {
+  return YES;
+}
+
+@end
+
 @implementation XenraPanelView {
   CAShapeLayer* shape_;
 }
@@ -307,9 +327,14 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
   sheet.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
   sheet.backgroundColor = [UIColor colorWithWhite:0 alpha:0.53];
-  [sheet addGestureRecognizer:[[UITapGestureRecognizer alloc]
-                                  initWithTarget:sheet
-                                          action:@selector(dismiss)]];
+  // Outside the panel only. Left on the whole sheet, this recognizer won every
+  // tap and cancelled the blade under the finger: the dialog closed and its
+  // action never ran.
+  UITapGestureRecognizer* outside =
+      [[UITapGestureRecognizer alloc] initWithTarget:sheet
+                                              action:@selector(dismiss)];
+  outside.delegate = sheet;
+  [sheet addGestureRecognizer:outside];
 
   XenraPanelView* panel = [[XenraPanelView alloc] initWithFrame:CGRectZero];
   panel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -346,7 +371,7 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
     [stack addArrangedSubview:blade];
   }
 
-  UIScrollView* scroll = [[UIScrollView alloc] init];
+  UIScrollView* scroll = [[XenraScrollView alloc] init];
   scroll.translatesAutoresizingMaskIntoConstraints = NO;
   [scroll addSubview:stack];
   [panel addSubview:scroll];
@@ -388,6 +413,11 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
                  panel.transform = CGAffineTransformIdentity;
                },
                nil);
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer*)recognizer
+       shouldReceiveTouch:(UITouch*)touch {
+  return touch.view == self;
 }
 
 - (void)dismiss {

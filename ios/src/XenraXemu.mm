@@ -166,6 +166,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
     @"XEMU_IOS_SKIP_GL_FINISH" : @"1",
     @"XEMU_IOS_TCG_WATCHDOG" : @"off",
     @"XEMU_IOS_COROUTINE_PRIME_COUNT" : @"640",
+    @"XEMU_IOS_DISPLAY_PERF_STATS" : @"1",
   };
   for (NSString* name in environment) {
     setenv(name.UTF8String, [environment[name] UTF8String], 1);
@@ -232,4 +233,34 @@ void XenraXemuHideSdlWindows(UIWindow* ours) {
     window.windowLevel = UIWindowLevelNormal - 1;
   }
   if (found && !ours.isKeyWindow) [ours makeKeyAndVisible];
+}
+
+// DukeXDisplayStats, up to the fields read here.
+struct XemuStats {
+  uint64_t sample_id;
+  double presenter_fps;
+  uint32_t nv2a_fps;
+  int32_t mspf;
+  uint64_t frames;
+  uint64_t present_ready_frames;
+  uint64_t present_missed_frames;
+  uint64_t native_present_frames;
+  uint64_t pvideo_frames;
+  uint64_t surface_upload_pending_frames;
+  uint64_t finish_presenting_frames;
+  int64_t avg_total_us;
+  int64_t avg_wait_present_us;
+  int64_t avg_submit_us;
+  int64_t avg_present_us;
+  int32_t tail[16];
+};
+
+NSString* XenraXemuStatsLine(void) {
+  static auto copy = reinterpret_cast<int (*)(XemuStats*)>(
+      g_core ? dlsym(g_core, "xemu_ios_copy_display_stats") : nullptr);
+  XemuStats stats = {};
+  if (!copy || !copy(&stats)) return nil;
+  return [NSString stringWithFormat:@"%u FPS  ·  present %.0f  ·  %d ms",
+                                    stats.nv2a_fps, stats.presenter_fps,
+                                    stats.mspf];
 }

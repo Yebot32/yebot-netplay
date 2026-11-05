@@ -300,7 +300,7 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
       break;
   }
 
-  UIScrollView* scroll = [[UIScrollView alloc] init];
+  UIScrollView* scroll = [[XenraScrollView alloc] init];
   [scroll addSubview:stack];
   [NSLayoutConstraint activateConstraints:@[
     [stack.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor constant:24],

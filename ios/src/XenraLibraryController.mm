@@ -102,6 +102,21 @@
   return self;
 }
 
+- (void)setHighlighted:(BOOL)highlighted {
+  [super setHighlighted:highlighted];
+  [UIView animateWithDuration:highlighted ? 0.08 : 0.16
+                        delay:0
+                      options:UIViewAnimationOptionBeginFromCurrentState |
+                              UIViewAnimationOptionAllowUserInteraction
+                   animations:^{
+                     self.contentView.transform =
+                         highlighted ? CGAffineTransformMakeScale(0.97, 0.97)
+                                     : CGAffineTransformIdentity;
+                     self.contentView.alpha = highlighted ? 0.75 : 1;
+                   }
+                   completion:nil];
+}
+
 - (void)setCoverImage:(UIImage*)image {
   _cover.image = image;
   unknown_.hidden = image != nil;
@@ -217,6 +232,7 @@ static UIButton* ToolButton(NSString* symbol, id target, SEL action) {
   collection_ = [[UICollectionView alloc] initWithFrame:CGRectZero
                                    collectionViewLayout:layout];
   collection_.backgroundColor = UIColor.clearColor;
+  collection_.delaysContentTouches = NO;
   collection_.dataSource = self;
   collection_.delegate = self;
   [collection_ registerClass:[XenraGameCell class]

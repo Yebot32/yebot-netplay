@@ -27,6 +27,10 @@ struct Control {
   CGFloat width, height;
   UIColor* ring;  // nil: the accent
   bool pressed;
+  bool shown;
+  CALayer* layer;
+  UIImage* up;
+  UIImage* down;
 };
 
 struct Stick {
@@ -34,6 +38,12 @@ struct Stick {
   CGFloat radius;
   CGPoint knob;  // -1..1
   UITouch* __unsafe_unretained touch;
+  CALayer* base;
+  CALayer* knobLayer;
+  UIImage* baseIdle;
+  UIImage* baseActive;
+  UIImage* knobIdle;
+  UIImage* knobActive;
 };
 
 // OnScreenController.kt TABLET_GEOMETRY_CAP_DP. Points are its dp here.
@@ -58,7 +68,6 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
     self.backgroundColor = UIColor.clearColor;
     self.multipleTouchEnabled = YES;
     self.opaque = NO;
-    self.contentMode = UIViewContentModeRedraw;
     _scaleFactor = 1;
     _hapticsEnabled = YES;
   }
@@ -81,7 +90,7 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
   [super layoutSubviews];
   if (!CGSizeEqualToSize(laidOutFor_, self.bounds.size)) {
     [self initializeControls];
-    [self setNeedsDisplay];
+    [self buildLayers];
   }
 }
 
@@ -163,29 +172,25 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
 }
 
 // --- Drawing ----------------------------------------------------------------
+// Every control is a layer holding two pictures drawn once at layout. A press
+// swaps a layer's contents and a stick moves its knob, so nothing is redrawn
+// while playing. That matters more than it sounds: touches arrive on the main
+// thread, which is also the thread xemu renders from.
 
-- (void)drawStick:(const Stick&)stick {
-  const bool active = stick.touch != nil;
-  UIColor* accent = Rgb(95, 211, 95, 0.92);
-  CGRect outer = CGRectMake(stick.center.x - stick.radius,
-                            stick.center.y - stick.radius, stick.radius * 2,
-                            stick.radius * 2);
-  UIBezierPath* ring = [UIBezierPath bezierPathWithOvalInRect:outer];
-  [Rgb(18, 16, 10, active ? 0.8 : 0.59) setFill];
-  [ring fill];
-  [(active ? accent : Rgb(255, 248, 232, 0.47)) setStroke];
-  ring.lineWidth = stick.radius * 0.035;
-  [ring stroke];
+static UIImage* Picture(CGSize size, void (^draw)(void)) {
+  UIGraphicsImageRenderer* renderer =
+      [[UIGraphicsImageRenderer alloc] initWithSize:size];
+  return [renderer imageWithActions:^(UIGraphicsImageRendererContext*) {
+    draw();
+  }];
+}
 
-  const CGFloat knobR = stick.radius * 0.34;
-  const CGPoint at = CGPointMake(
-      stick.center.x + stick.knob.x * stick.radius * 0.62,
-      stick.center.y + stick.knob.y * stick.radius * 0.62);
-  UIBezierPath* knob = [UIBezierPath
-      bezierPathWithOvalInRect:CGRectMake(at.x - knobR, at.y - knobR, knobR * 2,
-                                          knobR * 2)];
-  [Rgb(225, 215, 190, active ? 0.9 : 0.6) setFill];
-  [knob fill];
+static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
+  CALayer* layer = [CALayer layer];
+  layer.frame = frame;
+  layer.contents = (id)image.CGImage;
+  layer.contentsScale = scale;
+  return layer;
 }
 
 - (void)drawArrow:(int)bit in:(CGRect)rect {
@@ -208,46 +213,123 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
   [p fill];
 }
 
-- (void)drawRect:(CGRect)rect {
-  [self drawStick:left_];
-  [self drawStick:right_];
-  for (const Control& c : controls_) {
-    CGRect box;
-    UIBezierPath* path;
-    if (c.shape == Shape::kCircle) {
-      box = CGRectMake(c.center.x - c.radius, c.center.y - c.radius,
-                       c.radius * 2, c.radius * 2);
-      path = [UIBezierPath bezierPathWithOvalInRect:box];
-    } else {
-      box = CGRectMake(c.center.x - c.width / 2, c.center.y - c.height / 2,
-                       c.width, c.height);
-      const CGFloat corner =
-          c.shape == Shape::kPill ? c.height / 2 : c.height * 0.24;
-      path = [UIBezierPath bezierPathWithRoundedRect:box cornerRadius:corner];
-    }
-    [Rgb(18, 16, 10, c.pressed ? 0.85 : 0.59) setFill];
-    [path fill];
-    [(c.ring ?: Rgb(255, 208, 38, c.pressed ? 1 : 0.7)) setStroke];
-    path.lineWidth = 1.5;
-    [path stroke];
-    if (c.bit & (kUp | kDown | kLeft | kRight)) {
-      [self drawArrow:c.bit in:box];
-      continue;
-    }
-    NSString* text = @(c.label);
-    const CGFloat size = c.shape == Shape::kPill ? c.height * 0.36
-                         : c.shape == Shape::kCircle ? c.radius * 0.72
-                                                     : c.height * 0.42;
-    NSDictionary* attrs = @{
-      NSFontAttributeName : [UIFont systemFontOfSize:size
-                                              weight:UIFontWeightMedium],
-      NSForegroundColorAttributeName : Rgb(255, 248, 232),
-    };
-    const CGSize t = [text sizeWithAttributes:attrs];
-    [text drawAtPoint:CGPointMake(CGRectGetMidX(box) - t.width / 2,
-                                  CGRectGetMidY(box) - t.height / 2)
-        withAttributes:attrs];
+- (void)drawControl:(const Control&)c in:(CGRect)box pressed:(bool)pressed {
+  UIBezierPath* path;
+  if (c.shape == Shape::kCircle) {
+    path = [UIBezierPath bezierPathWithOvalInRect:box];
+  } else {
+    const CGFloat corner =
+        c.shape == Shape::kPill ? c.height / 2 : c.height * 0.24;
+    path = [UIBezierPath bezierPathWithRoundedRect:box cornerRadius:corner];
   }
+  [Rgb(18, 16, 10, pressed ? 0.85 : 0.59) setFill];
+  [path fill];
+  [(c.ring ?: Rgb(95, 211, 95, pressed ? 1 : 0.7)) setStroke];
+  path.lineWidth = 1.5;
+  [path stroke];
+  if (c.bit & (kUp | kDown | kLeft | kRight)) {
+    [self drawArrow:c.bit in:box];
+    return;
+  }
+  NSString* text = @(c.label);
+  const CGFloat size = c.shape == Shape::kPill ? c.height * 0.36
+                       : c.shape == Shape::kCircle ? c.radius * 0.72
+                                                   : c.height * 0.42;
+  NSDictionary* attrs = @{
+    NSFontAttributeName : [UIFont systemFontOfSize:size
+                                            weight:UIFontWeightMedium],
+    NSForegroundColorAttributeName : Rgb(255, 248, 232),
+  };
+  const CGSize t = [text sizeWithAttributes:attrs];
+  [text drawAtPoint:CGPointMake(CGRectGetMidX(box) - t.width / 2,
+                                CGRectGetMidY(box) - t.height / 2)
+      withAttributes:attrs];
+}
+
+- (void)buildStick:(Stick&)stick scale:(CGFloat)scale {
+  const CGFloat r = stick.radius, side = r * 2 + 4;
+  const CGRect ring = CGRectMake(2, 2, r * 2, r * 2);
+  auto base = [&](bool active) {
+    return Picture(CGSizeMake(side, side), ^{
+      UIBezierPath* path = [UIBezierPath bezierPathWithOvalInRect:ring];
+      [Rgb(18, 16, 10, active ? 0.8 : 0.59) setFill];
+      [path fill];
+      [(active ? Rgb(95, 211, 95, 0.92) : Rgb(255, 248, 232, 0.47)) setStroke];
+      path.lineWidth = r * 0.035;
+      [path stroke];
+    });
+  };
+  const CGFloat knobR = r * 0.34;
+  auto knob = [&](bool active) {
+    return Picture(CGSizeMake(knobR * 2, knobR * 2), ^{
+      [Rgb(225, 215, 190, active ? 0.9 : 0.6) setFill];
+      [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, knobR * 2,
+                                                         knobR * 2)] fill];
+    });
+  };
+  stick.baseIdle = base(false);
+  stick.baseActive = base(true);
+  stick.knobIdle = knob(false);
+  stick.knobActive = knob(true);
+  stick.base = PadLayer(CGRectMake(stick.center.x - side / 2,
+                                   stick.center.y - side / 2, side, side),
+                        stick.baseIdle, scale);
+  stick.knobLayer =
+      PadLayer(CGRectMake(stick.center.x - knobR, stick.center.y - knobR,
+                          knobR * 2, knobR * 2),
+               stick.knobIdle, scale);
+  [self.layer addSublayer:stick.base];
+  [self.layer addSublayer:stick.knobLayer];
+}
+
+- (void)buildLayers {
+  self.layer.sublayers = nil;
+  const CGFloat scale = self.traitCollection.displayScale ?: 2;
+  [self buildStick:left_ scale:scale];
+  [self buildStick:right_ scale:scale];
+  for (Control& c : controls_) {
+    const CGFloat w = c.shape == Shape::kCircle ? c.radius * 2 : c.width;
+    const CGFloat h = c.shape == Shape::kCircle ? c.radius * 2 : c.height;
+    const CGRect box = CGRectMake(2, 2, w, h);
+    const CGSize size = CGSizeMake(w + 4, h + 4);
+    const Control* control = &c;
+    __weak XenraTouchPad* weak = self;
+    c.up = Picture(size, ^{
+      [weak drawControl:*control in:box pressed:false];
+    });
+    c.down = Picture(size, ^{
+      [weak drawControl:*control in:box pressed:true];
+    });
+    c.layer = PadLayer(CGRectMake(c.center.x - size.width / 2,
+                                  c.center.y - size.height / 2, size.width,
+                                  size.height),
+                       c.up, scale);
+    [self.layer addSublayer:c.layer];
+  }
+}
+
+- (void)showStick:(Stick&)stick {
+  const bool active = stick.touch != nil;
+  stick.base.contents =
+      (id)(active ? stick.baseActive : stick.baseIdle).CGImage;
+  stick.knobLayer.contents =
+      (id)(active ? stick.knobActive : stick.knobIdle).CGImage;
+  stick.knobLayer.position =
+      CGPointMake(stick.center.x + stick.knob.x * stick.radius * 0.62,
+                  stick.center.y + stick.knob.y * stick.radius * 0.62);
+}
+
+- (void)showState {
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  [self showStick:left_];
+  [self showStick:right_];
+  for (Control& c : controls_) {
+    if (c.pressed == c.shown) continue;
+    c.shown = c.pressed;
+    c.layer.contents = (id)(c.pressed ? c.down : c.up).CGImage;
+  }
+  [CATransaction commit];
 }
 
 // --- Touches ----------------------------------------------------------------
@@ -334,7 +416,7 @@ static void MoveStick(Stick& s, CGPoint p) {
               axis(right_.knob.x), axis(-right_.knob.y),
               (bits & kLT) ? 255 : 0, (bits & kRT) ? 255 : 0);
   }
-  [self setNeedsDisplay];
+  [self showState];
 }
 
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {

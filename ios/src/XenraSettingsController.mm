@@ -45,7 +45,7 @@
   tabStack_ = [[UIStackView alloc] init];
   tabStack_.spacing = 8;
   tabStack_.translatesAutoresizingMaskIntoConstraints = NO;
-  tabScroll_ = [[UIScrollView alloc] init];
+  tabScroll_ = [[XenraScrollView alloc] init];
   tabScroll_.showsHorizontalScrollIndicator = NO;
   tabScroll_.translatesAutoresizingMaskIntoConstraints = NO;
   [tabScroll_ addSubview:tabStack_];
@@ -63,7 +63,7 @@
   XenraPanelView* panel = [[XenraPanelView alloc] initWithFrame:CGRectZero];
   panel.rounded = YES;
   panel.translatesAutoresizingMaskIntoConstraints = NO;
-  UIScrollView* scroll = [[UIScrollView alloc] init];
+  UIScrollView* scroll = [[XenraScrollView alloc] init];
   scroll.translatesAutoresizingMaskIntoConstraints = NO;
   [panel addSubview:scroll];
   content_ = [[UIStackView alloc] init];

@@ -37,3 +37,6 @@ void XenraXemuShutdown(void);
 // draws to our layer, so that window only has to stay out of the way, and SDL
 // may show it again at any moment.
 void XenraXemuHideSdlWindows(UIWindow* ours);
+
+// One line for the on-screen counter, or nil before the first frame.
+NSString* XenraXemuStatsLine(void);

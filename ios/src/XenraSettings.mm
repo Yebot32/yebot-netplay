@@ -108,6 +108,7 @@ static XenraSettingRow* CoreRow() {
       Tab(@"Video",
           @[ Section(@"Display", @[
             ResolutionRow(), FrameLimitRow(), OgScaleRow(),
+            Toggle(@"hud.fps", @"Show FPS", nil, YES),
           ]) ]),
       Tab(@"Input",
           @[ Section(@"Touch controls", @[

@@ -25,6 +25,8 @@
   BOOL og_;
   NSTimer* sdlTimer_;
   int sdlTicks_;
+  UILabel* hud_;
+  int hudTicks_;
   NSTimer* jitTimer_;
   // The latest state from each source; the guest sees them merged.
   int padButtons_;
@@ -84,6 +86,19 @@
   status_.numberOfLines = 0;
   status_.textAlignment = NSTextAlignmentCenter;
   [self.view addSubview:status_];
+
+  // Android's PerfHud, for the part of it the core can report.
+  hud_ = XenraMakeLabel(nil, 12, UIFontWeightSemibold, UIColor.whiteColor);
+  hud_.shadowColor = UIColor.blackColor;
+  hud_.shadowOffset = CGSizeMake(0, 1);
+  hud_.hidden = ![[XenraSettings stringForKey:@"hud.fps" fallback:@"true"]
+      isEqual:@"true"];
+  [self.view addSubview:hud_];
+  [NSLayoutConstraint activateConstraints:@[
+    [hud_.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+    [hud_.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor
+                                   constant:8],
+  ]];
 
   [NSLayoutConstraint activateConstraints:@[
     [status_.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
@@ -177,6 +192,12 @@
 - (void)keepSdlAway {
   XenraXemuHideSdlWindows(self.view.window);
   if (status_.text.length && ++sdlTicks_ > 40) status_.text = nil;
+  if (++hudTicks_ % 5) return;
+  NSString* line = XenraXemuStatsLine();
+  if (!line) return;
+  status_.text = nil;
+  hud_.text = line;
+  if (hudTicks_ % 50 == 0) XenraLog(line);
 }
 
 - (void)runXemu {

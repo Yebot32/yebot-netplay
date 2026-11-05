@@ -9,6 +9,10 @@
 
 #import <UIKit/UIKit.h>
 
+// Scrolls from anywhere, and lets controls inside it react at once.
+@interface XenraScrollView : UIScrollView
+@end
+
 // A framed panel with cut corners, Android's ChamferedPanelView.
 @interface XenraPanelView : UIView
 @property(nonatomic, assign) BOOL rounded;
@@ -48,7 +52,7 @@
 
 // Android's dialog_blade_menu: a dimmed screen, a panel, a column of blades.
 // Tapping outside dismisses, tapping a blade dismisses and then acts.
-@interface XenraBladeSheet : UIView
+@interface XenraBladeSheet : UIView <UIGestureRecognizerDelegate>
 + (void)showIn:(UIView*)host
          title:(NSString*)title
        message:(NSString*)message
