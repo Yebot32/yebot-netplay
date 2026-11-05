@@ -47,6 +47,7 @@ jobs:
           git -C "$HOME/xemu" remote add origin https://github.com/MaftyManicEMU/DukeX
           git -C "$HOME/xemu" fetch --depth 1 origin "$PIN" || git -C "$HOME/xemu" fetch origin
           git -C "$HOME/xemu" checkout -q "$PIN"
+          python3 xemu-ios/patch.py "$HOME/xemu"
           for p in xemu-ios/patches/*.patch; do
             [ -e "$p" ] || continue
             echo "applying $p"
