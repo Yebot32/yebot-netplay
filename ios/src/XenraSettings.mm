@@ -140,6 +140,8 @@ static XenraSettingRow* CoreRow() {
           ]),
       Tab(@"Maintenance",
           @[ Section(@"Maintenance", @[
+            Toggle(@"core.trace", @"Detailed core logs",
+                   @"For diagnosing boot problems. Slows the game a little.", YES),
             Action(@"setup.rerun", @"Setup Wizard", nil),
             Action(@"privacy", @"Privacy policy", nil),
             Action(@"log.share", @"Share logs",

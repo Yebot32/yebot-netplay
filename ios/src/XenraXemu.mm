@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <dlfcn.h>
+#include <initializer_list>
 #include <sys/sysctl.h>
 #include <vector>
 
@@ -91,7 +92,7 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
                                                 error:nil];
   NSString* config =
       [NSString stringWithFormat:
-                    @"[general]\nshow_welcome = false\nskip_boot_anim = true\n"
+                    @"[general]\nshow_welcome = false\nskip_boot_anim = false\n"
                      "games_dir = %@\n\n"
                      "[display]\nrenderer = \"VULKAN\"\n\n"
                      "[display.quality]\nsurface_scale = %@\n\n"
@@ -170,6 +171,17 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   };
   for (NSString* name in environment) {
     setenv(name.UTF8String, [environment[name] UTF8String], 1);
+  }
+  // The core's own traces. The CPU heartbeat is once a second; the rest fire on
+  // events. They answer whether the guest is running and how far it has got
+  // when nothing has reached the screen.
+  if ([[XenraSettings stringForKey:@"core.trace" fallback:@"true"]
+          isEqual:@"true"]) {
+    for (const char* name :
+         {"XEMU_IOS_TCG_TRACE", "XEMU_IOS_IDE_TRACE", "XEMU_IOS_RENDER_TRACE",
+          "XEMU_IOS_FRAMEBUFFER_TRACE", "XEMU_IOS_VK_SWAPCHAIN_TRACE"}) {
+      setenv(name, "1", 1);
+    }
   }
   if (set_layer) set_layer((__bridge void*)layer);
 
