@@ -29,6 +29,9 @@
   int sdlTicks_;
   UILabel* hud_;
   int hudTicks_;
+  BOOL padWanted_;
+  UIButton* cancel_;
+  NSTimer* menuTimer_;
   NSTimer* jitTimer_;
   // The latest state from each source; the guest sees them merged.
   int padButtons_;
@@ -74,6 +77,8 @@
   pad_.hidden = ![[XenraSettings stringForKey:@"pad.visible" fallback:@"true"]
       isEqual:@"true"];
   __weak XenraGameController* weak = self;
+  padWanted_ = !pad_.hidden;
+  pad_.hidden = YES;
   pad_.onChange = ^(int buttons, short lx, short ly, short rx, short ry,
                     unsigned char lt, unsigned char rt) {
     [weak padButtons:buttons lx:lx ly:ly rx:rx ry:ry lt:lt rt:rt];
@@ -88,6 +93,42 @@
   status_.numberOfLines = 0;
   status_.textAlignment = NSTextAlignmentCenter;
   [self.view addSubview:status_];
+
+  cancel_ = [UIButton buttonWithType:UIButtonTypeSystem];
+  [cancel_ setTitle:@"Cancel" forState:UIControlStateNormal];
+  cancel_.tintColor = UIColor.whiteColor;
+  cancel_.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+  cancel_.layer.cornerRadius = 22;
+  cancel_.layer.borderWidth = 1;
+  cancel_.layer.borderColor = UIColor.whiteColor.CGColor;
+  cancel_.translatesAutoresizingMaskIntoConstraints = NO;
+  cancel_.hidden = YES;
+  [cancel_ addTarget:self
+                action:@selector(cancelWaiting)
+      forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:cancel_];
+  [NSLayoutConstraint activateConstraints:@[
+    [cancel_.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+    [cancel_.topAnchor constraintEqualToAnchor:status_.bottomAnchor constant:20],
+    [cancel_.widthAnchor constraintEqualToConstant:140],
+    [cancel_.heightAnchor constraintEqualToConstant:44],
+  ]];
+
+  UISwipeGestureRecognizer* swipe = [[UISwipeGestureRecognizer alloc]
+      initWithTarget:self
+              action:@selector(swiped:)];
+  swipe.direction = UISwipeGestureRecognizerDirectionUp;
+  [self.view addGestureRecognizer:swipe];
+  for (GCController* controller in GCController.controllers) {
+    [self watchController:controller];
+  }
+  [NSNotificationCenter.defaultCenter
+      addObserverForName:GCControllerDidConnectNotification
+                  object:nil
+                   queue:NSOperationQueue.mainQueue
+              usingBlock:^(NSNotification* note) {
+                [weak watchController:note.object];
+              }];
 
   // Android's PerfHud, for the part of it the core can report.
   hud_ = XenraMakeLabel(nil, 12, UIFontWeightSemibold, UIColor.whiteColor);
@@ -128,6 +169,7 @@
   // The tool attaches seconds after the handoff, from another app, so the
   // only way to learn it did is to keep asking.
   status_.text = XenraJitStatusText();
+  cancel_.hidden = NO;
   XenraOpenJitEnabler();
   __weak XenraGameController* weak = self;
   jitTimer_ = [NSTimer scheduledTimerWithTimeInterval:1
@@ -148,10 +190,13 @@
   // The script is still starting when CS_DEBUGGED appears, and a brk sent
   // before it is listening goes unanswered. DukeX waits the same 6 seconds.
   status_.text = @"Waiting for StikDebug to settle…";
+  cancel_.hidden = NO;
   [self performSelector:@selector(boot) withObject:nil afterDelay:6];
 }
 
 - (void)boot {
+  cancel_.hidden = YES;
+  pad_.hidden = !padWanted_;
   if (og_) {
     [self bootXemu];
     return;
@@ -249,6 +294,9 @@
 
 - (void)tick {
   xe_ios_pump();
+  if (++hudTicks_ % 60 == 0 && xe_ios_fps() > 0) {
+    hud_.text = [NSString stringWithFormat:@"%.0f FPS", xe_ios_fps()];
+  }
   [self pollController];
   const int state = xe_ios_status();
   if (state == 1) {
@@ -320,6 +368,9 @@
 // --- In-game menu -----------------------------------------------------------
 
 - (void)showMenu {
+  if (menuTimer_) return;
+  [self setGamePaused:YES];
+  [self watchMenu];
   __weak XenraGameController* weak = self;
   XenraTouchPad* pad = pad_;
   XenraBladeItem* resume = [XenraBladeItem title:@"Resume" action:nil];
@@ -371,4 +422,76 @@
   exit(0);
 }
 
+
+// --- Ways out -----------------------------------------------------------------
+
+// The pad holds the menu button, so with the pad hidden there has to be another
+// way: Android's swipe up, and Start with Back on a controller.
+- (void)swiped:(UISwipeGestureRecognizer*)swipe {
+  if (pad_.hidden && booted_) [self showMenu];
+}
+
+- (void)watchController:(GCController*)controller {
+  __weak XenraGameController* weak = self;
+  controller.extendedGamepad.valueChangedHandler =
+      ^(GCExtendedGamepad* pad, GCControllerElement*) {
+        if (pad.buttonMenu.pressed && pad.buttonOptions.pressed) {
+          [weak showMenu];
+        }
+      };
+}
+
+- (void)cancelWaiting {
+  [jitTimer_ invalidate];
+  jitTimer_ = nil;
+  [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                           selector:@selector(boot)
+                                             object:nil];
+  [self.navigationController popViewControllerAnimated:YES];
+}
+
+// --- Pausing ------------------------------------------------------------------
+
+- (void)setGamePaused:(BOOL)paused {
+  if (og_) {
+    XenraXemuSetPaused(paused);
+  } else {
+    xe_ios_set_paused(paused ? 1 : 0);
+  }
+}
+
+// Any way of closing the menu resumes the game, so watch the sheet rather than
+// every button in it.
+- (void)watchMenu {
+  [menuTimer_ invalidate];
+  __weak XenraGameController* weak = self;
+  menuTimer_ = [NSTimer timerWithTimeInterval:0.1
+                                      repeats:YES
+                                        block:^(NSTimer*) {
+                                          [weak menuTick];
+                                        }];
+  [NSRunLoop.mainRunLoop addTimer:menuTimer_ forMode:NSRunLoopCommonModes];
+}
+
+- (void)menuTick {
+  for (UIView* view in self.view.subviews) {
+    if ([view isKindOfClass:[XenraBladeSheet class]]) return;
+  }
+  if (self.presentedViewController) return;
+  [menuTimer_ invalidate];
+  menuTimer_ = nil;
+  [self setGamePaused:NO];
+}
+
+#ifdef XENRA_UITEST
+- (void)showPadForTour {
+  pad_.hidden = NO;
+}
+#endif
+
 @end
+
+#ifdef XENRA_UITEST
+void xe_ios_set_paused(int) {}
+float xe_ios_fps(void) { return 0; }
+#endif

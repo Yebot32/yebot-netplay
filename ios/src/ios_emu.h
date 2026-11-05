@@ -63,6 +63,12 @@ void xe_ios_set_cvar(const char* name, const char* value);
 // Shuts the emulator down and releases the window. Call on the main thread.
 void xe_ios_shutdown(void);
 
+// 1 stops the guest, 0 carries on. For the game menu.
+void xe_ios_set_paused(int paused);
+
+// Frames per second reaching the screen, or 0 before the first.
+float xe_ios_fps(void);
+
 // Puts everything logged so far on disk. Safe before init and after shutdown.
 void xe_ios_flush_log(void);
 

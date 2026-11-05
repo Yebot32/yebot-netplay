@@ -4,7 +4,9 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
+#import "XenraJitProbe.h"
 #import "XenraLogs.h"
+#import "XenraSampler.h"
 #import "XenraScreens.h"
 #import "XenraSettings.h"
 #include "ios_emu.h"
@@ -81,6 +83,9 @@ void XenraTourStart(UIWindow* window);
   [XenraSettings holdPickedFiles];
   self.window.rootViewController = XenraMakeRoot(XenraDashboardEntryPlain);
 #ifdef XENRA_UITEST
+  XenraJitChooseScheme();
+  XenraLog(XenraJitReport());
+  XenraSamplerDump(@"tour");
   XenraTourStart(self.window);
 #endif
   [self.window makeKeyAndVisible];

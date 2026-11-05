@@ -29,6 +29,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/frame_stats.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
@@ -640,3 +641,14 @@ void xe_ios_shutdown(void) {
   g_context.reset();
   g_input_driver = nullptr;
 }
+
+void xe_ios_set_paused(int paused) {
+  if (!g_app || !g_app->emu_) return;
+  if (paused) {
+    g_app->emu_->Pause();
+  } else {
+    g_app->emu_->Resume();
+  }
+}
+
+float xe_ios_fps(void) { return xe::GetHostPresentFps(); }
