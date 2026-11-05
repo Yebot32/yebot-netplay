@@ -7,6 +7,7 @@
 
 #import "XenraLogs.h"
 #import "XenraMetalView.h"
+#import "XenraSampler.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraTouchPad.h"
@@ -192,6 +193,13 @@
                                                 block:^(NSTimer*) {
                                                   [weak keepSdlAway];
                                                 }];
+  // A hang leaves no crash report, so take the evidence while it is happening.
+  for (int64_t seconds : {20, 45}) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, seconds * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                     if (!XenraXemuStatsLine()) XenraSamplerDump(@"no frame yet");
+                   });
+  }
   // A timer, not a dispatch: see XenraXemuRun.
   [self performSelector:@selector(runXemu) withObject:nil afterDelay:0.1];
 }

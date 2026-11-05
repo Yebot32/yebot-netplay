@@ -41,3 +41,13 @@ replace(
         }
 """,
 )
+
+# Devices without TXM have no Universal.js: StikDebug only runs scripts with TXM.
+# They still need the layout of that block, executable first with a writable
+# alias, which is what Dolphin ships for them on iOS 26. Its brk helpers do
+# nothing while XEMU_IOS_UNIVERSAL_JIT is 0.
+replace(
+    "tcg/region.c",
+    "    if (xemu_ios_universal_jit_is_enabled()) {\n        void *buf_rw;\n",
+    "    if (xemu_ios_universal_jit_is_enabled() || getenv(\"XEMU_IOS_RX_FIRST\")) {\n        void *buf_rw;\n",
+)

@@ -13,7 +13,7 @@ FLAGS="-target $TARGET -isysroot $SDK -std=c++20 -DXENRA_UITEST -Iios/src -Iios/
 cc() {  # source, extra flags
   clang++ -x objective-c++ $FLAGS $2 -c "$1" -o "build-ui/obj/$(basename "$1").o" || exit 1
 }
-for f in Ambient AppDelegate BladeView DashboardController GameController \
+for f in Ambient AppDelegate BladeView DashboardController GameController JitProbe Sampler \
          LibraryController Logs Motion Settings SettingsController \
          SetupController TouchPad UI Xemu; do
   cc "ios/src/Xenra$f.mm" -fobjc-arc &

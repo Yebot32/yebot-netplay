@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <vector>
 
+#import "XenraJitProbe.h"
 #import "XenraScreens.h"
 #import "XenraSettings.h"
 
@@ -56,11 +57,8 @@ NSString* XenraXemuPrepare(void) {
   return nil;
 }
 
-// iOS 26 and later on any chip: the code region has to be prepared by the
-// attached tool. A plain second mapping runs into a fault on the very first
-// block, and the debugger holds the thread there, so the guest silently never
-// starts. Measured on an M1 with iOS 27; DukeX does the same. The prepare request
-// is a brk, which kills the process if nothing is attached to answer it.
+// StikDebug runs Universal.js only on TXM devices, and that script stays attached
+// to answer the brk. Without TXM nothing is attached, and a brk would be a SIGTRAP.
 static BOOL DebuggerAttached(void) {
   struct kinfo_proc info = {};
   size_t size = sizeof(info);
@@ -70,8 +68,6 @@ static BOOL DebuggerAttached(void) {
 }
 
 static BOOL NeedsUniversalJit(void) {
-  // Asking with nothing attached would be a SIGTRAP. Without a debugger a fault
-  // in the plain path is at least a crash report.
   return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
          DebuggerAttached();
 }
@@ -130,6 +126,8 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   if (!main) return -1;
 
   const BOOL universal = NeedsUniversalJit();
+  const XenraJitScheme scheme =
+      universal ? XenraJitRxFirst : XenraJitChooseScheme();
   NSString* docs = NSSearchPathForDirectoriesInDomains(
                        NSDocumentDirectory, NSUserDomainMask, YES)
                        .firstObject;
@@ -142,7 +140,10 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   NSDictionary* environment = @{
     @"XEMU_IOS_JIT_MODE" : universal ? @"universal-js" : @"wx-reprotection",
     @"XEMU_IOS_UNIVERSAL_JIT" : universal ? @"1" : @"0",
-    @"XEMU_IOS_VK_PIPELINE_CACHE_PATH" : shaders,
+    @"XEMU_IOS_VK_PIPELINE_CACHE_PATH" : [shaders
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%lx-vulkan-pipeline.bin",
+                                       (unsigned long)name.hash]],
     @"XEMU_IOS_VK_SWAPCHAIN" : @"1",
     @"XEMU_IOS_NATIVE_METAL_PRESENTER" : @"1",
     @"XEMU_IOS_PRESENTER_PORTRAIT_SCALE" : @"1.0",
@@ -167,9 +168,11 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
     @"XEMU_IOS_STRICT_SURFACE_TEXTURE_FORMATS" : @"0",
     @"XEMU_IOS_FALLBACK_GENERATION_FILTER" : @"1",
     @"XEMU_IOS_SKIP_GL_FINISH" : @"1",
-    @"XEMU_IOS_TCG_WATCHDOG" : @"off",
+    @"XEMU_IOS_TCG_WATCHDOG" : @"log",
+    @"XEMU_IOS_SYNC_RAW" : @"0",
+    @"XEMU_IOS_SYNC_DMA" : @"0",
     @"XEMU_IOS_COROUTINE_PRIME_COUNT" : @"640",
-    @"XEMU_IOS_DISPLAY_PERF_STATS" : @"1",
+    @"XEMU_IOS_DISPLAY_PERF_STATS" : @"0",
   };
   for (NSString* name in environment) {
     setenv(name.UTF8String, [environment[name] UTF8String], 1);
@@ -185,16 +188,17 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
       setenv(name, "1", 1);
     }
   }
+  if (!universal && scheme == XenraJitRxFirst) setenv("XEMU_IOS_RX_FIRST", "1", 1);
   if (set_layer) set_layer((__bridge void*)layer);
 
   NSString* accel = [NSString
       stringWithFormat:@"tcg,thread=single,tb-size=%@%@",
                        [XenraSettings stringForKey:@"og.tb" fallback:@"64"],
-                       universal ? @"" : @",split-wx=on"];
+                       scheme == XenraJitRwFirst ? @",split-wx=on" : @""];
   NSArray<NSString*>* arguments =
       @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game, name) ];
-  XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d traced=%d", accel,
-                                      universal, DebuggerAttached()]);
+  XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d traced=%d scheme=%d", accel,
+                                      universal, DebuggerAttached(), int(scheme)]);
   std::vector<char*> argv;
   for (NSString* argument in arguments) {
     argv.push_back(strdup(argument.UTF8String));
