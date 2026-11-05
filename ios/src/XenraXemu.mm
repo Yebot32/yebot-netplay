@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <initializer_list>
 #include <sys/sysctl.h>
+#include <unistd.h>
 #include <vector>
 
 #import "XenraScreens.h"
@@ -19,6 +20,7 @@ static NSString* CorePath(void) {
   return [NSBundle.mainBundle.privateFrameworksPath
       stringByAppendingPathComponent:@"libxemu-ios-core.dylib"];
 }
+
 
 BOOL XenraXemuAvailable(void) {
   return [NSFileManager.defaultManager fileExistsAtPath:CorePath()];
@@ -37,6 +39,7 @@ NSString* XenraXemuMissingFiles(void) {
   return missing.count ? [missing componentsJoinedByString:@", "] : nil;
 }
 
+
 NSString* XenraXemuPrepare(void) {
   if (g_core) return nil;
   g_core = dlopen(CorePath().fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
@@ -53,25 +56,24 @@ NSString* XenraXemuPrepare(void) {
   return nil;
 }
 
-// M1 and older have no TXM: generated code runs from a plain second mapping, and
-// the debugger's brk handshake does not exist there at all. hw.cpufamily is the
-// same list XeniOS keeps; anything newer on iOS 26+ needs Universal.js.
+// iOS 26 and later on any chip: the code region has to be prepared by the
+// attached tool. A plain second mapping runs into a fault on the very first
+// block, and the debugger holds the thread there, so the guest silently never
+// starts. Measured on an M1 with iOS 27; DukeX does the same. The prepare request
+// is a brk, which kills the process if nothing is attached to answer it.
+static BOOL DebuggerAttached(void) {
+  struct kinfo_proc info = {};
+  size_t size = sizeof(info);
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+  if (sysctl(mib, 4, &info, &size, nullptr, 0) != 0) return YES;
+  return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
 static BOOL NeedsUniversalJit(void) {
-  if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26) {
-    return NO;
-  }
-  uint32_t family = 0;
-  size_t size = sizeof(family);
-  if (sysctlbyname("hw.cpufamily", &family, &size, nullptr, 0) != 0) return YES;
-  switch (family) {
-    case 0x67ceee93u:  // A10
-    case 0xe81e7ef6u:  // A11
-    case 0x07d34b9fu:  // A12
-    case 0x462504d2u:  // A13
-    case 0x1b588bb3u:  // A14, M1
-      return NO;
-  }
-  return YES;
+  // Asking with nothing attached would be a SIGTRAP. Without a debugger a fault
+  // in the plain path is at least a crash report.
+  return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+         DebuggerAttached();
 }
 
 static NSString* Quoted(NSString* value) {
@@ -191,7 +193,8 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
                        universal ? @"" : @",split-wx=on"];
   NSArray<NSString*>* arguments =
       @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game, name) ];
-  XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d", accel, universal]);
+  XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d traced=%d", accel,
+                                      universal, DebuggerAttached()]);
   std::vector<char*> argv;
   for (NSString* argument in arguments) {
     argv.push_back(strdup(argument.UTF8String));

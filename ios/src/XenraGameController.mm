@@ -139,7 +139,14 @@
   if (!XenraJitActive()) return;
   [jitTimer_ invalidate];
   jitTimer_ = nil;
-  [self boot];
+  if (!og_) {
+    [self boot];
+    return;
+  }
+  // The script is still starting when CS_DEBUGGED appears, and a brk sent
+  // before it is listening goes unanswered. DukeX waits the same 6 seconds.
+  status_.text = @"Waiting for StikDebug to settle…";
+  [self performSelector:@selector(boot) withObject:nil afterDelay:6];
 }
 
 - (void)boot {
