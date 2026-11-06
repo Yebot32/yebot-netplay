@@ -16,6 +16,17 @@
 #import "XenraXemu.h"
 #include "ios_emu.h"
 
+// Radial, and rescaled, so a stick still reaches full travel and starts from nothing
+// just past the edge of the zone.
+static void ApplyDeadzone(float zone, short* x, short* y) {
+  const float fx = *x / 32767.0f, fy = *y / 32767.0f;
+  const float length = hypotf(fx, fy);
+  const float scale =
+      length <= zone ? 0 : fminf(1, (length - zone) / (1 - zone)) / length;
+  *x = short(fx * scale * 32767);
+  *y = short(fy * scale * 32767);
+}
+
 @implementation XenraGameController {
   NSString* path_;
   NSString* name_;
@@ -37,6 +48,7 @@
   int padButtons_;
   short padAxes_[4];
   unsigned char padTriggers_[2];
+  float deadzone_;
 }
 
 - (instancetype)initWithPath:(NSString*)path name:(NSString*)name {
@@ -71,6 +83,9 @@
   pad_.x360Layout = !og_;
   pad_.scaleFactor = [[XenraSettings stringForKey:@"pad.scale"
                                          fallback:@"1.0"] doubleValue];
+  pad_.alpha = [[XenraSettings stringForKey:@"pad.opacity" fallback:@"0.85"] doubleValue];
+  deadzone_ =
+      [[XenraSettings stringForKey:@"pad.deadzone" fallback:@"0.12"] floatValue];
   pad_.hapticsEnabled =
       [[XenraSettings stringForKey:@"pad.haptics" fallback:@"true"]
           isEqual:@"true"];
@@ -317,6 +332,8 @@
 - (void)padButtons:(int)buttons
                 lx:(short)lx ly:(short)ly rx:(short)rx ry:(short)ry
                 lt:(unsigned char)lt rt:(unsigned char)rt {
+  ApplyDeadzone(deadzone_, &lx, &ly);
+  ApplyDeadzone(deadzone_, &rx, &ry);
   padButtons_ = buttons;
   padAxes_[0] = lx;
   padAxes_[1] = ly;
@@ -359,8 +376,11 @@
   if (g.buttonOptions.pressed) b |= 0x0020;
   if (g.leftThumbstickButton.pressed) b |= 0x0040;
   if (g.rightThumbstickButton.pressed) b |= 0x0080;
-  xe_ios_input_set(b, axis(g.leftThumbstick.xAxis), axis(g.leftThumbstick.yAxis),
-                   axis(g.rightThumbstick.xAxis), axis(g.rightThumbstick.yAxis),
+  short lx = axis(g.leftThumbstick.xAxis), ly = axis(g.leftThumbstick.yAxis);
+  short rx = axis(g.rightThumbstick.xAxis), ry = axis(g.rightThumbstick.yAxis);
+  ApplyDeadzone(deadzone_, &lx, &ly);
+  ApplyDeadzone(deadzone_, &rx, &ry);
+  xe_ios_input_set(b, lx, ly, rx, ry,
                    (unsigned char)(g.leftTrigger.value * 255),
                    (unsigned char)(g.rightTrigger.value * 255));
 }

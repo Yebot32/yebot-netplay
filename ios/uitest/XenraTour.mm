@@ -44,6 +44,10 @@ void xe_ios_set_cvar(const char*, const char*) {}
 void xe_ios_shutdown(void) {}
 void xe_ios_flush_log(void) {}
 
+@interface XenraSettingsController (Tour)
+- (void)tourScrollPaneToEnd;
+@end
+
 typedef void (^TourStep)(void);
 
 static UIWindow* g_window;
@@ -444,14 +448,54 @@ static void SettingsTour(NSString* console) {
   for (XenraSettingTab* tab in [XenraSettings tabs]) {
     Tap(tab.title);
     Both([NSString stringWithFormat:@"%@-settings-%@", console, tab.title]);
+    Step(^{
+      [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
+    });
+    Shot([NSString stringWithFormat:@"land-%@-settings-%@-end", console, tab.title]);
   }
-  Step(^{
-    XenraFieldButton* field =
-        (XenraFieldButton*)FindClass(TopView(), [XenraFieldButton class]);
-    [field sendActionsForControlEvents:UIControlEventTouchUpInside];
-  });
+  // A list setting: the sheet, then a pick, which must leave the pane where it was.
+  const BOOL x360 = [console isEqual:@"360"];
+  Tap(@"System");
+  Pause();
+  Tap(x360 ? @"User language" : @"AV pack");
   Both([NSString stringWithFormat:@"%@-settings-choice", console]);
+  Tap(x360 ? @"German" : @"VGA");
+  Pause();
+  Shot([NSString stringWithFormat:@"land-%@-settings-picked", console]);
+  Tap(x360 ? @"User language" : @"AV pack");
+  Pause();
+  Tap(x360 ? @"English" : @"HDTV");
+  Pause();
+
+  Tap(@"Maintenance");
+  Step(^{
+    [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
+  });
+  Tap(@"About Xenra");
+  Both([NSString stringWithFormat:@"%@-settings-about", console]);
   Tap(@"Back");  // the sheet's
+  Pause();
+  Tap(@"Clear shader cache");
+  Shot([NSString stringWithFormat:@"land-%@-settings-clear", console]);
+  Tap(@"Cancel");
+  Pause();
+
+  // Per-game settings: Use Global fields, and the anchored dropdown.
+  Step(^{
+    XenraSettingsController* perGame = [[XenraSettingsController alloc] init];
+    perGame.game = @"Crash Bandicoot - The Wrath of Cortex";
+    [Nav() pushViewController:perGame animated:YES];
+  });
+  Pause();
+  Both([NSString stringWithFormat:@"%@-pergame", console]);
+  Tap(x360 ? @"Internal resolution" : @"Internal Resolution Scale");
+  Shot([NSString stringWithFormat:@"land-%@-pergame-dropdown", console]);
+  Tap(x360 ? @"2x" : @"2x (960p)");
+  Pause();
+  Shot([NSString stringWithFormat:@"land-%@-pergame-picked", console]);
+  Tap(@"Clear Overrides");
+  Pause();
+  Pop();
   Pause();
 
   // The edge swipe's transition, stopped half way, abandoned, then done.

@@ -1,5 +1,8 @@
 #import "XenraSettings.h"
 
+#import <UIKit/UIKit.h>
+
+#import "XenraScreens.h"
 #import "XenraTheme.h"
 
 #include "ios_emu.h"
@@ -11,13 +14,21 @@
 @implementation XenraSettingTab
 @end
 
-static XenraSettingRow* Toggle(NSString* key, NSString* title, NSString* detail,
-                               BOOL on) {
+// --- Building rows ----------------------------------------------------------
+
+static XenraSettingRow* NewRow(XenraRowKind kind, NSString* key, NSString* title,
+                               NSString* detail) {
   XenraSettingRow* row = [[XenraSettingRow alloc] init];
+  row.kind = kind;
   row.key = key;
   row.title = title;
   row.detail = detail;
-  row.kind = XenraRowToggle;
+  return row;
+}
+
+static XenraSettingRow* Toggle(NSString* key, NSString* title, NSString* detail,
+                               BOOL on) {
+  XenraSettingRow* row = NewRow(XenraRowToggle, key, title, detail);
   row.defaultValue = on ? @"true" : @"false";
   return row;
 }
@@ -25,24 +36,71 @@ static XenraSettingRow* Toggle(NSString* key, NSString* title, NSString* detail,
 static XenraSettingRow* Choice(NSString* key, NSString* title, NSString* detail,
                                NSArray* titles, NSArray* values,
                                NSString* fallback) {
-  XenraSettingRow* row = [[XenraSettingRow alloc] init];
-  row.key = key;
-  row.title = title;
-  row.detail = detail;
-  row.kind = XenraRowChoice;
+  XenraSettingRow* row = NewRow(XenraRowChoice, key, title, detail);
   row.choiceTitles = titles;
   row.choiceValues = values;
   row.defaultValue = fallback;
   return row;
 }
 
-static XenraSettingRow* Action(NSString* key, NSString* title,
-                               NSString* detail) {
-  XenraSettingRow* row = [[XenraSettingRow alloc] init];
-  row.key = key;
-  row.title = title;
-  row.detail = detail;
-  row.kind = XenraRowAction;
+static XenraSettingRow* Segment(NSString* key, NSString* title, NSString* detail,
+                                NSArray* titles, NSArray* values,
+                                NSString* fallback) {
+  XenraSettingRow* row = Choice(key, title, detail, titles, values, fallback);
+  row.kind = XenraRowSegment;
+  return row;
+}
+
+static XenraSettingRow* Slider(NSString* key, NSString* title, NSString* detail,
+                               float minimum, float maximum, float step,
+                               NSString* fallback,
+                               NSString* (^format)(float value)) {
+  XenraSettingRow* row = NewRow(XenraRowSlider, key, title, detail);
+  row.minimum = minimum;
+  row.maximum = maximum;
+  row.step = step;
+  row.defaultValue = fallback;
+  row.format = format;
+  return row;
+}
+
+static XenraSettingRow* Text(NSString* key, NSString* title, NSString* detail,
+                             NSString* fallback) {
+  XenraSettingRow* row = NewRow(XenraRowText, key, title, detail);
+  row.defaultValue = fallback;
+  return row;
+}
+
+static XenraSettingRow* Action(NSString* key, NSString* title, NSString* detail) {
+  return NewRow(XenraRowAction, key, title, detail);
+}
+
+// Where a row's value goes. Each returns the row, so they wrap a builder.
+static XenraSettingRow* Cvar(NSString* name, XenraSettingRow* row) {
+  row.cvars = @[ name ];
+  return row;
+}
+
+static XenraSettingRow* CvarString(NSString* name, XenraSettingRow* row) {
+  row.cvarIsString = YES;
+  return Cvar(name, row);
+}
+
+static XenraSettingRow* Config(NSString* table, NSString* key,
+                               XenraSettingRow* row) {
+  row.configTable = table;
+  row.configKey = key;
+  return row;
+}
+
+static XenraSettingRow* ConfigString(NSString* table, NSString* key,
+                                     XenraSettingRow* row) {
+  row.configIsString = YES;
+  return Config(table, key, row);
+}
+
+static XenraSettingRow* PerGame(NSString* group, XenraSettingRow* row) {
+  row.perGameGroup = group;
   return row;
 }
 
@@ -60,107 +118,547 @@ static XenraSettingTab* Tab(NSString* title, NSArray* sections) {
   return tab;
 }
 
-static XenraSettingRow* ResolutionRow() {
-  XenraSettingRow* row = Choice(
+static NSString* (^const kPercent)(float) = ^NSString*(float value) {
+  return [NSString stringWithFormat:@"%d%%", (int)lroundf(value)];
+};
+
+// A 0-1 value shown as a percentage.
+static NSString* (^const kFraction)(float) = ^NSString*(float value) {
+  return [NSString stringWithFormat:@"%d%%", (int)lroundf(value * 100)];
+};
+
+static NSString* (^const kMegabytes)(float) = ^NSString*(float value) {
+  return [NSString stringWithFormat:@"%d MB", (int)lroundf(value)];
+};
+
+static NSString* (^const kTimes)(float) = ^NSString*(float value) {
+  return [NSString stringWithFormat:@"%.2fx", value];
+};
+
+// --- What both consoles share -----------------------------------------------
+// These are about the app rather than an emulator, so they sit at the top of their
+// pane whichever console is in use.
+
+static XenraSettingSection* MenuMusicSection(void) {
+  return Section(@"Menu Music", @[
+    Toggle(@"music.enabled", @"Play ambient music in menus",
+           @"A soft ambient piece generated by the app itself, played on the "
+            "dashboard and menu screens. It stops when a game starts.",
+           YES),
+    Slider(@"music.volume", @"Music volume", nil, 0, 100, 1, @"55", kPercent),
+  ]);
+}
+
+static XenraSettingSection* ConsoleSection(void) {
+  return Section(@"Console", @[
+    Segment(@"ui.console", @"Console",
+            @"Switches the whole app between the original Xbox and the Xbox 360, "
+             "including which emulator your games boot into.",
+            @[ @"Xbox Original", @"Xbox 360" ], @[ @"1", @"0" ], @"0"),
+  ]);
+}
+
+static XenraSettingSection* OrientationSection(void) {
+  return Section(@"Orientation", @[
+    Segment(@"ui.orientation", @"App Orientation", nil,
+            @[ @"Auto", @"Portrait", @"Landscape" ],
+            @[ @"auto", @"portrait", @"landscape" ], @"auto"),
+  ]);
+}
+
+static XenraSettingSection* JitSection(void) {
+  return Section(@"JIT", @[
+    Action(@"jit.enable", @"Enable JIT",
+           @"Opens StikDebug. Needed once per launch."),
+  ]);
+}
+
+static XenraSettingSection* TouchSection(void) {
+  NSMutableArray* rows = [NSMutableArray arrayWithObject:
+      Toggle(@"pad.visible", @"Show touch controls", nil, YES)];
+  // An iPad has no Taptic Engine, so on one this row would do nothing.
+  if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone) {
+    [rows addObject:Toggle(@"pad.haptics", @"Vibration", nil, YES)];
+  }
+  [rows addObjectsFromArray:@[
+    Slider(@"pad.opacity", @"Controller Opacity", nil, 0.25f, 1, 0.05f, @"0.85",
+           kFraction),
+    Slider(@"pad.scale", @"Controller Scale", nil, 0.5f, 2, 0.05f, @"1.00", kTimes),
+    Slider(@"pad.deadzone", @"Stick Deadzone",
+           @"Stick movement below this is ignored.", 0.02f, 0.35f, 0.01f, @"0.12",
+           kFraction),
+  ]];
+  return Section(@"On-screen controller", rows);
+}
+
+static XenraSettingSection* AppSection(void) {
+  return Section(@"App", @[
+    Action(@"cache.clear", @"Clear shader cache",
+           @"Games compile their shaders again on next launch."),
+    Action(@"setup.rerun", @"Setup Wizard", nil),
+    Action(@"privacy", @"Privacy policy", nil),
+    Action(@"about", @"About Xenra", nil),
+  ]);
+}
+
+static XenraSettingRow* ShowFpsRow(void) {
+  return Toggle(@"hud.fps", @"Show FPS counter", nil, YES);
+}
+
+static XenraSettingRow* ShareLogsRow(void) {
+  return Action(@"log.share", @"Share logs",
+                @"Core log, crash reports and device details, as one file.");
+}
+
+// --- Xbox 360 ---------------------------------------------------------------
+// Every cvar here was found read in code that links on iOS. Left out on purpose:
+// ask_players_on_start is defined and read nowhere, metal_allow_tearing is compiled
+// out on iOS, render_target_path and native_2x_msaa are read only by D3D12 and
+// Vulkan, vibration needs a driver that rumbles, and this tree has no mute.
+
+static NSArray* LanguageTitles(void) {
+  return @[
+    @"English", @"Japanese", @"German", @"French", @"Spanish", @"Italian",
+    @"Korean", @"Chinese (Traditional)", @"Portuguese", @"Polish", @"Russian",
+    @"Swedish", @"Turkish", @"Norwegian", @"Dutch", @"Chinese (Simplified)"
+  ];
+}
+
+static NSArray* LanguageValues(void) {
+  return @[
+    @"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8", @"9", @"11", @"12", @"13",
+    @"14", @"15", @"16", @"17"
+  ];
+}
+
+// In user_country's order. 17 and 94 are not countries.
+static NSArray* CountryCodes(void) {
+  return [@"AE AL AM AR AT AU AZ BE BG BH BN BO BR BY BZ CA CH CL CN CO CR CZ DE "
+           "DK DO DZ EC EE EG ES FI FO FR GB GE GR GT HK HN HR HU ID IE IL IN IQ "
+           "IR IS IT JM JO JP KE KG KR KW KZ LB LI LT LU LV LY MA MC MK MN MO MV "
+           "MX MY NI NL NO NZ OM PA PE PH PK PL PR PT PY QA RO RU SA SE SG SI SK "
+           "SV SY TH TN TR TT TW UA US UY UZ VE VN YE ZA"
+      componentsSeparatedByString:@" "];
+}
+
+static NSArray* CountryValues(void) {
+  NSMutableArray* values = [NSMutableArray array];
+  int value = 1;
+  for (NSUInteger i = 0; i < CountryCodes().count; i++, value++) {
+    if (value == 17 || value == 94) value++;
+    [values addObject:[NSString stringWithFormat:@"%d", value]];
+  }
+  return values;
+}
+
+static NSArray* DisplayModeTitles(void) {
+  return @[
+    @"640x480", @"640x576", @"720x480", @"720x576", @"800x600", @"848x480",
+    @"1024x768", @"1152x864", @"1280x720", @"1280x768", @"1280x960", @"1280x1024",
+    @"1360x768", @"1440x900", @"1680x1050", @"1920x540", @"1920x1080"
+  ];
+}
+
+static NSArray* DisplayModeValues(void) {
+  NSMutableArray* values = [NSMutableArray array];
+  for (NSUInteger i = 0; i < DisplayModeTitles().count; i++) {
+    [values addObject:[NSString stringWithFormat:@"%lu", (unsigned long)i]];
+  }
+  return values;
+}
+
+static XenraSettingRow* ResolutionRow(void) {
+  XenraSettingRow* row = Segment(
       @"x360.resolution", @"Internal resolution",
       @"Rendering above 1x costs GPU time on every frame.",
       @[ @"1x", @"2x", @"3x" ], @[ @"1", @"2", @"3" ], @"1");
   row.cvars = @[ @"draw_resolution_scale_x", @"draw_resolution_scale_y" ];
-  row.perGame = YES;
+  return PerGame(@"Display", row);
+}
+
+static XenraSettingRow* MetalFxScaleRow(void) {
+  XenraSettingRow* row = Segment(
+      @"x360.metalfx_scale", @"MetalFX output size",
+      @"Fit Window scales to the screen.",
+      @[ @"Fit Window", @"1x", @"2x" ], @[ @"0", @"1", @"2" ], @"0");
+  row.cvars = @[
+    @"metal_presenter_metalfx_scale_x", @"metal_presenter_metalfx_scale_y"
+  ];
   return row;
 }
 
-static XenraSettingRow* FrameLimitRow() {
-  XenraSettingRow* row = Choice(
-      @"x360.framerate_limit", @"Frame rate limit",
-      @"The only setting measured to lower heat on the 360 core.",
-      @[ @"30 FPS", @"60 FPS", @"Unlimited" ], @[ @"30", @"60", @"0" ], @"60");
-  row.cvars = @[ @"framerate_limit" ];
-  row.perGame = YES;
-  return row;
+static NSArray* Tabs360(void) {
+  return @[
+    Tab(@"Video", @[
+      Section(@"Display", @[
+        ResolutionRow(),
+        PerGame(@"Display",
+                Cvar(@"widescreen", Toggle(@"x360.widescreen", @"Widescreen", nil,
+                                           YES))),
+        Cvar(@"video_standard",
+             Segment(@"x360.video_standard", @"Video standard", nil,
+                     @[ @"NTSC", @"NTSC-J", @"PAL-60" ], @[ @"1", @"2", @"3" ],
+                     @"1")),
+        Cvar(@"internal_display_resolution",
+             Choice(@"x360.internal_display_resolution",
+                    @"Display mode reported to game",
+                    @"Not every game honours it.", DisplayModeTitles(),
+                    DisplayModeValues(), @"8")),
+        Cvar(@"use_50Hz_mode",
+             Toggle(@"x360.use_50Hz_mode", @"Use 50Hz mode", nil, NO)),
+        PerGame(@"Display",
+                Cvar(@"present_letterbox",
+                     Toggle(@"x360.present_letterbox", @"Present letterbox",
+                            @"Keeps the game's shape instead of filling the screen.",
+                            YES))),
+      ]),
+      Section(@"Frame Pacing", @[
+        PerGame(@"Performance",
+                Cvar(@"framerate_limit",
+                     Choice(@"x360.framerate_limit", @"Frame rate limit",
+                            @"The only setting measured to lower heat on the 360 "
+                             "core.",
+                            @[ @"30 FPS", @"45 FPS", @"60 FPS", @"90 FPS",
+                               @"120 FPS", @"Unlimited" ],
+                            @[ @"30", @"45", @"60", @"90", @"120", @"0" ], @"60"))),
+        PerGame(@"Performance",
+                Cvar(@"framerate_limit_adaptive",
+                     Toggle(@"x360.framerate_limit_adaptive",
+                            @"Adaptive frame rate limit",
+                            @"The limit above becomes a ceiling, and the rate "
+                             "follows what the game can hold.",
+                            YES))),
+        PerGame(@"Performance",
+                Cvar(@"guest_display_refresh_cap",
+                     Toggle(@"x360.guest_display_refresh_cap",
+                            @"Cap guest display refresh", nil, YES))),
+      ]),
+      Section(@"MetalFX", @[
+        Cvar(@"metal_presenter_use_metalfx",
+             Toggle(@"x360.metalfx", @"Use MetalFX upscaling",
+                    @"Apple's spatial upscaler, for when the game renders below "
+                     "the screen's size.",
+                    NO)),
+        MetalFxScaleRow(),
+      ]),
+    ]),
+    Tab(@"Audio", @[
+      MenuMusicSection(),
+      Section(@"Audio", @[
+        Cvar(@"enable_xmp", Toggle(@"x360.enable_xmp", @"Enable XMP",
+                                   @"The console's own music player.", YES)),
+        Cvar(@"xmp_default_volume",
+             Slider(@"x360.xmp_default_volume", @"XMP default volume", nil, 0, 100,
+                    1, @"70", kPercent)),
+        CvarString(@"xma_decoder",
+                   Segment(@"x360.xma_decoder", @"XMA decoder",
+                           @"New is the most stable. Fake decodes nothing.",
+                           @[ @"New", @"Old", @"Master", @"Fake" ],
+                           @[ @"new", @"old", @"master", @"fake" ], @"new")),
+        Cvar(@"use_dedicated_xma_thread",
+             Toggle(@"x360.use_dedicated_xma_thread",
+                    @"Use dedicated XMA thread", nil, NO)),
+      ]),
+    ]),
+    Tab(@"System", @[
+      ConsoleSection(),
+      OrientationSection(),
+      Section(@"Region", @[
+        Cvar(@"user_language",
+             Choice(@"x360.user_language", @"User language", nil, LanguageTitles(),
+                    LanguageValues(), @"1")),
+        Cvar(@"user_country",
+             Choice(@"x360.user_country", @"User country", nil, CountryCodes(),
+                    CountryValues(), @"103")),
+      ]),
+      Section(@"Content", @[
+        PerGame(@"Compatibility",
+                Cvar(@"apply_title_update",
+                     Toggle(@"x360.apply_title_update", @"Apply title update", nil,
+                            YES))),
+        Cvar(@"allow_incompatible_title_update",
+             Toggle(@"x360.allow_incompatible_title_update",
+                    @"Allow incompatible title update", nil, NO)),
+        PerGame(@"Compatibility",
+                Cvar(@"apply_patches",
+                     Toggle(@"x360.apply_patches", @"Apply patches", nil, YES))),
+        PerGame(@"Compatibility",
+                Cvar(@"license_mask",
+                     Segment(@"x360.license_mask", @"License mask",
+                             @"Which content licences a game is told it owns. "
+                              "First is usually an arcade game's full version.",
+                             @[ @"Disabled", @"First", @"All" ],
+                             @[ @"0", @"1", @"-1" ], @"0"))),
+      ]),
+      Section(@"Network", @[
+        Cvar(@"network_enabled",
+             Toggle(@"x360.network_enabled", @"Networking", nil, YES)),
+        Cvar(@"network_mode",
+             Segment(@"x360.network_mode", @"Network mode", nil,
+                     @[ @"Offline", @"System Link (LAN)" ], @[ @"0", @"1" ], @"1")),
+      ]),
+      Section(@"Kernel", @[
+        Cvar(@"guest_scheduler",
+             Toggle(@"x360.guest_scheduler", @"Guest scheduler",
+                    @"Runs guest threads as cooperative fibers. Only turn this off "
+                     "to diagnose a game.",
+                    YES)),
+      ]),
+      JitSection(),
+    ]),
+    Tab(@"Rendering", @[
+      Section(@"Accuracy", @[
+        PerGame(@"Performance",
+                CvarString(@"readback_resolve",
+                           Segment(@"x360.readback_resolve", @"Readback resolve",
+                                   @"How render-to-texture results reach the CPU. "
+                                    "None is fastest and can break effects.",
+                                   @[ @"UMA", @"Fast", @"All", @"None" ],
+                                   @[ @"uma", @"fast", @"all", @"none" ], @"uma"))),
+        PerGame(@"Performance",
+                CvarString(@"occlusion_query",
+                           Segment(@"x360.occlusion_query", @"Occlusion query mode",
+                                   @"Fake asks the GPU nothing. Strict waits for "
+                                    "the real answer.",
+                                   @[ @"Fake", @"Fast", @"Fast-alt", @"Strict" ],
+                                   @[ @"fake", @"fast", @"fast-alt", @"strict" ],
+                                   @"fast"))),
+        PerGame(@"Compatibility",
+                Cvar(@"half_pixel_offset",
+                     Toggle(@"x360.half_pixel_offset", @"Half-pixel offset", nil,
+                            YES))),
+        Cvar(@"gpu_allow_invalid_fetch_constants",
+             Toggle(@"x360.gpu_allow_invalid_fetch_constants",
+                    @"Allow invalid fetch constants", nil, YES)),
+      ]),
+      Section(@"Shaders", @[
+        Cvar(@"store_shaders", Toggle(@"x360.store_shaders", @"Store shaders", nil,
+                                      YES)),
+        Cvar(@"metal_shader_disk_cache",
+             Toggle(@"x360.metal_shader_disk_cache", @"Metal shader disk cache",
+                    nil, YES)),
+        PerGame(@"Performance",
+                Cvar(@"async_shader_compilation",
+                     Toggle(@"x360.async_shader_compilation",
+                            @"Async Shader Compile",
+                            @"Compiles in the background, so a new effect can "
+                             "appear late instead of pausing the game.",
+                            YES))),
+        Cvar(@"metal_pipeline_creation_threads",
+             Choice(@"x360.metal_pipeline_creation_threads",
+                    @"Pipeline creation threads", nil,
+                    @[ @"Auto", @"Off", @"1", @"2", @"4" ],
+                    @[ @"-1", @"0", @"1", @"2", @"4" ], @"-1")),
+      ]),
+      Section(@"Texture Cache", @[
+        Cvar(@"texture_cache_memory_limit_soft",
+             Slider(@"x360.texture_cache_memory_limit_soft",
+                    @"Texture cache soft limit", nil, 384, 4096, 64, @"384",
+                    kMegabytes)),
+        Cvar(@"texture_cache_memory_limit_hard",
+             Slider(@"x360.texture_cache_memory_limit_hard",
+                    @"Texture cache hard limit", nil, 768, 4096, 64, @"768",
+                    kMegabytes)),
+      ]),
+      Section(@"Advanced", @[
+        Cvar(@"snorm16_render_target_full_range",
+             Toggle(@"x360.snorm16_render_target_full_range",
+                    @"snorm16 render target full range", nil, YES)),
+        Cvar(@"depth_float24_round",
+             Toggle(@"x360.depth_float24_round", @"Depth float24 round", nil, NO)),
+        Cvar(@"depth_float24_convert_in_pixel_shader",
+             Toggle(@"x360.depth_float24_convert_in_pixel_shader",
+                    @"Depth float24 convert in pixel shader", nil, NO)),
+        Cvar(@"clear_memory_page_state",
+             Toggle(@"x360.clear_memory_page_state", @"Clear memory page state",
+                    nil, NO)),
+        Cvar(@"depth_transfer_not_equal_test",
+             Toggle(@"x360.depth_transfer_not_equal_test",
+                    @"Depth transfer not-equal test", nil, YES)),
+      ]),
+    ]),
+    Tab(@"Input", @[ TouchSection() ]),
+    Tab(@"Maintenance", @[
+      Section(@"Maintenance", @[ ShowFpsRow(), ShareLogsRow() ]),
+      Section(@"Logging", @[
+        Cvar(@"log_level",
+             Segment(@"x360.log_level", @"Log level", nil,
+                     @[ @"Error", @"Warning", @"Info", @"Debug" ],
+                     @[ @"0", @"1", @"2", @"3" ], @"2")),
+        Cvar(@"flush_log", Toggle(@"x360.flush_log", @"Flush log", nil, YES)),
+      ]),
+      AppSection(),
+    ]),
+  ];
 }
 
-static XenraSettingRow* OgScaleRow() {
-  XenraSettingRow* row = Choice(
-      @"og.scale", @"Original Xbox resolution",
-      @"Above 1x costs GPU time on every frame.",
-      @[ @"1x", @"2x", @"3x" ], @[ @"1", @"2", @"3" ], @"1");
-  row.perGame = YES;
-  return row;
-}
+// --- Original Xbox ----------------------------------------------------------
+// Left out on purpose: display.filtering, display.ui.fit and display.ui.aspect_ratio
+// and display.window.vsync are read only by the OpenGL path; the iOS presenter takes
+// the first and third from the environment and has no stretch mode at all.
 
-static XenraSettingRow* CoreRow() {
-  XenraSettingRow* row = Choice(
-      @"og.core", @"Core",
-      @"Performance (hakuX) is not on iOS yet: it needs its own port.",
-      @[ @"Compatibility (xemu)" ], @[ @"xemu" ], @"xemu");
-  row.perGame = YES;
-  return row;
+static NSArray* TabsOG(void) {
+  return @[
+    Tab(@"Video", @[
+      Section(@"Display", @[
+        PerGame(@"Display",
+                Config(@"display.quality", @"surface_scale",
+                       Segment(@"og.scale", @"Internal Resolution Scale",
+                               @"Above 1x costs GPU time on every frame.",
+                               @[ @"1x (Native 480p)", @"2x (960p)", @"3x (1440p)" ],
+                               @[ @"1", @"2", @"3" ], @"1"))),
+        PerGame(@"Display",
+                Segment(@"og.filtering", @"Display Filtering", nil,
+                        @[ @"Linear", @"Nearest" ], @[ @"linear", @"nearest" ],
+                        @"linear")),
+        PerGame(@"Display",
+                Segment(@"og.aspect", @"Aspect Ratio",
+                        @"Auto follows what the game asks for.",
+                        @[ @"Auto", @"4:3", @"16:9", @"Native" ],
+                        @[ @"auto", @"4:3", @"16:9", @"native" ], @"auto")),
+      ]),
+      Section(@"Frame Pacing", @[
+        PerGame(@"Performance",
+                Segment(@"og.pacing", @"Present pacing",
+                        @"Speed shows frames at once and may tear. Smooth replaces "
+                         "a waiting frame with a newer one. Accurate locks to the "
+                         "display at 60 FPS.",
+                        @[ @"Speed", @"Smooth", @"Accurate" ],
+                        @[ @"speed", @"smooth", @"accurate" ], @"accurate")),
+        PerGame(@"Performance",
+                Toggle(@"og.force30", @"Lock to 30 FPS",
+                       @"Steadier, and cooler, in a game that cannot hold 60. "
+                        "Overrides present pacing.",
+                       NO)),
+      ]),
+    ]),
+    Tab(@"Audio", @[
+      MenuMusicSection(),
+      Section(@"Audio", @[
+        PerGame(@"Audio",
+                Config(@"audio", @"use_dsp",
+                       Toggle(@"og.use_dsp", @"Real-time DSP Processing", nil, NO))),
+        PerGame(@"Audio",
+                Config(@"audio", @"hrtf",
+                       Toggle(@"og.hrtf", @"HRTF (3D Audio)", nil, YES))),
+        Config(@"audio", @"volume_limit",
+               Slider(@"og.volume_limit", @"Output volume limit", nil, 0, 1, 0.01f,
+                      @"1.00", kFraction)),
+      ]),
+    ]),
+    Tab(@"System", @[
+      ConsoleSection(),
+      OrientationSection(),
+      Section(@"System", @[
+        PerGame(@"Performance",
+                ConfigString(@"sys", @"mem_limit",
+                             Segment(@"og.mem_limit", @"System Memory",
+                                     @"Use 64 MiB for retail games. 128 MiB is "
+                                      "mainly for debug and homebrew.",
+                                     @[ @"64 MiB", @"128 MiB" ],
+                                     @[ @"64", @"128" ], @"64"))),
+        PerGame(@"Compatibility",
+                ConfigString(@"sys", @"avpack",
+                             Choice(@"og.avpack", @"AV pack",
+                                    @"The cable the console believes it has.",
+                                    @[ @"HDTV", @"SCART", @"VGA", @"RF",
+                                       @"S-Video", @"Composite", @"None" ],
+                                    @[ @"hdtv", @"scart", @"vga", @"rfu", @"svideo",
+                                       @"composite", @"none" ],
+                                    @"hdtv"))),
+        PerGame(@"Performance",
+                Config(@"perf", @"hard_fpu",
+                       Toggle(@"og.hard_fpu", @"Hardware FPU", nil, YES))),
+        PerGame(@"Performance",
+                Segment(@"og.tb", @"Code cache", @"More memory, fewer recompiles.",
+                        @[ @"64 MB", @"128 MB", @"256 MB" ],
+                        @[ @"64", @"128", @"256" ], @"64")),
+        Action(@"og.eeprom", @"EEPROM file", nil),
+      ]),
+      Section(@"Network", @[
+        Config(@"net", @"enable",
+               Toggle(@"og.net.enable", @"Networking", nil, NO)),
+        ConfigString(@"net", @"backend",
+                     Segment(@"og.net.backend", @"Network backend",
+                             @"UDP tunnels to another xemu at the addresses below.",
+                             @[ @"NAT", @"UDP" ], @[ @"nat", @"udp" ], @"nat")),
+        ConfigString(@"net.udp", @"bind_addr",
+                     Text(@"og.net.bind_addr", @"UDP local address", nil,
+                          @"0.0.0.0:9368")),
+        ConfigString(@"net.udp", @"remote_addr",
+                     Text(@"og.net.remote_addr", @"UDP remote address", nil,
+                          @"1.2.3.4:9368")),
+      ]),
+      JitSection(),
+    ]),
+    Tab(@"Rendering", @[
+      Section(@"Rendering", @[
+        PerGame(@"Performance",
+                Config(@"perf", @"cache_shaders",
+                       Toggle(@"og.cache_shaders", @"Shader Cache", nil, YES))),
+        PerGame(@"Compatibility",
+                Config(@"general", @"skip_boot_anim",
+                       Toggle(@"og.skip_boot_anim", @"Skip startup animation", nil,
+                              NO))),
+      ]),
+    ]),
+    Tab(@"Input", @[
+      TouchSection(),
+      Section(@"Controller", @[
+        Config(@"input", @"allow_vibration",
+               Toggle(@"og.allow_vibration", @"Controller rumble", nil, YES)),
+      ]),
+    ]),
+    Tab(@"Maintenance", @[
+      Section(@"Maintenance", @[
+        ShowFpsRow(),
+        Toggle(@"core.trace", @"Detailed core logs",
+               @"For diagnosing boot problems. Slows the game a little.", YES),
+        ShareLogsRow(),
+      ]),
+      AppSection(),
+    ]),
+  ];
 }
 
 @implementation XenraSettings
 
-+ (NSArray<XenraSettingTab*>*)tabs {
-  static NSArray* tabs;
++ (NSArray<XenraSettingTab*>*)tabsForConsole:(XenraConsole)console {
+  static NSArray* x360;
+  static NSArray* og;
   static dispatch_once_t once;
   dispatch_once(&once, ^{
-    tabs = @[
-      Tab(@"Video",
-          @[ Section(@"Display", @[
-            ResolutionRow(), FrameLimitRow(), OgScaleRow(),
-            Toggle(@"hud.fps", @"Show FPS", nil, YES),
-          ]) ]),
-      Tab(@"Input",
-          @[ Section(@"Touch controls", @[
-            Toggle(@"pad.visible", @"Show touch controls", nil, YES),
-            Choice(@"pad.scale", @"Controls size", nil,
-                   @[ @"Small", @"Normal", @"Large" ],
-                   @[ @"0.8", @"1.0", @"1.25" ], @"1.0"),
-            Toggle(@"pad.haptics", @"Vibration", nil, YES),
-          ]) ]),
-      Tab(@"System",
-          @[
-            Section(@"Console", @[
-              CoreRow(),
-              Choice(@"og.tb", @"Original Xbox code cache",
-                     @"More memory, fewer recompiles.",
-                     @[ @"64 MB", @"128 MB", @"256 MB" ],
-                     @[ @"64", @"128", @"256" ], @"64"),
-            ]),
-            Section(@"Audio", @[
-              Toggle(@"music.enabled", @"Menu music", nil, YES),
-              Choice(@"music.volume", @"Music volume", nil,
-                     @[ @"25%", @"55%", @"75%", @"100%" ],
-                     @[ @"25", @"55", @"75", @"100" ], @"55"),
-            ]),
-            Section(@"JIT", @[
-              Action(@"jit.enable", @"Enable JIT",
-                     @"Opens StikDebug. Needed once per launch."),
-            ]),
-          ]),
-      Tab(@"Maintenance",
-          @[ Section(@"Maintenance", @[
-            Toggle(@"core.trace", @"Detailed core logs",
-                   @"For diagnosing boot problems. Slows the game a little.", YES),
-            Action(@"setup.rerun", @"Setup Wizard", nil),
-            Action(@"privacy", @"Privacy policy", nil),
-            Action(@"log.share", @"Share logs",
-                   @"Core log, crash reports and device details, as one file."),
-            Action(@"cache.clear", @"Clear shader cache",
-                   @"Games compile their shaders again on next launch."),
-          ]) ]),
-    ];
+    x360 = Tabs360();
+    og = TabsOG();
   });
-  return tabs;
+  return console == XenraConsole360 ? x360 : og;
 }
 
-+ (NSArray<XenraSettingRow*>*)perGameRows {
-  static NSArray* rows;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{
-    rows = @[ ResolutionRow(), FrameLimitRow(), OgScaleRow() ];
-  });
-  return rows;
++ (NSArray<XenraSettingTab*>*)tabs {
+  return [self tabsForConsole:[self console]];
+}
+
++ (NSArray<XenraSettingSection*>*)perGameSections {
+  NSMutableArray<NSString*>* order = [NSMutableArray array];
+  NSMutableDictionary<NSString*, NSMutableArray*>* groups =
+      [NSMutableDictionary dictionary];
+  for (XenraSettingTab* tab in [self tabs]) {
+    for (XenraSettingSection* section in tab.sections) {
+      for (XenraSettingRow* row in section.rows) {
+        if (!row.perGameGroup) continue;
+        if (!groups[row.perGameGroup]) {
+          groups[row.perGameGroup] = [NSMutableArray array];
+          [order addObject:row.perGameGroup];
+        }
+        [groups[row.perGameGroup] addObject:row];
+      }
+    }
+  }
+  NSMutableArray* sections = [NSMutableArray array];
+  for (NSString* title in order) {
+    [sections addObject:Section(title, groups[title])];
+  }
+  return sections;
 }
 
 + (XenraConsole)console {
@@ -198,6 +696,11 @@ static XenraSettingRow* CoreRow() {
          forKey:[@"bookmark." stringByAppendingString:key]];
 }
 
++ (void)clearBookmark:(NSString*)key {
+  [NSUserDefaults.standardUserDefaults
+      removeObjectForKey:[@"bookmark." stringByAppendingString:key]];
+}
+
 + (NSURL*)urlForBookmark:(NSString*)key {
   NSData* bookmark = [NSUserDefaults.standardUserDefaults
       dataForKey:[@"bookmark." stringByAppendingString:key]];
@@ -215,7 +718,8 @@ static NSMutableArray<NSURL*>* g_held;
 + (void)holdPickedFiles {
   for (NSURL* url in g_held) [url stopAccessingSecurityScopedResource];
   g_held = [NSMutableArray array];
-  for (NSString* key in @[ @"games.360", @"games.og", @"mcpx", @"flash", @"hdd" ]) {
+  for (NSString* key in
+       @[ @"games.360", @"games.og", @"mcpx", @"flash", @"hdd", @"eeprom" ]) {
     NSURL* url = [self urlForBookmark:key];
     if (url && [url startAccessingSecurityScopedResource]) [g_held addObject:url];
   }
@@ -248,13 +752,23 @@ static NSMutableArray<NSURL*>* g_held;
   [NSUserDefaults.standardUserDefaults setObject:value forKey:key];
 }
 
++ (NSString*)overrideForRow:(XenraSettingRow*)row game:(NSString*)game {
+  return game ? [NSUserDefaults.standardUserDefaults
+                    stringForKey:[self gameKey:game row:row.key]]
+              : nil;
+}
+
++ (void)clearOverrideForRow:(XenraSettingRow*)row game:(NSString*)game {
+  [NSUserDefaults.standardUserDefaults
+      removeObjectForKey:[self gameKey:game row:row.key]];
+}
+
 + (NSString*)valueForRow:(XenraSettingRow*)row game:(NSString*)game {
-  if (game) {
-    NSString* own = [NSUserDefaults.standardUserDefaults
-        stringForKey:[self gameKey:game row:row.key]];
-    if (own) return own;
+  if ([row.key isEqual:@"ui.console"]) {
+    return [NSString stringWithFormat:@"%ld", (long)[self console]];
   }
-  return [self stringForKey:row.key fallback:row.defaultValue];
+  return [self overrideForRow:row game:game]
+             ?: [self stringForKey:row.key fallback:row.defaultValue];
 }
 
 + (void)setValue:(NSString*)value row:(XenraSettingRow*)row game:(NSString*)game {
@@ -269,24 +783,98 @@ static NSMutableArray<NSURL*>* g_held;
              ?: [self stringForKey:key fallback:fallback];
 }
 
-+ (void)clearOverridesForGame:(NSString*)game {
-  for (XenraSettingRow* row in [self perGameRows]) {
-    [NSUserDefaults.standardUserDefaults
-        removeObjectForKey:[self gameKey:game row:row.key]];
++ (NSString*)titleForValue:(NSString*)value row:(XenraSettingRow*)row {
+  if (row.kind == XenraRowToggle) {
+    return [value isEqual:@"true"] ? @"Enabled" : @"Disabled";
   }
+  if (row.kind == XenraRowSlider && row.format) return row.format(value.floatValue);
+  const NSUInteger i = [row.choiceValues indexOfObject:value];
+  return i == NSNotFound ? value : row.choiceTitles[i];
 }
 
-+ (void)applyForGame:(NSString*)game {
-  for (XenraSettingTab* tab in [self tabs]) {
-    for (XenraSettingSection* section in tab.sections) {
-      for (XenraSettingRow* row in section.rows) {
-        for (NSString* cvar in row.cvars) {
-          xe_ios_set_cvar(cvar.UTF8String,
-                          [self valueForRow:row game:game].UTF8String);
++ (void)clearOverridesForGame:(NSString*)game {
+  for (NSNumber* console in @[ @(XenraConsole360), @(XenraConsoleOG) ]) {
+    for (XenraSettingTab* tab in
+         [self tabsForConsole:(XenraConsole)console.integerValue]) {
+      for (XenraSettingSection* section in tab.sections) {
+        for (XenraSettingRow* row in section.rows) {
+          if (row.perGameGroup) [self clearOverrideForRow:row game:game];
         }
       }
     }
   }
+}
+
++ (void)applyForGame:(NSString*)game {
+  NSMutableArray* changed = [NSMutableArray array];
+  for (XenraSettingTab* tab in [self tabsForConsole:XenraConsole360]) {
+    for (XenraSettingSection* section in tab.sections) {
+      for (XenraSettingRow* row in section.rows) {
+        if (!row.cvars.count) continue;
+        NSString* value = [self valueForRow:row game:game];
+        if (![value isEqual:row.defaultValue]) {
+          [changed addObject:[NSString stringWithFormat:@"%@=%@", row.key, value]];
+        }
+        NSString* toml =
+            row.cvarIsString ? [NSString stringWithFormat:@"\"%@\"", value] : value;
+        for (NSString* cvar in row.cvars) {
+          xe_ios_set_cvar(cvar.UTF8String, toml.UTF8String);
+        }
+      }
+    }
+  }
+  XenraLog([NSString stringWithFormat:@"cvars away from default: %@",
+                                      changed.count
+                                          ? [changed componentsJoinedByString:@" "]
+                                          : @"none"]);
+}
+
++ (NSString*)xemuConfigForTable:(NSString*)table game:(NSString*)game {
+  NSMutableString* lines = [NSMutableString string];
+  for (XenraSettingTab* tab in [self tabsForConsole:XenraConsoleOG]) {
+    for (XenraSettingSection* section in tab.sections) {
+      for (XenraSettingRow* row in section.rows) {
+        if (![row.configTable isEqual:table]) continue;
+        NSString* value = [self valueForRow:row game:game];
+        if (row.configIsString) {
+          // Only the address rows are typed by hand.
+          value = [value stringByReplacingOccurrencesOfString:@"\"" withString:@""];
+          value = [NSString stringWithFormat:@"\"%@\"", value];
+        }
+        [lines appendFormat:@"%@ = %@\n", row.configKey, value];
+      }
+    }
+  }
+  return lines;
+}
+
++ (NSDictionary<NSString*, NSString*>*)xemuEnvironmentForGame:(NSString*)game {
+  NSString* pacing = [self valueForKey:@"og.pacing" game:game fallback:@"accurate"];
+  const BOOL fast = [pacing isEqual:@"speed"] || [pacing isEqual:@"smooth"];
+  NSString* mode = !fast ? @"fifo"
+                   : [pacing isEqual:@"speed"] ? @"immediate"
+                                               : @"mailbox";
+  NSString* fps = fast ? @"0" : @"60";
+  NSString* sync = fast ? @"0" : @"1";
+  NSString* nominal = fast ? @"120" : @"60";
+  if ([[self valueForKey:@"og.force30" game:game fallback:@"false"]
+          isEqual:@"true"]) {
+    mode = @"fifo";
+    fps = @"30";
+    sync = @"1";
+    nominal = @"30";
+  }
+  NSString* filter = [self valueForKey:@"og.filtering" game:game fallback:@"linear"];
+  return @{
+    @"XEMU_IOS_VK_PRESENT_MODE" : mode,
+    @"XEMU_IOS_VK_PRESENT_FPS" : fps,
+    @"XEMU_IOS_DISPLAY_SYNC" : sync,
+    @"XEMU_IOS_NOMINAL_FPS" : nominal,
+    @"XEMU_IOS_PRESENTER_ASPECT" :
+        [self valueForKey:@"og.aspect" game:game fallback:@"auto"],
+    @"XEMU_IOS_PRESENTER_LINEAR_FILTER" :
+        [filter isEqual:@"nearest"] ? @"0" : @"1",
+  };
 }
 
 @end

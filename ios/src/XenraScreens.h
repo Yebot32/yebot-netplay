@@ -54,3 +54,5 @@ UIViewController* XenraMakeRoot(XenraDashboardEntry entry);
 void XenraRestartSetup(UIWindow* window);
 void XenraApplyOrientation(UIViewController* controller);
 void XenraShowPrivacyPolicy(UIView* host);
+// dialog_blade_about: the version, who made it, and the community links.
+void XenraShowAbout(UIView* host);

@@ -406,13 +406,15 @@ static XenraHintBar* FindHintBar(UIView* view) {
   return nil;
 }
 
-static XenraBladeButton* FindChosenBlade(UIView* view) {
+// Any press control with a `chosen` property, which is what a tab is.
+static XenraPressControl* FindChosenBlade(UIView* view) {
   if (view.hidden) return nil;
-  if ([view isKindOfClass:[XenraBladeButton class]]) {
-    return ((XenraBladeButton*)view).chosen ? (XenraBladeButton*)view : nil;
+  if ([view isKindOfClass:[XenraPressControl class]]) {
+    const BOOL tab = [view respondsToSelector:@selector(chosen)];
+    return tab && [(XenraBladeButton*)view chosen] ? (XenraPressControl*)view : nil;
   }
   for (UIView* child in view.subviews) {
-    XenraBladeButton* blade = FindChosenBlade(child);
+    XenraPressControl* blade = FindChosenBlade(child);
     if (blade) return blade;
   }
   return nil;
@@ -1016,7 +1018,7 @@ static void BringIntoView(XenraPadSpot* spot) {
 - (void)shiftTab:(int)delta {
   UIView* root = root_;
   if ([root isKindOfClass:[XenraBladeSheet class]]) return;
-  XenraBladeButton* chosen = FindChosenBlade(root);
+  XenraPressControl* chosen = FindChosenBlade(root);
   if (![chosen.superview isKindOfClass:[UIStackView class]]) return;
   NSMutableArray<XenraPressControl*>* tabs = [NSMutableArray array];
   for (UIView* view in ((UIStackView*)chosen.superview).arrangedSubviews) {

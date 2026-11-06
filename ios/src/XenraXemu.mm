@@ -90,28 +90,40 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
                           withIntermediateDirectories:YES
                                            attributes:nil
                                                 error:nil];
+  NSURL* eeprom = [XenraSettings urlForBookmark:@"eeprom"];
   NSString* config =
       [NSString stringWithFormat:
-                    @"[general]\nshow_welcome = false\nskip_boot_anim = false\n"
+                    @"[general]\nshow_welcome = false\n%@"
                      "games_dir = %@\n\n"
                      "[display]\nrenderer = \"VULKAN\"\n\n"
-                     "[display.quality]\nsurface_scale = %@\n\n"
+                     "[display.quality]\n%@\n"
                      "[display.ui]\nshow_menubar = false\n"
                      "show_notifications = false\nhide_cursor = true\n\n"
-                     "[perf]\ncache_shaders = true\n\n"
+                     "[perf]\n%@\n"
+                     "[audio]\n%@\n"
+                     "[net]\n%@\n"
+                     "[net.udp]\n%@\n"
                      "[input]\nauto_bind = true\n"
-                     "background_input_capture = true\n\n"
-                     "[sys]\nmem_limit = \"64\"\navpack = \"hdtv\"\n\n"
+                     "background_input_capture = true\n%@\n"
+                     "[sys]\n%@\n"
                      "[sys.files]\nbootrom_path = %@\nflashrom_path = %@\n"
-                     "hdd_path = %@\ndvd_path = %@\n",
+                     "hdd_path = %@\ndvd_path = %@\n%@",
+                    [XenraSettings xemuConfigForTable:@"general" game:name],
                     Quoted(game.stringByDeletingLastPathComponent),
-                    [XenraSettings valueForKey:@"og.scale"
-                                          game:name
-                                      fallback:@"1"],
+                    [XenraSettings xemuConfigForTable:@"display.quality" game:name],
+                    [XenraSettings xemuConfigForTable:@"perf" game:name],
+                    [XenraSettings xemuConfigForTable:@"audio" game:name],
+                    [XenraSettings xemuConfigForTable:@"net" game:name],
+                    [XenraSettings xemuConfigForTable:@"net.udp" game:name],
+                    [XenraSettings xemuConfigForTable:@"input" game:name],
+                    [XenraSettings xemuConfigForTable:@"sys" game:name],
                     Quoted([XenraSettings urlForBookmark:@"mcpx"].path),
                     Quoted([XenraSettings urlForBookmark:@"flash"].path),
                     Quoted([XenraSettings urlForBookmark:@"hdd"].path),
-                    Quoted(game)];
+                    Quoted(game),
+                    eeprom ? [NSString stringWithFormat:@"eeprom_path = %@\n",
+                                                        Quoted(eeprom.path)]
+                           : @""];
   NSString* path = [dir stringByAppendingPathComponent:@"xemu-ios.toml"];
   [config writeToFile:path
            atomically:YES
@@ -121,17 +133,21 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
 }
 
 // The core reads neither of these from the environment: DukeX sets them on the
-// layer itself, through selectors the public header does not declare.
+// layer itself, through selectors the public header does not declare. The values
+// are the launch's own, so call this after the environment is set.
 static void ApplyPacing(CALayer* layer) {
+  const char* display_sync = getenv("XEMU_IOS_DISPLAY_SYNC");
+  const char* nominal_fps = getenv("XEMU_IOS_NOMINAL_FPS");
   SEL sync = NSSelectorFromString(@"setDisplaySyncEnabled:");
   if ([layer respondsToSelector:sync]) {
-    reinterpret_cast<void (*)(id, SEL, BOOL)>(
-        [layer methodForSelector:sync])(layer, sync, YES);
+    reinterpret_cast<void (*)(id, SEL, BOOL)>([layer methodForSelector:sync])(
+        layer, sync, !display_sync || atoi(display_sync) != 0);
   }
   SEL nominal = NSSelectorFromString(@"setNominalFramesPerSecond:");
   if ([layer respondsToSelector:nominal]) {
     reinterpret_cast<void (*)(id, SEL, NSInteger)>(
-        [layer methodForSelector:nominal])(layer, nominal, 60);
+        [layer methodForSelector:nominal])(layer, nominal,
+                                           nominal_fps ? atoi(nominal_fps) : 60);
   }
 }
 
@@ -246,8 +262,13 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
     @"XEMU_IOS_COROUTINE_PRIME_COUNT" : @"640",
     @"XEMU_IOS_DISPLAY_PERF_STATS" : @"0",
   };
-  for (NSString* name in environment) {
-    setenv(name.UTF8String, [environment[name] UTF8String], 1);
+  for (NSString* key in environment) {
+    setenv(key.UTF8String, [environment[key] UTF8String], 1);
+  }
+  // What the player chose, over the defaults above.
+  NSDictionary* chosen = [XenraSettings xemuEnvironmentForGame:name];
+  for (NSString* key in chosen) {
+    setenv(key.UTF8String, [chosen[key] UTF8String], 1);
   }
   // The core's own traces. The CPU heartbeat is once a second; the rest fire on
   // events. They answer whether the guest is running and how far it has got
@@ -272,7 +293,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
 
   NSString* accel = [NSString
       stringWithFormat:@"tcg,thread=single,tb-size=%@%@",
-                       [XenraSettings stringForKey:@"og.tb" fallback:@"64"],
+                       [XenraSettings valueForKey:@"og.tb" game:name fallback:@"64"],
                        scheme == XenraJitRwFirst ? @",split-wx=on" : @""];
   NSArray<NSString*>* arguments =
       @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game, name) ];
