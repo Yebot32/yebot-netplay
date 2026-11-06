@@ -430,7 +430,7 @@ CGFloat XenraHintBarInset(UIView* view) {
 - (void)paintBlade {
   blade_.state = self.pressed ? XenraBladePressed
                  : _chosen    ? XenraBladeChosen
-                 : _focused   ? XenraBladeFocused
+                 : _padFocused ? XenraBladeFocused
                               : XenraBladeResting;
 }
 
@@ -472,8 +472,8 @@ CGFloat XenraHintBarInset(UIView* view) {
   [self paintBlade];
 }
 
-- (void)setFocused:(BOOL)focused {
-  _focused = focused;
+- (void)setPadFocused:(BOOL)padFocused {
+  _padFocused = padFocused;
   [self paintBlade];
 }
 

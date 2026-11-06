@@ -88,7 +88,7 @@ extern const NSTimeInterval XenraPressDelay;
 @property(nonatomic, assign) BOOL chosen;   // the current settings tab
 @property(nonatomic, assign) BOOL primary;  // the default action, filled
 @property(nonatomic, assign) BOOL compact;  // 48 pt, 14 pt text
-@property(nonatomic, assign) BOOL focused;  // the controller cursor is on it
+@property(nonatomic, assign) BOOL padFocused;  // the controller cursor is on it
 - (instancetype)initWithTitle:(NSString*)title action:(void (^)(void))action;
 @end
 
