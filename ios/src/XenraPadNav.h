@@ -55,6 +55,9 @@ void XenraPadNavScreenChanged(void);
 // Takes the cursor away. A touch anywhere in the window calls this.
 void XenraPadNavTouched(void);
 
+// What the cursor is on, or nil. A screen hook uses it to act on that item.
+UIView* XenraPadNavFocusedView(void);
+
 // The white outline, 2 pt at radius 8 in xenraFocus, Android's buildFocusRing. It
 // lives on the view's own layer so it scrolls and clips with it.
 void XenraPadRing(UIView* view, BOOL on);

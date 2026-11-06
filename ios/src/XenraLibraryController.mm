@@ -25,6 +25,7 @@
 #import "XenraCovers.h"
 #import "XenraGameScanner.h"
 #import "XenraMotion.h"
+#import "XenraPadNav.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
@@ -828,7 +829,8 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 @interface XenraLibraryController () <UICollectionViewDataSource,
                                       UICollectionViewDataSourcePrefetching,
                                       UICollectionViewDelegateFlowLayout,
-                                      UIDocumentPickerDelegate>
+                                      UIDocumentPickerDelegate,
+                                      XenraPadScreen>
 @end
 
 @implementation XenraLibraryController {
@@ -1580,6 +1582,37 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
       pushViewController:[[XenraGameController alloc] initWithPath:game.path
                                                               name:game.name]
                 animated:YES];
+}
+
+// --- Controller ----------------------------------------------------------------
+
+// The game under the cursor, whichever way the library is drawn.
+- (XenraGameEntry*)gameUnderCursor {
+  for (UIView* view = XenraPadNavFocusedView(); view; view = view.superview) {
+    if (![view isKindOfClass:UICollectionViewCell.class]) continue;
+    NSIndexPath* path = [collection_ indexPathForCell:(UICollectionViewCell*)view];
+    if (path && path.item < (NSInteger)games_.count) return games_[path.item];
+    return nil;
+  }
+  return nil;
+}
+
+// Android's onKeyDown: Y opens what a long press opens, and left clears the
+// selection. Left only counts from the list, because from the detail panel it is
+// the way back to the list.
+- (BOOL)xenraPadButton:(XenraPadButton)button {
+  if (menu_) return NO;
+  XenraGameEntry* cursor = [self gameUnderCursor];
+  if (button == XenraPadButtonY) {
+    XenraGameEntry* game = cursor ?: selected_;
+    if (game) [self showActions:game];
+    return game != nil;
+  }
+  if (button == XenraPadButtonLeft && selected_ && !gridMode_ && cursor) {
+    [self clearSelection];
+    return YES;
+  }
+  return NO;
 }
 
 // --- Per-game actions ----------------------------------------------------------

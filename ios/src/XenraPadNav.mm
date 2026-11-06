@@ -504,6 +504,7 @@ static void BringIntoView(XenraPadSpot* spot) {
 - (void)start;
 - (void)updatePolling;
 - (void)clearCursor;
+- (UIView*)focusedView;
 #ifdef XENRA_UITEST
 - (NSString*)focusName;
 - (BOOL)polling;
@@ -687,6 +688,10 @@ static void BringIntoView(XenraPadSpot* spot) {
     }
   }
   return best;
+}
+
+- (UIView*)focusedView {
+  return focused_.view;
 }
 
 - (void)clearCursor {
@@ -1087,6 +1092,8 @@ void XenraPadNavStart(void) { [XenraPadEngine.shared start]; }
 void XenraPadNavScreenChanged(void) { [XenraPadEngine.shared updatePolling]; }
 
 void XenraPadNavTouched(void) { [XenraPadEngine.shared clearCursor]; }
+
+UIView* XenraPadNavFocusedView(void) { return XenraPadEngine.shared.focusedView; }
 
 // The ring of a control that has to stand outside its scroller. One cursor, so one.
 static __weak CAShapeLayer* g_outerRing;
