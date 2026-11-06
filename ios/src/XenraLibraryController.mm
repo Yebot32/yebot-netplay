@@ -519,6 +519,18 @@ void WithoutActions(void (^change)(void)) {
 
 @implementation XenraColumnLayout
 
+// Flow layout redoes itself when its width changes but keeps the item sizes it
+// asked for before, which left rows at their old width, cut off at both ends.
+- (UICollectionViewLayoutInvalidationContext*)invalidationContextForBoundsChange:
+    (CGRect)bounds {
+  UICollectionViewFlowLayoutInvalidationContext* context =
+      (UICollectionViewFlowLayoutInvalidationContext*)
+          [super invalidationContextForBoundsChange:bounds];
+  context.invalidateFlowLayoutDelegateMetrics =
+      bounds.size.width != self.collectionView.bounds.size.width;
+  return context;
+}
+
 - (UICollectionViewLayoutAttributes*)placed:(UICollectionViewLayoutAttributes*)source {
   UICollectionViewLayoutAttributes* attributes = [source copy];
   CGRect frame = attributes.frame;
@@ -675,7 +687,7 @@ void WithoutActions(void (^change)(void)) {
       MAX(8, MIN(CGRectGetMaxX(button) - width, host.bounds.size.width - width - 8));
   panel_ = [[XenraPanelView alloc]
       initWithFrame:CGRectMake(x, CGRectGetMaxY(button) + 6, width, height)];
-  panel_.chamfer = 12;
+  panel_.chamfer = 8;  // the rows sit 8 in, clear of the cut
   [panel_ setFill:XenraDialogFill()];
   panel_.layer.shadowColor = XenraShadow().CGColor;
   panel_.layer.shadowOpacity = 0.5;
@@ -1242,6 +1254,8 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
+  // The list is the panel's child, and the panel has not laid out yet here.
+  [panel_ layoutIfNeeded];
   const CGFloat width = collection_.bounds.size.width;
   if (width <= 0 || width == laidOutWidth_) return;
   laidOutWidth_ = width;
@@ -1250,10 +1264,8 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
     [self renderWithEntrance];
     return;
   }
-  // Not invalidateLayout alone: in the same pass as the detail panel opening it
-  // moved the rows and left them at their old width, cut off at both ends. A tile
-  // also has a new cover size. Everything comes from the cover cache, so this
-  // draws nothing different but the size.
+  // A tile has a new cover size too. Everything comes from the cover cache, so
+  // this draws nothing different but the size.
   [self applyGridMetrics];
   [collection_ reloadData];
   [collection_ layoutIfNeeded];
