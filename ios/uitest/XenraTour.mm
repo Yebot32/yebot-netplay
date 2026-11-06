@@ -323,7 +323,6 @@ static void PressTiming(NSString* title) {
                                                              action:nil];
   field.value = @"Use Global";
   field.detail = @"Global default: 60";
-  [field setCaptionFill:XenraCardFill()];
   [body addArrangedSubview:field];
 
   XenraCardView* buttons = [[XenraCardView alloc] initWithFrame:CGRectZero];
@@ -502,6 +501,7 @@ static void SettingsTour(NSString* console) {
   Step(^{
     XenraSettingsController* perGame = [[XenraSettingsController alloc] init];
     perGame.game = @"Crash Bandicoot - The Wrath of Cortex";
+    perGame.gameFile = @"Crash Bandicoot - The Wrath of Cortex (USA).iso";
     [Nav() pushViewController:perGame animated:YES];
   });
   Pause();
@@ -708,6 +708,10 @@ static void PadTour(NSString* console) {
   Pad(@"LB");
   Pad(@"R");
   Shot(name(@"settings-pane"));
+  Pad(@"RB");  // the cursor stays in the pane
+  Shot(name(@"settings-rb-pane"));
+  Pad(@"LB");
+  Pad(@"U U U U U U");
   Pad(@"D D D D D D");
   Shot(name(@"settings-scrolled"));
   Pad(@"B");
@@ -733,8 +737,10 @@ static void PadTour(NSString* console) {
   Shot(name(@"widget-slider"));
   PadSeek(@"Frame limit", @"D");
   Shot(name(@"widget-field"));
-  PadSeek(@"Continue", @"D");
+  Pad(@"D");  // the middle of the row under a wide field
+  PadSeek(@"Continue", @"L");
   Shot(name(@"widget-pill"));
+  Pad(@"D");
   PadSeek(@"UISwitch", @"R");
   Pad(@"A");
   Step(^{
@@ -765,6 +771,8 @@ static void PadTour(NSString* console) {
   PadHoldTest(@"D");
   Shot(name(@"sheet-held"));
   PadStickTest();
+  PadHoldTest(@"D");
+  Shot(name(@"sheet-scrolled"));
   Pad(@"B");
   Pause();
 
@@ -775,6 +783,12 @@ static void PadTour(NSString* console) {
   Shot(name(@"library-placed"));
   Pad(@"R D");
   Shot(name(@"library-moved"));
+  Tap(@"Covers");
+  Pause();
+  Pad(@"D R D");
+  Shot(name(@"library-covers"));
+  Tap(@"List");
+  Pause();
   Pad(@"B");
   Pause();
   Step(^{

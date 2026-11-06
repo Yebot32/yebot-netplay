@@ -1014,7 +1014,7 @@ static void BringIntoView(XenraPadSpot* spot) {
   if (stack.viewControllers.count > 1) [stack popViewControllerAnimated:YES];
 }
 
-// The chosen blade marks the tab, and its stack holds the others.
+// What is marked chosen is the tab, and its stack holds the others.
 - (void)shiftTab:(int)delta {
   UIView* root = root_;
   if ([root isKindOfClass:[XenraBladeSheet class]]) return;
@@ -1068,49 +1068,80 @@ void XenraPadNavScreenChanged(void) { [XenraPadEngine.shared updatePolling]; }
 
 void XenraPadNavTouched(void) { [XenraPadEngine.shared clearCursor]; }
 
+// The ring of a control that has to stand outside its scroller. One cursor, so one.
+static __weak CAShapeLayer* g_outerRing;
+
+static CAShapeLayer* MakeRing(CALayer* host) {
+  CAShapeLayer* ring = [CAShapeLayer layer];
+  ring.fillColor = UIColor.clearColor.CGColor;
+  ring.strokeColor = XenraFocus().CGColor;
+  ring.lineWidth = 2;
+  ring.zPosition = 1000;
+  [host addSublayer:ring];
+  return ring;
+}
+
+static void ShapeRing(CAShapeLayer* ring, CGRect frame, CGRect rect) {
+  if (ring.path && CGRectEqualToRect(ring.frame, frame) &&
+      CGRectEqualToRect(CGPathGetPathBoundingBox(ring.path), rect)) {
+    return;
+  }
+  ring.frame = frame;
+  ring.path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:8].CGPath;
+}
+
 void XenraPadRing(UIView* view, BOOL on) {
   static NSString* const kName = @"xenra.pad.ring";
   CAShapeLayer* ring = nil;
   for (CALayer* layer in view.layer.sublayers) {
     if ([layer.name isEqual:kName]) ring = (CAShapeLayer*)layer;
   }
+  CAShapeLayer* outer = g_outerRing;
   if (!on) {
     [ring removeFromSuperlayer];
+    [outer removeFromSuperlayer];
     return;
-  }
-  if (ring && CGRectEqualToRect(ring.frame, view.bounds)) return;
-
-  // Inside the bounds, as a foreground drawable is. A switch or a slider has no
-  // padding of its own to sit in, so there the ring stands off, but not past the
-  // sides of a scroller, which would cut it.
-  CGRect rect = CGRectInset(view.bounds, 1, 1);
-  if ([view isKindOfClass:[UISwitch class]] ||
-      [view isKindOfClass:[UISlider class]] ||
-      [view isKindOfClass:[UISegmentedControl class]]) {
-    rect = CGRectInset(view.bounds, -5, -5);
-    UIScrollView* scroller = NearestScroller(view, nil);
-    if (scroller) {
-      const CGRect room =
-          CGRectInset([scroller convertRect:scroller.bounds toView:view], 1, 0);
-      const CGFloat left = fmax(CGRectGetMinX(rect), CGRectGetMinX(room));
-      const CGFloat right = fmin(CGRectGetMaxX(rect), CGRectGetMaxX(room));
-      rect.origin.x = left;
-      rect.size.width = right - left;
-    }
   }
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
-  if (!ring) {
-    ring = [CAShapeLayer layer];
-    ring.name = kName;
-    ring.fillColor = UIColor.clearColor.CGColor;
-    ring.strokeColor = XenraFocus().CGColor;
-    ring.lineWidth = 2;
-    ring.zPosition = 1000;
-    [view.layer addSublayer:ring];
+  // Inside the bounds, as a foreground drawable is. A switch or a slider has no
+  // padding of its own to sit in, so there the ring stands off. A row runs right up
+  // to the sides of its scroller, which would cut the ring, so then it goes on what
+  // holds the scroller and follows along from there.
+  const BOOL standsOff = [view isKindOfClass:[UISwitch class]] ||
+                         [view isKindOfClass:[UISlider class]] ||
+                         [view isKindOfClass:[UISegmentedControl class]];
+  if (standsOff) {
+    // A slider's bounds are already taller than its thumb.
+    const CGFloat dy = [view isKindOfClass:[UISlider class]] ? 0 : -5;
+    const CGRect rect = CGRectInset(view.bounds, -5, dy);
+    UIScrollView* scroller = NearestScroller(view, nil);
+    const CGRect room =
+        scroller ? [scroller convertRect:scroller.bounds toView:view] : rect;
+    UIView* host = scroller.superview;
+    if (host && (CGRectGetMinX(rect) < CGRectGetMinX(room) ||
+                 CGRectGetMaxX(rect) > CGRectGetMaxX(room))) {
+      [ring removeFromSuperlayer];
+      if (!outer) {
+        outer = MakeRing(host.layer);
+        g_outerRing = outer;
+      }
+      ShapeRing(outer, host.bounds, [view convertRect:rect toView:host]);
+      [CATransaction commit];
+      return;
+    }
+    if (!ring) {
+      ring = MakeRing(view.layer);
+      ring.name = kName;
+    }
+    ShapeRing(ring, view.bounds, rect);
+  } else {
+    if (!ring) {
+      ring = MakeRing(view.layer);
+      ring.name = kName;
+    }
+    ShapeRing(ring, view.bounds, CGRectInset(view.bounds, 1, 1));
   }
-  ring.frame = view.bounds;
-  ring.path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:8].CGPath;
   [CATransaction commit];
 }
 

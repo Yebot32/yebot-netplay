@@ -17,7 +17,7 @@
  *   D-pad, left stick  move, 450 ms to repeat and 250 ms between repeats
  *   A                  press what the cursor is on, acting on release
  *   B                  close the sheet, else what the hint bar's Back does
- *   LB, RB             the settings tab either side of the chosen blade
+ *   LB, RB             the tab either side of the control marked chosen
  *
  * The first direction or A on a screen only places the cursor. B needs no cursor.
  * A touch takes it away and the next input puts it back where it was. It stands
