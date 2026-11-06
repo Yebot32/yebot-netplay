@@ -7,11 +7,77 @@
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
+#include "xenia/base/memory.h"
 
 // Android's five steps. The last was the Vulkan driver, which iOS has no use
 // for; what stands between an iOS install and a running game is JIT, so that
 // step is the one that changed.
 static const NSInteger kSteps = 5;
+
+// Android runs its pages edge to edge, with 24 dp either side. On an iPad a card
+// that wide is mostly air, so the column stops here.
+static const CGFloat kColumn = 680;
+
+// The silver ramp's own tokens. The wizard is the only screen that is ever silver.
+static UIColor* SurfaceContainer(void) { return XenraHex(0xFF212123); }
+static UIColor* OutlineShadow(void) { return XenraHex(0xFF2C2D30); }
+// xaniteog_notice: the same amber in every palette.
+static UIColor* Notice(void) { return XenraHex(0xFFFFD54F); }
+
+static NSString* const kIconMemory =
+    @"M360-400v-160q0-17 11.5-28.5T400-600h160q17 0 28.5 11.5T600-560v160q0 "
+     "17-11.5 28.5T560-360H400q-17 0-28.5-11.5T360-400Zm80-40h80v-80h-80v80Zm-80 "
+     "280v-40h-80q-33 0-56.5-23.5T200-280v-80h-40q-17 0-28.5-11.5T120-400q0-17 "
+     "11.5-28.5T160-440h40v-80h-40q-17 0-28.5-11.5T120-560q0-17 "
+     "11.5-28.5T160-600h40v-80q0-33 23.5-56.5T280-760h80v-40q0-17 "
+     "11.5-28.5T400-840q17 0 28.5 11.5T440-800v40h80v-40q0-17 "
+     "11.5-28.5T560-840q17 0 28.5 11.5T600-800v40h80q33 0 56.5 "
+     "23.5T760-680v80h40q17 0 28.5 11.5T840-560q0 17-11.5 "
+     "28.5T800-520h-40v80h40q17 0 28.5 11.5T840-400q0 17-11.5 "
+     "28.5T800-360h-40v80q0 33-23.5 56.5T680-200h-80v40q0 17-11.5 "
+     "28.5T560-120q-17 0-28.5-11.5T520-160v-40h-80v40q0 17-11.5 "
+     "28.5T400-120q-17 0-28.5-11.5T360-160Zm320-120v-400H280v400h400ZM480-480Z";
+static NSString* const kIconUploadFile =
+    @"M440-367v127q0 17 11.5 28.5T480-200q17 0 28.5-11.5T520-240v-127l36 36q6 6 "
+     "13.5 9t15 2.5q7.5-.5 14.5-3.5t13-9q11-12 "
+     "11.5-28T612-388L508-492q-6-6-13-8.5t-15-2.5q-8 0-15 2.5t-13 8.5L348-388q-12 "
+     "12-11.5 28t12.5 28q12 11 28 11.5t28-11.5l35-35ZM240-80q-33 "
+     "0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h287q16 0 30.5 6t25.5 17l194 "
+     "194q11 11 17 25.5t6 30.5v447q0 33-23.5 56.5T720-80H240Zm280-560v-160H240v640"
+     "h480v-440H560q-17 0-28.5-11.5T520-640ZM240-800v200-200 640-640Z";
+static NSString* const kIconHardDrive =
+    @"M560-200q17 0 28.5-11.5T600-240q0-17-11.5-28.5T560-280q-17 0-28.5 "
+     "11.5T520-240q0 17 11.5 28.5T560-200Zm120 0q17 0 28.5-11.5T720-240q0-17-11.5"
+     "-28.5T680-280q-17 0-28.5 11.5T640-240q0 17 11.5 "
+     "28.5T680-200ZM120-440v-360q0-33 23.5-56.5T200-880h560q33 0 56.5 "
+     "23.5T840-800v360h-80v-360H200v360h-80Zm80 80v200h560v-200H200Zm0 280q-33 "
+     "0-56.5-23.5T120-160v-280h720v280q0 33-23.5 "
+     "56.5T760-80H200Zm0-360h560-560Zm0 80h560-560Z";
+static NSString* const kIconFolderOpen =
+    @"M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h207q16 0 30.5 "
+     "6t25.5 17l57 57h360q17 0 28.5 11.5T880-680q0 17-11.5 "
+     "28.5T840-640H447l-80-80H160v480l79-263q8-26 29.5-41.5T316-560h516q41 0 64.5 "
+     "32.5T909-457l-72 240q-8 26-29.5 41.5T760-160H160Zm84-80h516l72-240H316l-72 "
+     "240Zm-84-262v-218 218Zm84 262 72-240-72 240Z";
+static NSString* const kIconSyncAlt =
+    @"m233-280 76 76q12 12 11.5 28T308-148q-12 11-28 "
+     "11.5T252-148L108-292q-6-6-8.5-13T97-320q0-8 2.5-15t8.5-13l144-144q11-11 "
+     "27.5-11t28.5 11q12 12 12 28.5T308-435l-75 75h567q17 0 28.5 11.5T840-320q0 "
+     "17-11.5 28.5T800-280H233Zm494-320H160q-17 0-28.5-11.5T120-640q0-17 "
+     "11.5-28.5T160-680h567l-76-76q-12-12-11.5-28t12.5-28q12-11 28-11.5t28 "
+     "11.5l144 144q6 6 8.5 13t2.5 15q0 8-2.5 15t-8.5 13L708-468q-11 "
+     "11-27.5 11T652-468q-12-12-12-28.5t12-28.5l75-75Z";
+static NSString* const kIconPlay =
+    @"M320-273v-414q0-17 12-28.5t28-11.5q5 0 10.5 1.5T381-721l326 207q9 6 13.5 "
+     "15t4.5 19q0 10-4.5 19T707-446L381-239q-5 3-10.5 "
+     "4.5T360-233q-16 0-28-11.5T320-273Zm80-207Zm0 134 210-134-210-134v268Z";
+static NSString* const kIconWarning =
+    @"M109-120q-11 0-20-5.5T75-140q-5-9-5.5-19.5T75-180l371-640q6-10 "
+     "15.5-15t19.5-5q10 0 19.5 5t15.5 15l371 640q6 10 5.5 20.5T887-140q-5 9-14 "
+     "14.5t-20 5.5H109Zm69-80h604L480-720 178-200Zm302-40q17 0 "
+     "28.5-11.5T520-280q0-17-11.5-28.5T480-320q-17 0-28.5 11.5T440-280q0 17 11.5 "
+     "28.5T480-240Zm0-120q17 0 28.5-11.5T520-400v-120q0-17-11.5-28.5T480-560q-17 "
+     "0-28.5 11.5T440-520v120q0 17 11.5 28.5T480-360Zm0-100Z";
 
 // BiosFileCheck: advice, not a gate. The file is kept whatever this says.
 static NSString* FileWarning(NSString* key, NSURL* url) {
@@ -48,17 +114,184 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   return nil;
 }
 
+// XenraJitStatusText says universal.js, which is only true where there is a TXM.
+// An M1 has none: StikDebug attaches, and there is no script to assign.
+static NSString* JitStatus(void) {
+  const xe::memory::JitSignatureState state =
+      xe::memory::QueryJitSignatureState();
+  if (state.cs_debugged || !state.get_task_allow) return XenraJitStatusText();
+  return @"Waiting for JIT. Enable it for Xenra in StikDebug, then come back.";
+}
+
+// --- Pieces -----------------------------------------------------------------
+
+// Whatever was just added to `stack` keeps this much air under it.
+static void Gap(UIStackView* stack, CGFloat gap) {
+  [stack setCustomSpacing:gap afterView:stack.arrangedSubviews.lastObject];
+}
+
+static UILabel* Paragraph(NSString* text, CGFloat size, UIColor* color,
+                          CGFloat lineHeight, NSTextAlignment alignment) {
+  NSMutableParagraphStyle* style = [[NSMutableParagraphStyle alloc] init];
+  style.lineHeightMultiple = lineHeight;
+  style.alignment = alignment;
+  UILabel* label = XenraMakeLabel(nil, size, UIFontWeightRegular, color);
+  label.numberOfLines = 0;
+  label.attributedText = [[NSAttributedString alloc]
+      initWithString:text
+          attributes:@{
+            NSFontAttributeName : [UIFont systemFontOfSize:size],
+            NSForegroundColorAttributeName : color,
+            NSParagraphStyleAttributeName : style,
+          }];
+  return label;
+}
+
+// A view that hugs its content, in the middle of a column that stretches.
+static UIView* Centred(UIView* view) {
+  UIView* row = [[UIView alloc] init];
+  row.translatesAutoresizingMaskIntoConstraints = NO;
+  view.translatesAutoresizingMaskIntoConstraints = NO;
+  [row addSubview:view];
+  [NSLayoutConstraint activateConstraints:@[
+    [view.centerXAnchor constraintEqualToAnchor:row.centerXAnchor],
+    [view.topAnchor constraintEqualToAnchor:row.topAnchor],
+    [view.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+    [view.leadingAnchor constraintGreaterThanOrEqualToAnchor:row.leadingAnchor],
+  ]];
+  return row;
+}
+
+static UIView* Indented(UIView* view, CGFloat indent) {
+  UIView* row = [[UIView alloc] init];
+  row.translatesAutoresizingMaskIntoConstraints = NO;
+  view.translatesAutoresizingMaskIntoConstraints = NO;
+  [row addSubview:view];
+  [NSLayoutConstraint activateConstraints:@[
+    [view.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:indent],
+    [view.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+    [view.topAnchor constraintEqualToAnchor:row.topAnchor],
+    [view.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+  ]];
+  return row;
+}
+
+static UIImageView* Icon(NSString* data, CGFloat size, UIColor* tint) {
+  UIImageView* icon =
+      [[UIImageView alloc] initWithImage:XenraMaterialIcon(data, size)];
+  icon.tintColor = tint;
+  icon.translatesAutoresizingMaskIntoConstraints = NO;
+  [icon.widthAnchor constraintEqualToConstant:size].active = YES;
+  [icon.heightAnchor constraintEqualToConstant:size].active = YES;
+  return icon;
+}
+
+// The wizard's cards differ from a settings card by these numbers and no others:
+// SetupCard is 22 / 1.5 / 18 with 6 of elevation, BiosCard 14 / 1 / 12 with 3.
+static XenraCardView* Card(CGFloat radius, CGFloat stroke, CGFloat padding,
+                           CGFloat elevation, UIColor* fill) {
+  XenraCardView* card = [[XenraCardView alloc] initWithFrame:CGRectZero];
+  card.padding = padding;
+  card.backgroundColor = fill;
+  card.layer.cornerRadius = radius;
+  card.layer.borderWidth = stroke;
+  card.layer.borderColor = XenraOutlineVariant().CGColor;
+  card.layer.shadowColor = XenraShadow().CGColor;
+  card.layer.shadowOpacity = 0.4;
+  card.layer.shadowRadius = elevation;
+  card.layer.shadowOffset = CGSizeMake(0, elevation / 2);
+  return card;
+}
+
+// setup_wizard_path_background: a rim, and inset from it a 2 pt silver outline.
+static UIView* PathPill(UILabel* label, CGFloat radius, CGFloat top, CGFloat bottom) {
+  UIView* rim = [[UIView alloc] init];
+  rim.translatesAutoresizingMaskIntoConstraints = NO;
+  rim.backgroundColor = OutlineShadow();
+  rim.layer.cornerRadius = radius;
+  UIView* face = [[UIView alloc] init];
+  face.translatesAutoresizingMaskIntoConstraints = NO;
+  face.backgroundColor = SurfaceContainer();
+  face.layer.cornerRadius = radius - 1;
+  face.layer.borderWidth = 2;
+  face.layer.borderColor = XenraAccent().CGColor;
+  [rim addSubview:face];
+  [rim addSubview:label];
+  [NSLayoutConstraint activateConstraints:@[
+    [face.leadingAnchor constraintEqualToAnchor:rim.leadingAnchor constant:1],
+    [face.trailingAnchor constraintEqualToAnchor:rim.trailingAnchor constant:-1],
+    [face.topAnchor constraintEqualToAnchor:rim.topAnchor constant:1],
+    [face.bottomAnchor constraintEqualToAnchor:rim.bottomAnchor constant:-2],
+    [label.leadingAnchor constraintEqualToAnchor:rim.leadingAnchor constant:15],
+    [label.trailingAnchor constraintEqualToAnchor:rim.trailingAnchor constant:-15],
+    [label.topAnchor constraintEqualToAnchor:rim.topAnchor constant:top],
+    [label.bottomAnchor constraintEqualToAnchor:rim.bottomAnchor constant:-bottom],
+  ]];
+  return rim;
+}
+
+// Android draws the status as bare coloured text. The capsule is ours: it keeps
+// the word from reading as part of the title beside it.
+static UIView* StatusPill(UILabel* label) {
+  UIView* pill = [[UIView alloc] init];
+  pill.translatesAutoresizingMaskIntoConstraints = NO;
+  pill.layer.cornerRadius = 10;
+  [pill addSubview:label];
+  [pill setContentHuggingPriority:UILayoutPriorityRequired
+                          forAxis:UILayoutConstraintAxisHorizontal];
+  [pill setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                        forAxis:UILayoutConstraintAxisHorizontal];
+  [NSLayoutConstraint activateConstraints:@[
+    [label.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:9],
+    [label.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor constant:-9],
+    [label.topAnchor constraintEqualToAnchor:pill.topAnchor constant:3],
+    [label.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor constant:-3],
+  ]];
+  return pill;
+}
+
+// The icon, title and subtitle at the head of a step. BIOS has the compact one,
+// because three cards have to fit under it.
+static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
+                      NSString* title, NSString* body) {
+  [stack addArrangedSubview:Centred(Icon(icon, compact ? 40 : 56, XenraAccent()))];
+  Gap(stack, compact ? 6 : 12);
+  UILabel* heading = XenraMakeLabel(title, compact ? 22 : 24, UIFontWeightBold,
+                                    XenraText());
+  heading.numberOfLines = 0;
+  heading.textAlignment = NSTextAlignmentCenter;
+  [stack addArrangedSubview:heading];
+  if (!body) return;
+  Gap(stack, compact ? 2 : 6);
+  [stack addArrangedSubview:Paragraph(body, compact ? 12 : 14, XenraTextMuted(),
+                                      1.15, NSTextAlignmentCenter)];
+}
+
+// What a pick has to touch, so that nothing else on the page moves.
+@interface XenraSetupSlot : NSObject
+@property(nonatomic, strong) UILabel* status;
+@property(nonatomic, strong) UIView* statusPill;
+@property(nonatomic, strong) UILabel* path;
+@property(nonatomic, strong) UILabel* warning;  // nil for a folder
+@property(nonatomic, strong) UIView* warningRow;
+@end
+
+@implementation XenraSetupSlot
+@end
+
 @interface XenraSetupController () <UIDocumentPickerDelegate>
 @end
 
 @implementation XenraSetupController {
   NSInteger step_;
-  XenraPanelView* panel_;
+  BOOL moving_;
+  UIView* pager_;
   UIView* page_;
   UIStackView* dots_;
-  XenraBladeButton* back_;
-  XenraBladeButton* continue_;
-  UISegmentedControl* orientation_;
+  XenraIconToggleGroup* orientation_;
+  XenraPillButton* back_;
+  XenraPillButton* continue_;
+  NSMutableDictionary<NSString*, XenraSetupSlot*>* slots_;
   NSString* pickingKey_;
   UILabel* jitStatus_;
   NSTimer* jitTimer_;
@@ -66,6 +299,7 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
+  slots_ = [NSMutableDictionary dictionary];
   XenraDashboardBackground* background =
       [[XenraDashboardBackground alloc] initWithFrame:self.view.bounds];
   background.autoresizingMask =
@@ -73,7 +307,7 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   [self.view addSubview:background];
 
   dots_ = [[UIStackView alloc] init];
-  dots_.spacing = 8;
+  dots_.spacing = 5;
   dots_.distribution = UIStackViewDistributionFillEqually;
   dots_.translatesAutoresizingMaskIntoConstraints = NO;
   for (NSInteger i = 0; i < kSteps; i++) {
@@ -84,70 +318,83 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   }
   [self.view addSubview:dots_];
 
-  panel_ = [[XenraPanelView alloc] initWithFrame:CGRectZero];
-  panel_.rounded = YES;
-  panel_.layer.cornerRadius = 24;
-  panel_.clipsToBounds = YES;
-  panel_.translatesAutoresizingMaskIntoConstraints = NO;
-  [self.view addSubview:panel_];
-
+  // btn_setup_language belongs to the left of this. It comes with translations.
   __weak XenraSetupController* weak = self;
-  back_ = [[XenraBladeButton alloc] initWithTitle:@"Back"
-                                           action:^{
-                                             [weak goBack];
-                                           }];
-  continue_ = [[XenraBladeButton alloc] initWithTitle:@"Continue"
-                                               action:^{
-                                                 [weak goOn];
-                                               }];
-  continue_.primary = YES;
-  XenraAddSpring(continue_);
-  orientation_ = [[UISegmentedControl alloc]
-      initWithItems:@[ @"Vertical", @"Horizontal" ]];
-  orientation_.selectedSegmentTintColor = XenraAccent();
-  [orientation_ setTitleTextAttributes:@{
-    NSForegroundColorAttributeName : XenraTextMuted()
-  }
-                              forState:UIControlStateNormal];
-  [orientation_ setTitleTextAttributes:@{
-    NSForegroundColorAttributeName : XenraOnAccent()
-  }
-                              forState:UIControlStateSelected];
-  [orientation_ addTarget:self
-                   action:@selector(orientationChanged)
-         forControlEvents:UIControlEventValueChanged];
+  orientation_ = [[XenraIconToggleGroup alloc]
+      initWithIcons:@[
+        XenraOrientationIcon(@"portrait", 22),
+        XenraOrientationIcon(@"landscape", 22)
+      ]
+             titles:@[ @"Vertical", @"Horizontal" ]];
+  orientation_.onChange = ^(NSInteger index) {
+    [weak orientationChanged:index];
+  };
+  [self.view addSubview:orientation_];
+
+  pager_ = [[UIView alloc] init];
+  pager_.clipsToBounds = YES;
+  pager_.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:pager_];
+
+  UIView* divider = [[UIView alloc] init];
+  divider.backgroundColor = XenraOutlineVariant();
+  divider.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:divider];
+
+  back_ = [[XenraPillButton alloc] initWithTitle:@"Back"
+                                           style:XenraPillOutlined
+                                          action:^{
+                                            [weak goBack];
+                                          }];
+  continue_ = [[XenraPillButton alloc] initWithTitle:@"Continue"
+                                               style:XenraPillFilled
+                                              action:^{
+                                                [weak goOn];
+                                              }];
+  continue_.icon = XenraMaterialIcon(kIconPlay, 22);
+  continue_.iconAtEnd = YES;
   UIView* spacer = [[UIView alloc] init];
-  UIStackView* bottom = [[UIStackView alloc]
-      initWithArrangedSubviews:@[ back_, spacer, orientation_, continue_ ]];
-  bottom.spacing = 12;
+  UIStackView* bottom =
+      [[UIStackView alloc] initWithArrangedSubviews:@[ back_, spacer, continue_ ]];
   bottom.alignment = UIStackViewAlignmentCenter;
   bottom.translatesAutoresizingMaskIntoConstraints = NO;
   [self.view addSubview:bottom];
 
-  NSLayoutConstraint* wide = [panel_.widthAnchor constraintEqualToConstant:680];
-  wide.priority = UILayoutPriorityDefaultHigh;
+  // 18 from the bottom of the screen, or clear of the home indicator if that
+  // is further.
+  NSLayoutConstraint* lift =
+      [bottom.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor
+                                          constant:-18];
+  lift.priority = UILayoutPriorityDefaultHigh;
   UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
   [NSLayoutConstraint activateConstraints:@[
-    [dots_.topAnchor constraintEqualToAnchor:safe.topAnchor constant:20],
-    [dots_.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-    [dots_.widthAnchor constraintEqualToAnchor:panel_.widthAnchor multiplier:0.6],
-    wide,
-    [panel_.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-    [panel_.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor
-                                                      constant:16],
-    [panel_.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor
-                                                    constant:-16],
-    [panel_.topAnchor constraintEqualToAnchor:dots_.bottomAnchor constant:20],
-    [panel_.bottomAnchor constraintEqualToAnchor:bottom.topAnchor constant:-16],
-    [bottom.leadingAnchor constraintEqualToAnchor:panel_.leadingAnchor],
-    [bottom.trailingAnchor constraintEqualToAnchor:panel_.trailingAnchor],
-    [bottom.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-16],
-    [back_.widthAnchor constraintEqualToConstant:130],
-    [continue_.widthAnchor constraintEqualToConstant:160],
+    [orientation_.topAnchor constraintEqualToAnchor:safe.topAnchor constant:16],
+    [orientation_.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor
+                                                constant:-20],
+    [dots_.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:24],
+    [dots_.trailingAnchor constraintEqualToAnchor:orientation_.leadingAnchor
+                                         constant:-14],
+    [dots_.centerYAnchor constraintEqualToAnchor:orientation_.centerYAnchor],
+    [pager_.topAnchor constraintEqualToAnchor:orientation_.bottomAnchor constant:16],
+    [pager_.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [pager_.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    [pager_.bottomAnchor constraintEqualToAnchor:divider.topAnchor],
+    [divider.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [divider.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    [divider.heightAnchor constraintEqualToConstant:1],
+    [divider.bottomAnchor constraintEqualToAnchor:bottom.topAnchor constant:-6],
+    [bottom.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
+    [bottom.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
+    [bottom.bottomAnchor constraintLessThanOrEqualToAnchor:safe.bottomAnchor],
+    lift,
   ]];
 
-  [self syncOrientation];
   [self showStep:0 direction:0];
+}
+
+- (void)viewDidLayoutSubviews {
+  [super viewDidLayoutSubviews];
+  [self syncOrientation];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
@@ -156,18 +403,20 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   jitTimer_ = nil;
 }
 
+// Android's toggle has selectionRequired. Unlocked, which only iOS can be, it
+// shows the way the screen is actually turned.
 - (void)syncOrientation {
   NSString* lock = [XenraSettings stringForKey:@"ui.orientation"
                                       fallback:@"auto"];
-  orientation_.selectedSegmentIndex =
-      [lock isEqual:@"portrait"]    ? 0
-      : [lock isEqual:@"landscape"] ? 1
-                                    : UISegmentedControlNoSegment;
+  const CGSize size = self.view.bounds.size;
+  orientation_.selectedIndex = [lock isEqual:@"portrait"]    ? 0
+                               : [lock isEqual:@"landscape"] ? 1
+                               : size.width > size.height    ? 1
+                                                             : 0;
 }
 
-- (void)orientationChanged {
-  [XenraSettings setString:orientation_.selectedSegmentIndex ? @"landscape"
-                                                             : @"portrait"
+- (void)orientationChanged:(NSInteger)index {
+  [XenraSettings setString:index ? @"landscape" : @"portrait"
                     forKey:@"ui.orientation"];
   XenraApplyOrientation(self);
 }
@@ -175,10 +424,12 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
 // --- Steps ------------------------------------------------------------------
 
 - (void)goBack {
+  if (moving_) return;
   if (step_ > 0) [self showStep:step_ - 1 direction:-1];
 }
 
 - (void)goOn {
+  if (moving_) return;
   if (step_ < kSteps - 1) {
     [self showStep:step_ + 1 direction:1];
   } else {
@@ -197,8 +448,18 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   continue_.title = step_ == kSteps - 1 ? @"Finish" : @"Continue";
 }
 
-// ZoomOutPageTransformer: pages leave and arrive at 85%, half faded, and a
-// little low.
+// ZoomOutPageTransformer at position 1: scaled to 85%, half faded, 6% low, and a
+// whole page along, less the margin the transformer takes back.
+static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
+  const CGFloat scale = 0.85;
+  const CGFloat horizontal = size.width * (1 - scale) / 2;
+  const CGFloat vertical = size.height * (1 - scale) / 2;
+  const CGFloat along = size.width - horizontal + vertical / 2;
+  return CGAffineTransformConcat(
+      CGAffineTransformMakeScale(scale, scale),
+      CGAffineTransformMakeTranslation(side * along, size.height * 0.06));
+}
+
 - (void)showStep:(NSInteger)step direction:(NSInteger)direction {
   step_ = step;
   [jitTimer_ invalidate];
@@ -207,163 +468,304 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   UIView* leaving = page_;
   UIView* arriving = [self buildPage];
   page_ = arriving;
-  arriving.frame = panel_.bounds;
+  arriving.frame = pager_.bounds;
   arriving.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  [panel_ addSubview:arriving];
+  [pager_ addSubview:arriving];
   if (!leaving) return;
-  if (!direction) {
-    [leaving removeFromSuperview];
-    return;
-  }
-  const CGFloat width = panel_.bounds.size.width;
-  const CGFloat height = panel_.bounds.size.height;
-  const CGAffineTransform shrunk = CGAffineTransformMakeScale(0.85, 0.85);
+  const CGSize size = pager_.bounds.size;
   arriving.alpha = 0.5;
-  arriving.transform = CGAffineTransformTranslate(
-      shrunk, direction * width * 0.3, height * 0.06);
+  arriving.transform = AwayPage(size, direction);
+  moving_ = YES;
   XenraAnimate(0.3, 0, XenraCurveStandard,
                ^{
                  arriving.alpha = 1;
                  arriving.transform = CGAffineTransformIdentity;
-                 leaving.alpha = 0;
-                 leaving.transform = CGAffineTransformTranslate(
-                     shrunk, -direction * width * 0.3, height * 0.06);
+                 leaving.alpha = 0.5;
+                 leaving.transform = AwayPage(size, -direction);
                },
                ^{
                  [leaving removeFromSuperview];
+                 self->moving_ = NO;
                });
 }
 
-- (void)refreshPage {
-  [self showStep:step_ direction:0];
-}
-
 - (UIView*)buildPage {
+  [slots_ removeAllObjects];
+  jitStatus_ = nil;
   UIStackView* stack = [[UIStackView alloc] init];
   stack.axis = UILayoutConstraintAxisVertical;
-  stack.spacing = 14;
   stack.translatesAutoresizingMaskIntoConstraints = NO;
   switch (step_) {
     case 0:
       [self buildWelcome:stack];
       break;
     case 1:
-      [self addTitle:@"BIOS Files"
-                body:@"Choose your Xbox BIOS, MCPX ROM, and hard disk image. "
-                      "Original Xbox games need all three. Xbox 360 games "
-                      "need none of them, so you can skip this if that is all "
-                      "you play."
-                  to:stack];
-      [self addSlot:@"mcpx"
+      AddHeader(stack, kIconMemory, YES, @"BIOS Files",
+                @"Choose your Xbox BIOS, MCPX ROM, and hard disk image. Original "
+                 "Xbox games need all three. Xbox 360 games need none of them, "
+                 "so you can skip this if that is all you play.");
+      Gap(stack, 12);
+      [self addFile:@"mcpx"
               title:@"MCPX Boot ROM"
                hint:@"mcpx_1.0.bin · exactly 512 bytes"
              button:@"Choose MCPX ROM"
+               icon:kIconUploadFile
                  to:stack];
-      [self addSlot:@"flash"
+      Gap(stack, 8);
+      [self addFile:@"flash"
               title:@"Flash ROM (BIOS)"
                hint:@"BIOS image · 256 KB, 512 KB or 1 MB"
              button:@"Choose Flash ROM"
+               icon:kIconMemory
                  to:stack];
-      [self addSlot:@"hdd"
+      Gap(stack, 8);
+      [self addFile:@"hdd"
               title:@"Hard Disk"
                hint:@"xbox_hdd.qcow2 · or a raw image"
              button:@"Choose Hard Disk"
+               icon:kIconHardDrive
                  to:stack];
       break;
     case 2:
-      [self addTitle:@"Original Xbox Games Folder"
-                body:@"Pick the folder holding your original Xbox titles. Keep "
-                      "it separate from the Xbox 360 folder: each console "
-                      "scans its own."
-                  to:stack];
-      [self addSlot:@"games.og"
-              title:@"Original Xbox Games"
-               hint:@"Games in Xenra / Games OG are found as well."
-             button:@"Choose Original Xbox Folder"
-                 to:stack];
+      AddHeader(stack, kIconFolderOpen, NO, @"Original Xbox Games Folder",
+                @"Pick the folder holding your original Xbox titles. Keep it "
+                 "separate from the Xbox 360 folder: each console scans its "
+                 "own.");
+      Gap(stack, 20);
+      [self addFolder:@"games.og"
+               button:@"Choose Original Xbox Folder"
+                 note:@"Games in Xenra / Games OG are found as well."
+                   to:stack];
       break;
     case 3:
-      [self addTitle:@"Xbox 360 Games Folder"
-                body:@"Pick the folder holding your Xbox 360 titles. Games "
-                      "copied to Xenra / Games in the Files app are found "
-                      "whether you do this or not."
-                  to:stack];
-      [self addSlot:@"games.360"
-              title:@"Xbox 360 Games"
-               hint:@"Optional. You can set it later."
-             button:@"Choose Xbox 360 Folder"
-                 to:stack];
+      AddHeader(stack, kIconFolderOpen, NO, @"Xbox 360 Games Folder",
+                @"Pick the folder holding your Xbox 360 titles. Games copied to "
+                 "Xenra / Games in the Files app are found whether you do this "
+                 "or not.");
+      Gap(stack, 20);
+      [self addFolder:@"games.360"
+               button:@"Choose Xbox 360 Folder"
+                 note:@"Optional. You can set it later."
+                   to:stack];
       break;
     default:
       [self buildJit:stack];
       break;
   }
 
+  // fillViewport: a short step sits in the middle of the page. BIOS starts at
+  // the top, so that a warning line appearing moves only the cards under it.
+  const BOOL top = step_ == 1;
+  const CGFloat air = top ? 16 : 24;
   UIScrollView* scroll = [[XenraScrollView alloc] init];
-  [scroll addSubview:stack];
+  UIView* holder = [[UIView alloc] init];
+  holder.translatesAutoresizingMaskIntoConstraints = NO;
+  [scroll addSubview:holder];
+  [holder addSubview:stack];
+  UILayoutGuide* content = scroll.contentLayoutGuide;
+  UILayoutGuide* frame = scroll.frameLayoutGuide;
+  NSLayoutConstraint* column = [stack.widthAnchor constraintEqualToConstant:kColumn];
+  column.priority = UILayoutPriorityDefaultHigh;
+  NSLayoutConstraint* fit = [holder.heightAnchor
+      constraintEqualToAnchor:frame.heightAnchor];
+  fit.priority = UILayoutPriorityDefaultLow;
   [NSLayoutConstraint activateConstraints:@[
-    [stack.leadingAnchor constraintEqualToAnchor:scroll.leadingAnchor constant:24],
-    [stack.trailingAnchor constraintEqualToAnchor:scroll.trailingAnchor
-                                         constant:-24],
-    [stack.topAnchor constraintEqualToAnchor:scroll.topAnchor constant:24],
-    [stack.bottomAnchor constraintEqualToAnchor:scroll.bottomAnchor constant:-24],
-    [stack.widthAnchor constraintEqualToAnchor:scroll.widthAnchor constant:-48],
+    [holder.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+    [holder.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+    [holder.topAnchor constraintEqualToAnchor:content.topAnchor],
+    [holder.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
+    [holder.widthAnchor constraintEqualToAnchor:frame.widthAnchor],
+    [holder.heightAnchor constraintGreaterThanOrEqualToAnchor:frame.heightAnchor],
+    fit,
+    column,
+    [stack.widthAnchor constraintLessThanOrEqualToAnchor:holder.widthAnchor
+                                                constant:-48],
+    [stack.centerXAnchor constraintEqualToAnchor:holder.centerXAnchor],
+    [stack.topAnchor constraintGreaterThanOrEqualToAnchor:holder.topAnchor
+                                                 constant:air],
+    [stack.bottomAnchor constraintLessThanOrEqualToAnchor:holder.bottomAnchor
+                                                 constant:-air],
+    top ? [stack.topAnchor constraintEqualToAnchor:holder.topAnchor constant:air]
+        : [stack.centerYAnchor constraintEqualToAnchor:holder.centerYAnchor],
   ]];
   return scroll;
 }
 
-- (void)addTitle:(NSString*)title
-            body:(NSString*)body
-              to:(UIStackView*)stack {
-  UILabel* heading = XenraMakeLabel(title, 24, UIFontWeightBold, XenraText());
-  heading.numberOfLines = 0;
-  [stack addArrangedSubview:heading];
-  UILabel* text = XenraMakeLabel(body, 14, UIFontWeightRegular, XenraTextMuted());
-  text.numberOfLines = 0;
-  [stack addArrangedSubview:text];
-}
-
 - (void)buildWelcome:(UIStackView*)stack {
+  // The artwork has a wide empty margin. Android blows it up 1.65 times inside
+  // a 112 dp box and lets the box crop it.
+  UIView* box = [[UIView alloc] init];
+  box.clipsToBounds = YES;
+  box.translatesAutoresizingMaskIntoConstraints = NO;
   UIImageView* logo =
       [[UIImageView alloc] initWithImage:XenraBundleImage(@"setup_logo_x.png")];
   logo.contentMode = UIViewContentModeScaleAspectFit;
-  [logo.heightAnchor constraintEqualToConstant:120].active = YES;
-  [stack addArrangedSubview:logo];
-  [self addTitle:@"Welcome to Xenra"
-            body:@"Xenra is an emulator frontend for running Xbox software on "
-                  "iOS.\n\nXenra is an open-source project and is not "
-                  "affiliated with or endorsed by Microsoft in any way. This "
-                  "project is intended for educational and research purposes "
-                  "as we continue developing and porting the emulator to iOS."
-              to:stack];
-  UILabel* legal = XenraMakeLabel(@"⚠ Legal Notice", 15, UIFontWeightBold,
-                                  XenraWarning());
+  logo.frame = CGRectMake(0, 0, 112, 112);
+  logo.transform = CGAffineTransformMakeScale(1.65, 1.65);
+  [box addSubview:logo];
+  [box.widthAnchor constraintEqualToConstant:112].active = YES;
+  [box.heightAnchor constraintEqualToConstant:112].active = YES;
+  [stack addArrangedSubview:Centred(box)];
+  Gap(stack, 6);
+
+  UILabel* title = XenraMakeLabel(nil, 28, UIFontWeightBold, XenraText());
+  title.attributedText = [[NSAttributedString alloc]
+      initWithString:@"Welcome to Xenra"
+          attributes:@{
+            NSFontAttributeName : [UIFont systemFontOfSize:28
+                                                    weight:UIFontWeightBold],
+            NSForegroundColorAttributeName : XenraText(),
+            NSKernAttributeName : @(28 * 0.06),
+          }];
+  title.textAlignment = NSTextAlignmentCenter;
+  [stack addArrangedSubview:title];
+  Gap(stack, 8);
+
+  XenraCardView* about = Card(22, 1.5, 18, 6, XenraSurfaceVariant());
+  UILabel* text = XenraMakeLabel(nil, 14, UIFontWeightRegular, XenraTextSecondary());
+  text.numberOfLines = 0;
+  text.attributedText = XenraBodyText(
+      @"Xenra is an emulator frontend for running Xbox software on iOS.\n\nXenra "
+       "is an open-source project and is not affiliated with or endorsed by "
+       "Microsoft in any way. This project is intended for educational and "
+       "research purposes as we continue developing and porting the emulator "
+       "to iOS.",
+      14, XenraTextSecondary());
+  [about.body addArrangedSubview:text];
+  [stack addArrangedSubview:about];
+  Gap(stack, 6);
+
+  XenraCardView* legal = Card(12, 1, 12, 2, XenraSurface());
+  [legal.body addArrangedSubview:XenraMakeLabel(@"⚠ Legal Notice", 12,
+                                                UIFontWeightMedium, Notice())];
+  Gap(legal.body, 4);
+  [legal.body
+      addArrangedSubview:
+          Paragraph(@"We do not condone piracy. BIOS files and game backups "
+                     "must be legally owned. While emulator software itself is "
+                     "legal, downloading or distributing copyrighted BIOS files "
+                     "or games without ownership is illegal. Please be "
+                     "responsible and cautious online.",
+                    12, XenraTextMuted(), 1.3, NSTextAlignmentNatural)];
   [stack addArrangedSubview:legal];
-  UILabel* notice = XenraMakeLabel(
-      @"We do not condone piracy. BIOS files and game backups must be legally "
-       "owned. While emulator software itself is legal, downloading or "
-       "distributing copyrighted BIOS files or games without ownership is "
-       "illegal. Please be responsible and cautious online.",
-      14, UIFontWeightRegular, XenraTextMuted());
-  notice.numberOfLines = 0;
-  [stack addArrangedSubview:notice];
+  Gap(stack, 4);
+
   __weak XenraSetupController* weak = self;
-  [stack addArrangedSubview:[[XenraBladeButton alloc]
-                                initWithTitle:@"Privacy policy"
-                                       action:^{
-                                         XenraShowPrivacyPolicy(weak.view);
-                                       }]];
+  XenraPillButton* privacy =
+      [[XenraPillButton alloc] initWithTitle:@"Privacy policy"
+                                       style:XenraPillText
+                                      action:^{
+                                        XenraShowPrivacyPolicy(weak.view);
+                                      }];
+  privacy.contentColor = Notice();
+  [stack addArrangedSubview:Centred(privacy)];
 }
 
-- (void)addSlot:(NSString*)key
+// A BiosCard.
+- (void)addFile:(NSString*)key
           title:(NSString*)title
            hint:(NSString*)hint
          button:(NSString*)button
+           icon:(NSString*)icon
              to:(UIStackView*)stack {
-  UILabel* heading = XenraMakeLabel(title, 15, UIFontWeightBold, XenraText());
-  UILabel* requirement =
-      XenraMakeLabel(hint, 12, UIFontWeightRegular, XenraTextMuted());
+  XenraSetupSlot* slot = [[XenraSetupSlot alloc] init];
+  XenraCardView* card = Card(14, 1, 12, 3, XenraSurfaceVariant());
+  UIStackView* body = card.body;
+
+  UILabel* heading = XenraMakeLabel(title, 14, UIFontWeightMedium, XenraText());
+  [heading setContentHuggingPriority:UILayoutPriorityDefaultLow
+                             forAxis:UILayoutConstraintAxisHorizontal];
+  [heading
+      setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                      forAxis:UILayoutConstraintAxisHorizontal];
+  slot.status = XenraMakeLabel(nil, 11, UIFontWeightMedium, XenraTextMuted());
+  slot.statusPill = StatusPill(slot.status);
+  UIStackView* top = [[UIStackView alloc] initWithArrangedSubviews:@[
+    Icon(icon, 20, XenraAccent()), heading, slot.statusPill
+  ]];
+  top.spacing = 8;
+  top.alignment = UIStackViewAlignmentCenter;
+  [body addArrangedSubview:top];
+
+  [body addArrangedSubview:Indented(XenraMakeLabel(hint, 12, UIFontWeightRegular,
+                                                   XenraTextMuted()),
+                                    28)];
+  Gap(body, 8);
+
+  [body addArrangedSubview:[self pickButton:button icon:icon key:key]];
+  Gap(body, 6);
+
+  slot.path = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
+  slot.path.lineBreakMode = NSLineBreakByTruncatingMiddle;
+  [slot.path.heightAnchor constraintGreaterThanOrEqualToConstant:18].active = YES;
+  [body addArrangedSubview:PathPill(slot.path, 12, 3, 4)];
+  Gap(body, 6);
+
+  slot.warning = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraWarning());
+  slot.warning.numberOfLines = 0;
+  UIStackView* warning = [[UIStackView alloc]
+      initWithArrangedSubviews:@[ Icon(kIconWarning, 16, XenraWarning()), slot.warning ]];
+  warning.spacing = 6;
+  warning.alignment = UIStackViewAlignmentCenter;
+  slot.warningRow = warning;
+  [body addArrangedSubview:warning];
+
+  [stack addArrangedSubview:card];
+  slots_[key] = slot;
+  [self paintSlot:key];
+}
+
+// The folder steps' card: the path, the button, then the status under them.
+- (void)addFolder:(NSString*)key
+           button:(NSString*)button
+             note:(NSString*)note
+               to:(UIStackView*)stack {
+  XenraSetupSlot* slot = [[XenraSetupSlot alloc] init];
+  XenraCardView* card = Card(18, 1.5, 16, 6, XenraSurfaceVariant());
+  UIStackView* body = card.body;
+
+  slot.path = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
+  slot.path.numberOfLines = 2;
+  slot.path.lineBreakMode = NSLineBreakByTruncatingMiddle;
+  [body addArrangedSubview:PathPill(slot.path, 16, 13, 14)];
+  Gap(body, 12);
+
+  [body addArrangedSubview:[self pickButton:button icon:kIconFolderOpen key:key]];
+  Gap(body, 8);
+
+  slot.status = XenraMakeLabel(nil, 12, UIFontWeightMedium, XenraTextMuted());
+  slot.statusPill = StatusPill(slot.status);
+  [body addArrangedSubview:Centred(slot.statusPill)];
+  Gap(body, 10);
+
+  UILabel* detail = XenraMakeLabel(note, 11, UIFontWeightMedium, XenraTextMuted());
+  detail.numberOfLines = 0;
+  detail.textAlignment = NSTextAlignmentCenter;
+  [body addArrangedSubview:detail];
+
+  [stack addArrangedSubview:card];
+  slots_[key] = slot;
+  [self paintSlot:key];
+}
+
+- (XenraPillButton*)pickButton:(NSString*)title
+                          icon:(NSString*)icon
+                           key:(NSString*)key {
+  __weak XenraSetupController* weak = self;
+  XenraPillButton* button = [[XenraPillButton alloc] initWithTitle:title
+                                                             style:XenraPillOutlined
+                                                            action:^{
+                                                              [weak pick:key];
+                                                            }];
+  button.icon = XenraMaterialIcon(icon, 22);
+  return button;
+}
+
+// Everything that depends on what has been picked. A pick calls this and nothing
+// else, so the page keeps its scroll position and the other slots stay as they are.
+- (void)paintSlot:(NSString*)key {
+  XenraSetupSlot* slot = slots_[key];
   NSURL* picked = [XenraSettings urlForBookmark:key];
   NSString* warning = nil;
   if (picked && ![key hasPrefix:@"games"]) {
@@ -371,49 +773,53 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
     warning = FileWarning(key, picked);
     [picked stopAccessingSecurityScopedResource];
   }
-  UILabel* status = XenraMakeLabel(
-      !picked ? @"Tap to choose" : warning ? @"Check this" : @"Ready", 13,
-      UIFontWeightBold,
-      !picked ? XenraTextMuted() : warning ? XenraWarning() : XenraAccent());
-  UILabel* path = XenraMakeLabel(picked.lastPathComponent ?: @"Not set", 13,
-                                 UIFontWeightRegular, XenraTextMuted());
-  path.lineBreakMode = NSLineBreakByTruncatingMiddle;
-  UIView* spacer = [[UIView alloc] init];
-  UIStackView* top =
-      [[UIStackView alloc] initWithArrangedSubviews:@[ heading, spacer, status ]];
-  [stack addArrangedSubview:top];
-  [stack addArrangedSubview:requirement];
-  [stack addArrangedSubview:path];
-  if (warning) {
-    UILabel* reason =
-        XenraMakeLabel(warning, 12, UIFontWeightRegular, XenraWarning());
-    reason.numberOfLines = 0;
-    [stack addArrangedSubview:reason];
-  }
-  __weak XenraSetupController* weak = self;
-  [stack addArrangedSubview:[[XenraBladeButton alloc]
-                                initWithTitle:button
-                                       action:^{
-                                         [weak pick:key];
-                                       }]];
+  UIColor* color = !picked   ? XenraTextMuted()
+                   : warning ? XenraWarning()
+                             : XenraAccent();
+  slot.status.text = !picked ? @"Tap to choose" : warning ? @"Check this" : @"Ready";
+  slot.status.textColor = color;
+  slot.statusPill.backgroundColor = [color colorWithAlphaComponent:0.14];
+  slot.path.text = picked.lastPathComponent ?: @"Not set";
+  slot.warning.text = warning;
+  slot.warningRow.hidden = warning == nil;
 }
 
 - (void)buildJit:(UIStackView*)stack {
-  [self addTitle:@"JIT"
-            body:@"Xbox 360 games need JIT, which iOS only allows while a "
-                  "debugger tool has attached to Xenra. That takes two things: "
-                  "an install signed with a development certificate, and "
-                  "StikDebug with universal.js assigned to Xenra.\n\nEnable it "
-                  "once per launch. Tapping a game does this for you."
-              to:stack];
-  jitStatus_ = XenraMakeLabel(nil, 14, UIFontWeightBold, XenraText());
+  AddHeader(stack, kIconSyncAlt, NO, @"JIT", nil);
+  Gap(stack, 14);
+
+  XenraCardView* about = Card(16, 1.5, 16, 6, XenraSurfaceVariant());
+  [about.body
+      addArrangedSubview:
+          Paragraph(@"Games need JIT, which iOS only allows while a debugger "
+                     "tool has attached to Xenra. That takes two things: an "
+                     "install signed with a development certificate, and JIT "
+                     "enabled for Xenra in StikDebug.",
+                    14, XenraTextMuted(), 1.4, NSTextAlignmentNatural)];
+  [stack addArrangedSubview:about];
+  Gap(stack, 8);
+
+  XenraCardView* status = Card(18, 1.5, 16, 6, XenraSurfaceVariant());
+  jitStatus_ = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
   jitStatus_.numberOfLines = 0;
-  [stack addArrangedSubview:jitStatus_];
-  [stack addArrangedSubview:[[XenraBladeButton alloc]
-                                initWithTitle:@"Enable JIT"
-                                       action:^{
-                                         XenraOpenJitEnabler();
-                                       }]];
+  [status.body addArrangedSubview:PathPill(jitStatus_, 16, 13, 14)];
+  Gap(status.body, 12);
+  XenraPillButton* enable =
+      [[XenraPillButton alloc] initWithTitle:@"Enable JIT"
+                                       style:XenraPillOutlined
+                                      action:^{
+                                        XenraOpenJitEnabler();
+                                      }];
+  enable.icon = XenraMaterialIcon(kIconSyncAlt, 22);
+  [status.body addArrangedSubview:enable];
+  [stack addArrangedSubview:status];
+  Gap(stack, 12);
+
+  [stack addArrangedSubview:Paragraph(@"Enable it once per launch. Tapping a game "
+                                       "does this for you.",
+                                      12, XenraTextMuted(), 1.15,
+                                      NSTextAlignmentCenter)];
+
   [self updateJit];
   __weak XenraSetupController* weak = self;
   jitTimer_ = [NSTimer scheduledTimerWithTimeInterval:1
@@ -424,8 +830,12 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
 }
 
 - (void)updateJit {
-  jitStatus_.text = XenraJitStatusText();
-  jitStatus_.textColor = XenraJitActive() ? XenraAccent() : XenraWarning();
+  [self showJit:JitStatus() active:XenraJitActive()];
+}
+
+- (void)showJit:(NSString*)text active:(BOOL)active {
+  jitStatus_.text = text;
+  jitStatus_.textColor = active ? XenraAccent() : XenraWarning();
 }
 
 // --- Picking ----------------------------------------------------------------
@@ -450,8 +860,28 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   [XenraSettings storeBookmark:url key:pickingKey_];
   [url stopAccessingSecurityScopedResource];
   [XenraSettings holdPickedFiles];
-  [self refreshPage];
+  [self paintSlot:pickingKey_];
 }
+
+#ifdef XENRA_UITEST
+// The system picker cannot be driven from the tour, so it answers for it.
+- (void)tourPick:(NSString*)key url:(NSURL*)url {
+  pickingKey_ = key;
+  [self documentPicker:(id)self didPickDocumentsAtURLs:@[ url ]];
+}
+
+- (UIScrollView*)tourPage {
+  return (UIScrollView*)page_;
+}
+
+// The simulator's stub always reports JIT on.
+- (void)tourShowJitWaiting {
+  [jitTimer_ invalidate];
+  jitTimer_ = nil;
+  [self showJit:@"Waiting for JIT. Enable it for Xenra in StikDebug, then come back."
+         active:NO];
+}
+#endif
 
 // --- Finish -----------------------------------------------------------------
 
@@ -460,8 +890,8 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
 // completed stays completed whether or not the pretty part gets to finish.
 - (void)finish {
   [XenraSettings setSetupComplete:YES];
-  continue_.enabled = NO;
   UIView* root = self.view;
+  root.userInteractionEnabled = NO;
   UIWindow* window = root.window;
   XenraAnimate(0.3, 0, XenraCurveEaseInOut,
                ^{

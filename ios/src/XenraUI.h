@@ -106,6 +106,9 @@ typedef NS_ENUM(NSInteger, XenraPillStyle) {
 @property(nonatomic, assign) XenraPillStyle style;
 @property(nonatomic, assign) BOOL destructive;
 @property(nonatomic, strong) UIImage* icon;  // template image, 22 pt
+@property(nonatomic, assign) BOOL iconAtEnd;  // after the label: Continue
+// Label and icon, in place of the style's own. Xaniteog notice text, for one.
+@property(nonatomic, strong) UIColor* contentColor;
 - (instancetype)initWithTitle:(NSString*)title
                         style:(XenraPillStyle)style
                        action:(void (^)(void))action;
@@ -142,6 +145,7 @@ typedef NS_ENUM(NSInteger, XenraPillStyle) {
 // xenraSettingsCardFill, 16 pt padding. Add rows to `body`. Leave 12 pt under it.
 @interface XenraCardView : UIView
 @property(nonatomic, readonly) UIStackView* body;
+@property(nonatomic, assign) CGFloat padding;  // 16
 @end
 
 typedef NS_ENUM(NSInteger, XenraSectionStyle) {
@@ -253,7 +257,7 @@ NSAttributedString* XenraScreenTitle(NSString* text);
 NSAttributedString* XenraBodyText(NSString* text, CGFloat size, UIColor* color);
 
 // One <path> of a VectorDrawable, so an Android icon can be used as it stands.
-// `data` is its pathData; M L H V C S Q A Z in either case are understood.
+// `data` is its pathData; M L H V C S Q T A Z in either case are understood.
 @interface XenraVectorPath : NSObject
 + (instancetype)fill:(NSString*)data;
 + (instancetype)stroke:(NSString*)data width:(CGFloat)width;
@@ -263,6 +267,10 @@ NSAttributedString* XenraBodyText(NSString* text, CGFloat size, UIColor* color);
 // is the drawable's viewportWidth.
 UIImage* XenraVectorImage(NSArray<XenraVectorPath*>* paths, CGFloat viewport,
                           CGFloat size);
+
+// An ic_xaniteog_ icon by its pathData: a filled Material Symbol, viewport 960,
+// drawn in a group with translateY="960", which is why its numbers are negative.
+UIImage* XenraMaterialIcon(NSString* data, CGFloat size);
 
 // ic_orientation_auto, _portrait and _landscape, by the ui.orientation setting.
 UIImage* XenraOrientationIcon(NSString* orientation, CGFloat size);

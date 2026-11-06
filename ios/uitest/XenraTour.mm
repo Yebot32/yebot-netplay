@@ -157,6 +157,52 @@ static void Pressed(NSString* title, NSString* name) {
   });
 }
 
+@interface XenraSetupController (Tour)
+- (void)tourPick:(NSString*)key url:(NSURL*)url;
+- (UIScrollView*)tourPage;
+- (void)tourShowJitWaiting;
+@end
+
+static XenraSetupController* SetupScreen(void) {
+  return (XenraSetupController*)Nav().topViewController;
+}
+
+static NSURL* TourFile(NSString* name, NSUInteger bytes) {
+  NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+  [[NSMutableData dataWithLength:bytes] writeToFile:path atomically:NO];
+  return [NSURL fileURLWithPath:path];
+}
+
+// A29: a pick repaints its own card and leaves the page and its scroll alone. Two
+// wrong files for the warning line, then a good one from the bottom of the page.
+static void SetupPicks(void) {
+  Step(^{
+    [SetupScreen() tourPick:@"flash" url:TourFile(@"wrong-flash.bin", 1000)];
+    [SetupScreen() tourPick:@"hdd" url:TourFile(@"a-disk-image.img", 2000)];
+  });
+  Step(^{
+    UIScrollView* page = [SetupScreen() tourPage];
+    const CGFloat bottom =
+        MAX(0, page.contentSize.height - page.bounds.size.height);
+    [page setContentOffset:CGPointMake(0, bottom) animated:NO];
+    [SetupScreen() tourPick:@"mcpx" url:TourFile(@"mcpx_1.0.bin", 512)];
+    [page layoutIfNeeded];
+    XenraLog([NSString
+        stringWithFormat:@"tour: setup pick same page=%d offset %.0f then %.0f",
+                         page == [SetupScreen() tourPage], bottom,
+                         page.contentOffset.y]);
+  });
+  Both(@"setup-2-picked");
+  // The game screens further on are meant to find no BIOS.
+  Step(^{
+    for (NSString* key in @[ @"mcpx", @"flash", @"hdd" ]) {
+      [NSUserDefaults.standardUserDefaults
+          removeObjectForKey:[@"bookmark." stringByAppendingString:key]];
+    }
+    [XenraSettings holdPickedFiles];
+  });
+}
+
 // A10: a control in a scroller must not light up the moment it is touched, or a
 // drag flashes it. It must light up a moment later, and go out again on a cancel.
 static void PressTiming(NSString* title) {
@@ -481,9 +527,14 @@ void XenraTourStart(UIWindow* window) {
   Rotate(@"landscape");
   for (int page = 1; page <= 4; page++) {
     Both([NSString stringWithFormat:@"setup-%d", page]);
+    if (page == 2) SetupPicks();
     Tap(@"Continue");
   }
   Both(@"setup-5");
+  Step(^{
+    [SetupScreen() tourShowJitWaiting];
+  });
+  Both(@"setup-5-waiting");
   Tap(@"Finish");
   Pause();
   Pause();

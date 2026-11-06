@@ -557,6 +557,17 @@ CGFloat XenraHintBarInset(UIView* view) {
   iconView_.hidden = icon == nil;
 }
 
+- (void)setIconAtEnd:(BOOL)iconAtEnd {
+  _iconAtEnd = iconAtEnd;
+  [row_ removeArrangedSubview:iconView_];
+  [row_ insertArrangedSubview:iconView_ atIndex:iconAtEnd ? 1 : 0];
+}
+
+- (void)setContentColor:(UIColor*)contentColor {
+  _contentColor = contentColor;
+  [self paint];
+}
+
 - (void)setStyle:(XenraPillStyle)style {
   _style = style;
   [self paint];
@@ -589,6 +600,7 @@ CGFloat XenraHintBarInset(UIView* view) {
       stroke = _destructive ? XenraError() : XenraAccentDark();
     }
   }
+  if (_contentColor) content = _contentColor;
   if (!self.enabled) {
     content = [XenraTextMuted() colorWithAlphaComponent:0.5];
     if (_style == XenraPillFilled) fill = XenraOutlineVariant();
@@ -887,7 +899,17 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 
 @end
 
-@implementation XenraCardView
+@implementation XenraCardView {
+  NSArray<NSLayoutConstraint*>* inset_;
+}
+
+- (void)setPadding:(CGFloat)padding {
+  _padding = padding;
+  inset_[0].constant = padding;
+  inset_[1].constant = -padding;
+  inset_[2].constant = padding;
+  inset_[3].constant = -padding;
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
   self = [super initWithFrame:frame];
@@ -901,13 +923,15 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
     _body.axis = UILayoutConstraintAxisVertical;
     _body.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:_body];
-    [NSLayoutConstraint activateConstraints:@[
+    _padding = 16;
+    inset_ = @[
       [_body.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16],
       [_body.trailingAnchor constraintEqualToAnchor:self.trailingAnchor
                                            constant:-16],
       [_body.topAnchor constraintEqualToAnchor:self.topAnchor constant:16],
       [_body.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-16],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:inset_];
   }
   return self;
 }
@@ -1627,6 +1651,15 @@ class PathReader {
           [path addQuadCurveToPoint:at controlPoint:control];
           break;
         }
+        case 't': {
+          const char kind = last | 0x20;
+          control = kind == 'q' || kind == 't'
+                        ? CGPointMake(2 * at.x - control.x, 2 * at.y - control.y)
+                        : at;
+          at = Point(origin);
+          [path addQuadCurveToPoint:at controlPoint:control];
+          break;
+        }
         case 'a': {
           const CGFloat rx = Number(), ry = Number(), angle = Number();
           const BOOL large = Flag(), sweep = Flag();
@@ -1773,6 +1806,12 @@ UIImage* XenraVectorImage(NSArray<XenraVectorPath*>* paths, CGFloat viewport,
         }
       }];
   return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+UIImage* XenraMaterialIcon(NSString* data, CGFloat size) {
+  XenraVectorPath* vector = [XenraVectorPath fill:data];
+  [vector.path applyTransform:CGAffineTransformMakeTranslation(0, 960)];
+  return XenraVectorImage(@[ vector ], 960, size);
 }
 
 UIImage* XenraOrientationIcon(NSString* orientation, CGFloat size) {
