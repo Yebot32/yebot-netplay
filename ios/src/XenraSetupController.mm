@@ -130,13 +130,22 @@ static void Gap(UIStackView* stack, CGFloat gap) {
   [stack setCustomSpacing:gap afterView:stack.arrangedSubviews.lastObject];
 }
 
+// Running text. It must take the width of the column and never argue for one: at
+// equal priority its single-line width beats the column, and the label keeps the
+// height it worked out for that.
+static void Wraps(UILabel* label) {
+  label.numberOfLines = 0;
+  [label setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                         forAxis:UILayoutConstraintAxisHorizontal];
+}
+
 static UILabel* Paragraph(NSString* text, CGFloat size, UIColor* color,
                           CGFloat lineHeight, NSTextAlignment alignment) {
   NSMutableParagraphStyle* style = [[NSMutableParagraphStyle alloc] init];
   style.lineHeightMultiple = lineHeight;
   style.alignment = alignment;
   UILabel* label = XenraMakeLabel(nil, size, UIFontWeightRegular, color);
-  label.numberOfLines = 0;
+  Wraps(label);
   label.attributedText = [[NSAttributedString alloc]
       initWithString:text
           attributes:@{
@@ -237,10 +246,10 @@ static UIView* StatusPill(UILabel* label) {
   pill.translatesAutoresizingMaskIntoConstraints = NO;
   pill.layer.cornerRadius = 10;
   [pill addSubview:label];
-  [pill setContentHuggingPriority:UILayoutPriorityRequired
-                          forAxis:UILayoutConstraintAxisHorizontal];
-  [pill setContentCompressionResistancePriority:UILayoutPriorityRequired
-                                        forAxis:UILayoutConstraintAxisHorizontal];
+  [label setContentHuggingPriority:UILayoutPriorityRequired
+                           forAxis:UILayoutConstraintAxisHorizontal];
+  [label setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                         forAxis:UILayoutConstraintAxisHorizontal];
   [NSLayoutConstraint activateConstraints:@[
     [label.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:9],
     [label.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor constant:-9],
@@ -258,7 +267,7 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
   Gap(stack, compact ? 6 : 12);
   UILabel* heading = XenraMakeLabel(title, compact ? 22 : 24, UIFontWeightBold,
                                     XenraText());
-  heading.numberOfLines = 0;
+  Wraps(heading);
   heading.textAlignment = NSTextAlignmentCenter;
   [stack addArrangedSubview:heading];
   if (!body) return;
@@ -566,7 +575,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   UILayoutGuide* content = scroll.contentLayoutGuide;
   UILayoutGuide* frame = scroll.frameLayoutGuide;
   NSLayoutConstraint* column = [stack.widthAnchor constraintEqualToConstant:kColumn];
-  column.priority = UILayoutPriorityDefaultHigh;
+  column.priority = UILayoutPriorityRequired - 1;
   NSLayoutConstraint* fit = [holder.heightAnchor
       constraintEqualToAnchor:frame.heightAnchor];
   fit.priority = UILayoutPriorityDefaultLow;
@@ -624,7 +633,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
 
   XenraCardView* about = Card(22, 1.5, 18, 6, XenraSurfaceVariant());
   UILabel* text = XenraMakeLabel(nil, 14, UIFontWeightRegular, XenraTextSecondary());
-  text.numberOfLines = 0;
+  Wraps(text);
   text.attributedText = XenraBodyText(
       @"Xenra is an emulator frontend for running Xbox software on iOS.\n\nXenra "
        "is an open-source project and is not affiliated with or endorsed by "
@@ -703,7 +712,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   Gap(body, 6);
 
   slot.warning = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraWarning());
-  slot.warning.numberOfLines = 0;
+  Wraps(slot.warning);
   UIStackView* warning = [[UIStackView alloc]
       initWithArrangedSubviews:@[ Icon(kIconWarning, 16, XenraWarning()), slot.warning ]];
   warning.spacing = 6;
@@ -740,7 +749,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   Gap(body, 10);
 
   UILabel* detail = XenraMakeLabel(note, 11, UIFontWeightMedium, XenraTextMuted());
-  detail.numberOfLines = 0;
+  Wraps(detail);
   detail.textAlignment = NSTextAlignmentCenter;
   [body addArrangedSubview:detail];
 
@@ -801,7 +810,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
 
   XenraCardView* status = Card(18, 1.5, 16, 6, XenraSurfaceVariant());
   jitStatus_ = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
-  jitStatus_.numberOfLines = 0;
+  Wraps(jitStatus_);
   [status.body addArrangedSubview:PathPill(jitStatus_, 16, 13, 14)];
   Gap(status.body, 12);
   XenraPillButton* enable =

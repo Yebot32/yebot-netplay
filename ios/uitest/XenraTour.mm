@@ -191,8 +191,9 @@ static void SetupPicks(void) {
   });
   Step(^{
     UIScrollView* page = [SetupScreen() tourPage];
-    const CGFloat bottom =
-        MAX(0, page.contentSize.height - page.bounds.size.height);
+    // The page fits on an iPad, so give it somewhere to have scrolled to.
+    page.contentInset = UIEdgeInsetsMake(0, 0, 300, 0);
+    const CGFloat bottom = 200;
     [page setContentOffset:CGPointMake(0, bottom) animated:NO];
     [SetupScreen() tourPick:@"mcpx" url:TourFile(@"mcpx_1.0.bin", 512)];
     [page layoutIfNeeded];
@@ -200,6 +201,8 @@ static void SetupPicks(void) {
         stringWithFormat:@"tour: setup pick same page=%d offset %.0f then %.0f",
                          page == [SetupScreen() tourPage], bottom,
                          page.contentOffset.y]);
+    page.contentInset = UIEdgeInsetsZero;
+    [page setContentOffset:CGPointZero animated:NO];
   });
   Both(@"setup-2-picked");
   // The game screens further on are meant to find no BIOS.
@@ -209,6 +212,21 @@ static void SetupPicks(void) {
           removeObjectForKey:[@"bookmark." stringByAppendingString:key]];
     }
     [XenraSettings holdPickedFiles];
+  });
+}
+
+// A page on its way in, a moment after Continue: it should start a screen away.
+static void SetupTransition(void) {
+  Step(^{
+    [Need(@"Continue") sendActionsForControlEvents:UIControlEventTouchUpInside];
+    UIView* page = [SetupScreen() tourPage];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+                     XenraLog([NSString
+                         stringWithFormat:@"tour: setup page at x=%.0f of %.0f",
+                                          page.layer.presentationLayer.frame.origin.x,
+                                          page.superview.bounds.size.width]);
+                   });
   });
 }
 
@@ -844,6 +862,10 @@ void XenraTourStart(UIWindow* window) {
   for (int page = 1; page <= 4; page++) {
     Both([NSString stringWithFormat:@"setup-%d", page]);
     if (page == 2) SetupPicks();
+    if (page == 3) {
+      SetupTransition();
+      continue;
+    }
     Tap(@"Continue");
   }
   Both(@"setup-5");
