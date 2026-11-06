@@ -20,12 +20,15 @@
 #import <UIKit/UIKit.h>
 
 #import "XenraBladeView.h"
+#import "XenraGameScanner.h"
 #import "XenraMotion.h"
 #import "XenraScreens.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
 #include "ios_emu.h"
+
+#include <unistd.h>
 
 int xe_ios_initialize(const char*, const char*, const char*) { return 0; }
 void xe_ios_set_game_view(UIView*) {}
@@ -490,6 +493,23 @@ static void ConsoleTour(NSString* console, NSString* online) {
 
   Tap(@"Game Library");
   Both([NSString stringWithFormat:@"%@-library", console]);
+  Step(^{
+    [Nav().topViewController performSelector:@selector(tourTapItem:)
+                                  withObject:@1];
+  });
+  Both([NSString stringWithFormat:@"%@-library-selected", console]);
+  Tap(@"Actions");
+  Shot([NSString stringWithFormat:@"%@-library-actions", console]);
+  Step(^{
+    [[XenraBladeSheet topSheetIn:TopView()] dismiss];
+  });
+  Tap(@"Back");
+  Tap(@"More");
+  Shot([NSString stringWithFormat:@"%@-library-more", console]);
+  Tap(@"More");
+  Tap(@"Covers");
+  Both([NSString stringWithFormat:@"%@-library-grid", console]);
+  Tap(@"List");
   Pop();
   SettingsTour(console);
 }
@@ -497,6 +517,7 @@ static void ConsoleTour(NSString* console, NSString* online) {
 void XenraTourStart(UIWindow* window) {
   g_window = window;
   g_steps = [NSMutableArray array];
+  XenraScannerSelfTest();
   [NSFileManager.defaultManager createDirectoryAtPath:TourDir()
                           withIntermediateDirectories:YES
                                            attributes:nil
@@ -518,8 +539,10 @@ void XenraTourStart(UIWindow* window) {
                                              attributes:nil
                                                   error:nil];
     for (NSString* name in folders[folder]) {
-      [NSData.data writeToFile:[dir stringByAppendingPathComponent:name]
-                    atomically:NO];
+      NSString* game = [dir stringByAppendingPathComponent:name];
+      [NSData.data writeToFile:game atomically:NO];
+      // Sparse, so the rows show a real size for nothing.
+      truncate(game.fileSystemRepresentation, 3500000000LL + name.length * 40000000LL);
     }
   }
 

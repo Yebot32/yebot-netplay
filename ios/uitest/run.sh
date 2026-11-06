@@ -13,13 +13,12 @@ FLAGS="-target $TARGET -isysroot $SDK -std=c++20 -DXENRA_UITEST -Iios/src -Iios/
 cc() {  # source, extra flags
   clang++ -x objective-c++ $FLAGS $2 -c "$1" -o "build-ui/obj/$(basename "$1").o" || exit 1
 }
-for f in Ambient AppDelegate BladeView DashboardController GameController JitProbe Sampler \
-         LibraryController Logs Motion Settings SettingsController \
+for f in Ambient AppDelegate BladeView ContentInstall Covers DashboardController \
+         GameController GameScanner JitProbe Sampler LibraryController Logs Motion Settings SettingsController \
          SetupController TouchPad UI Xemu; do
   cc "ios/src/Xenra$f.mm" -fobjc-arc &
 done
 cc ios/uitest/XenraTour.mm -fobjc-arc &
-cc ios/src/XenraGameScanner.mm -fno-objc-arc &
 cc ios/src/XenraMetalView.mm -fno-objc-arc &
 cc ios/src/main.mm -fno-objc-arc &
 wait
@@ -28,7 +27,8 @@ ls build-ui/obj | wc -l
 clang++ -target $TARGET -isysroot $SDK build-ui/obj/*.o -o "$APP/Xenra" \
   -framework UIKit -framework Foundation -framework QuartzCore \
   -framework GameController -framework AVFoundation -framework AudioToolbox \
-  -framework UniformTypeIdentifiers -framework Metal -framework CoreGraphics || exit 1
+  -framework UniformTypeIdentifiers -framework Metal -framework CoreGraphics \
+  -framework ImageIO || exit 1
 
 sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.4.5/; s/${MACOSX_BUNDLE_BUNDLE_VERSION}/33/' \
     -e 's/${MACOSX_BUNDLE_EXECUTABLE_NAME}/Xenra/; s/${MACOSX_BUNDLE_GUI_IDENTIFIER}/Ali.Xanite.ui/' \
@@ -37,7 +37,7 @@ sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.4.5/; s/${MACOSX_BUNDLE_BUNDLE
     ios/Info.plist > "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable Xenra' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier Ali.Xanite.ui' "$APP/Info.plist"
-cp ios/res/*.png "$APP/"
+cp ios/res/*.png ios/res/X1_Covers.txt "$APP/"
 xcrun actool ios/res/Launch.xcassets --compile "$APP" --platform iphonesimulator \
   --minimum-deployment-target 16.0 --target-device iphone --target-device ipad \
   --output-format human-readable-text --notices --warnings --errors \
