@@ -137,11 +137,6 @@ static inline UIColor* XenraTextTertiary(void) {
   return XenraPick(0x8AFFFFFF, 0xA3000000, 0xFFA9ACB0);
 }
 
-// xenraAccentLight as words, by the same reasoning as XenraAccentText.
-static inline UIColor* XenraAccentLightText(void) {
-  return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410) : XenraAccentLight();
-}
-
 // xenraBg: also the label colour on a filled accent pill.
 static inline UIColor* XenraBg(void) {
   return XenraPick(0xFF0B0808, 0xFFD6E8AC, 0xFF0A0A0B);
@@ -154,6 +149,10 @@ static inline UIColor* XenraSurfaceVariant(void) {
 }
 static inline UIColor* XenraAccentLight(void) {
   return XenraPick(0xFF7FE07F, 0xCC74A81A, 0xFFDCE1E4);
+}
+// xenraAccentLight as words, by the same reasoning as XenraAccentText.
+static inline UIColor* XenraAccentLightText(void) {
+  return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410) : XenraAccentLight();
 }
 static inline UIColor* XenraAccentDark(void) {
   return XenraPick(0xFF3FA33F, 0xFF74A81A, 0xFF7E868B);
