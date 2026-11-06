@@ -114,7 +114,6 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   return nil;
 }
 
-// An M1 has none: StikDebug attaches, and there is no script to assign.
 static NSString* JitStatus(void) {
   const xe::memory::JitSignatureState state =
       xe::memory::QueryJitSignatureState();

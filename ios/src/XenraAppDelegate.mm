@@ -48,7 +48,7 @@ NSString* XenraJitStatusText(void) {
             "Reinstall with a development certificate, as SideStore, AltStore "
             "or Sideloadly use. Distribution certificates cannot carry it.";
   }
-  return @"Waiting for JIT.\nEnable it in StikDebug, with universal.js assigned "
+  return @"Waiting for JIT.\nEnable it for Xenra in StikDebug, then come back. "
           "The game starts by itself.";
 }
 
