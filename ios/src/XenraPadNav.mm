@@ -22,8 +22,6 @@ constexpr CFTimeInterval kRepeatInterval = 0.250;
 constexpr CFTimeInterval kStepThrottle = 0.160;
 // BaseActivity.bringIntoView.
 constexpr CGFloat kScrollMargin = 16;
-// XenraTravelSettingsPane takes 250 ms.
-constexpr CFTimeInterval kRebuildSettle = 0.3;
 
 enum Direction { kNone, kUp, kDown, kLeft, kRight };
 
@@ -525,7 +523,6 @@ static void BringIntoView(XenraPadSpot* spot) {
   Direction moving_;
   CFTimeInterval nextStep_;
   CFTimeInterval lastStep_;
-  CFTimeInterval cursorLost_;  // when the view under the cursor went away
   BOOL waitForNeutral_;  // what is held from before does not count as a press
 #ifdef XENRA_UITEST
  @public
@@ -628,7 +625,7 @@ static void BringIntoView(XenraPadSpot* spot) {
     previous_ = state;
     return;
   }
-  [self checkCursorAlive];
+  if (focused_ && !IsAlive(focused_, root_)) [self recoverCursor];
   [self keepLit];
 
   if (waitForNeutral_) {
@@ -659,34 +656,20 @@ static void BringIntoView(XenraPadSpot* spot) {
   if (shown && [memory_ objectForKey:root]) [self placeCursorWithSound:NO];
 }
 
-// What replaces a rebuilt row is still settling for a moment: a pane fades and
-// slides in over 250 ms. So the cursor waits that out before it looks.
-- (void)checkCursorAlive {
-  if (!focused_ || IsAlive(focused_, root_)) {
-    cursorLost_ = 0;
-    return;
-  }
-  const CFTimeInterval now = CACurrentMediaTime();
-  if (!cursorLost_) cursorLost_ = now;
-  if (now - cursorLost_ < kRebuildSettle) return;
-  cursorLost_ = 0;
-  [self recoverCursor];
-}
-
-// The row it was on was rebuilt or went away: the nearest one takes over.
+// The row it was on was rebuilt or went away. The nearest one takes over, in the
+// same scroller if it can: a row of a rebuilt pane can be further off than the
+// close arrow beside it, and the cursor should not leave the pane.
 - (void)recoverCursor {
   const CGRect was = focused_.frame;
+  UIScrollView* scroller = focused_.scroller;
   [self clearCursor];
   NSArray<XenraPadSpot*>* spots = Collect(root_, YES);
-  XenraPadSpot* nearest = [self nearestIn:spots to:was];
-#ifdef XENRA_UITEST
-  int clipped = 0;
-  for (XenraPadSpot* spot in spots) clipped += spot.clipped ? 1 : 0;
-  XenraLog([NSString stringWithFormat:@"pad: recover from %.0f,%.0f among %lu, %d clipped, to %.0f,%.0f",
-                                      was.origin.x, was.origin.y,
-                                      (unsigned long)spots.count, clipped,
-                                      nearest.frame.origin.x, nearest.frame.origin.y]);
-#endif
+  NSMutableArray<XenraPadSpot*>* neighbours = [NSMutableArray array];
+  for (XenraPadSpot* spot in spots) {
+    if (scroller && spot.scroller == scroller) [neighbours addObject:spot];
+  }
+  XenraPadSpot* nearest =
+      [self nearestIn:neighbours.count ? neighbours : spots to:was];
   if (nearest) [self moveCursorTo:nearest sound:NO scroll:NO];
 }
 
