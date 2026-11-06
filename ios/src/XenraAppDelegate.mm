@@ -49,8 +49,7 @@ NSString* XenraJitStatusText(void) {
             "or Sideloadly use. Distribution certificates cannot carry it.";
   }
   return @"Waiting for JIT.\nEnable it in StikDebug, with universal.js assigned "
-          "to Xenra, then come back. Keep the tool attached until the game "
-          "has started.";
+          "The game starts by itself.";
 }
 
 void XenraOpenJitEnabler(void) {

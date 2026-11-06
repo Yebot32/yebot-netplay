@@ -114,7 +114,6 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   return nil;
 }
 
-// XenraJitStatusText says universal.js, which is only true where there is a TXM.
 // An M1 has none: StikDebug attaches, and there is no script to assign.
 static NSString* JitStatus(void) {
   const xe::memory::JitSignatureState state =
