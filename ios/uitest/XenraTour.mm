@@ -709,6 +709,10 @@ static void PadTour(NSString* console) {
   Pad(@"R");
   Shot(name(@"settings-pane"));
   Pad(@"RB");  // the cursor stays in the pane
+  Pause();
+  Step(^{
+    PadLog(@"after RB in the pane, want a pane control");
+  });
   Shot(name(@"settings-rb-pane"));
   Pad(@"LB");
   Pad(@"U U U U U U");
@@ -725,7 +729,9 @@ static void PadTour(NSString* console) {
   Pause();
   Pad(@"D");
   Shot(name(@"widget-first"));
-  PadSeek(@"UISlider", @"D");
+  // It starts on the row marked chosen, as it would on a tab.
+  PadSeek(@"UISlider", @"U");
+  PadSeek(@"UISlider", @"U");
   Pad(@"R R");
   Step(^{
     PadLog([NSString
