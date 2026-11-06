@@ -11,6 +11,7 @@ on:
       - 'ios/src/**'
       - 'ios/uitest/**'
       - 'ios/res/**'
+      - 'ios/tools/**'
       - 'ios/Info.plist'
       - '.github/workflows/xenra-ios-ui.yml'
 

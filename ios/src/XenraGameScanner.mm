@@ -5,6 +5,7 @@
  */
 
 #import "XenraGameScanner.h"
+#import "XenraStrings.h"
 
 #import "XenraCovers.h"
 #import "XenraGameProbe.hpp"
@@ -169,7 +170,7 @@ double ModificationTime(const struct stat& st) {
   }
   self.subtitle =
       self.fileSize
-          ? [NSString stringWithFormat:@"Size: %@", FormatSize(self.fileSize)]
+          ? [NSString stringWithFormat:XS(@"Size: %@"), FormatSize(self.fileSize)]
           : label;
 }
 

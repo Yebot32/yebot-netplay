@@ -1,4 +1,6 @@
 #import "XenraScreens.h"
+#import "XenraLanguage.h"
+#import "XenraStrings.h"
 
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -84,31 +86,31 @@ static NSString* FileWarning(NSString* key, NSURL* url) {
   NSNumber* size = nil;
   [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
   if (!size) {
-    return @"That file could not be read. It may have been moved, or the app "
-            "may not have been granted access to it.";
+    return XS(@"That file could not be read. It may have been moved, or the app "
+            "may not have been granted access to it.");
   }
   const unsigned long long bytes = size.unsignedLongLongValue;
   NSString* shown = [NSByteCountFormatter
       stringFromByteCount:(long long)bytes
                countStyle:NSByteCountFormatterCountStyleBinary];
   if ([key isEqual:@"mcpx"] && bytes != 512) {
-    return [NSString stringWithFormat:@"The MCPX boot ROM is exactly 512 bytes. "
+    return [NSString stringWithFormat:XS(@"The MCPX boot ROM is exactly 512 bytes. "
                                        "This file is %@, so it is probably not "
-                                       "the boot ROM.",
+                                       "the boot ROM."),
                                       shown];
   }
   if ([key isEqual:@"flash"] && bytes != 256 * 1024 && bytes != 512 * 1024 &&
       bytes != 1024 * 1024) {
-    return [NSString stringWithFormat:@"An Xbox BIOS image is 256 KB, 512 KB or "
+    return [NSString stringWithFormat:XS(@"An Xbox BIOS image is 256 KB, 512 KB or "
                                        "1 MB. This file is %@, so it is "
-                                       "probably not a BIOS image.",
+                                       "probably not a BIOS image."),
                                       shown];
   }
   if ([key isEqual:@"hdd"] && bytes < 1024ull * 1024 * 1024 &&
       ![url.pathExtension.lowercaseString isEqual:@"qcow2"]) {
-    return [NSString stringWithFormat:@"An Xbox hard-disk image is a .qcow2 "
+    return [NSString stringWithFormat:XS(@"An Xbox hard-disk image is a .qcow2 "
                                        "file, or a raw image of at least 1 GB. "
-                                       "This file is %@ and is not a qcow2.",
+                                       "This file is %@ and is not a qcow2."),
                                       shown];
   }
   return nil;
@@ -118,7 +120,7 @@ static NSString* JitStatus(void) {
   const xe::memory::JitSignatureState state =
       xe::memory::QueryJitSignatureState();
   if (state.cs_debugged || !state.get_task_allow) return XenraJitStatusText();
-  return @"Waiting for JIT. Enable it for Xenra in StikDebug, then come back.";
+  return XS(@"Waiting for JIT. Enable it for Xenra in StikDebug, then come back.");
 }
 
 // --- Pieces -----------------------------------------------------------------
@@ -295,6 +297,7 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
   UIView* pager_;
   UIView* page_;
   UIStackView* dots_;
+  XenraLanguageButton* language_;
   XenraIconToggleGroup* orientation_;
   XenraPillButton* back_;
   XenraPillButton* continue_;
@@ -325,14 +328,17 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
   }
   [self.view addSubview:dots_];
 
-  // btn_setup_language belongs to the left of this. It comes with translations.
   __weak XenraSetupController* weak = self;
+  language_ = [[XenraLanguageButton alloc] initWithAction:^{
+    [weak chooseLanguage];
+  }];
+  [self.view addSubview:language_];
   orientation_ = [[XenraIconToggleGroup alloc]
       initWithIcons:@[
         XenraOrientationIcon(@"portrait", 22),
         XenraOrientationIcon(@"landscape", 22)
       ]
-             titles:@[ @"Vertical", @"Horizontal" ]];
+             titles:@[ XS(@"Vertical"), XS(@"Horizontal") ]];
   orientation_.onChange = ^(NSInteger index) {
     [weak orientationChanged:index];
   };
@@ -348,12 +354,12 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
   divider.translatesAutoresizingMaskIntoConstraints = NO;
   [self.view addSubview:divider];
 
-  back_ = [[XenraPillButton alloc] initWithTitle:@"Back"
+  back_ = [[XenraPillButton alloc] initWithTitle:XS(@"Back")
                                            style:XenraPillOutlined
                                           action:^{
                                             [weak goBack];
                                           }];
-  continue_ = [[XenraPillButton alloc] initWithTitle:@"Continue"
+  continue_ = [[XenraPillButton alloc] initWithTitle:XS(@"Continue")
                                                style:XenraPillFilled
                                               action:^{
                                                 [weak goOn];
@@ -379,7 +385,10 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
     [orientation_.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor
                                                 constant:-20],
     [dots_.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:24],
-    [dots_.trailingAnchor constraintEqualToAnchor:orientation_.leadingAnchor
+    [language_.trailingAnchor constraintEqualToAnchor:orientation_.leadingAnchor
+                                             constant:-8],
+    [language_.centerYAnchor constraintEqualToAnchor:orientation_.centerYAnchor],
+    [dots_.trailingAnchor constraintEqualToAnchor:language_.leadingAnchor
                                          constant:-14],
     [dots_.centerYAnchor constraintEqualToAnchor:orientation_.centerYAnchor],
     [pager_.topAnchor constraintEqualToAnchor:orientation_.bottomAnchor constant:16],
@@ -422,6 +431,13 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
                                                              : 0;
 }
 
+- (void)chooseLanguage {
+  __weak XenraLanguageButton* button = language_;
+  XenraShowLanguagePicker(self.view, ^{
+    [button refresh];
+  });
+}
+
 - (void)orientationChanged:(NSInteger)index {
   [XenraSettings setString:index ? @"landscape" : @"portrait"
                     forKey:@"ui.orientation"];
@@ -452,7 +468,7 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
                                                       : XenraOutlineVariant();
       }];
   back_.hidden = step_ == 0;
-  continue_.title = step_ == kSteps - 1 ? @"Finish" : @"Continue";
+  continue_.title = step_ == kSteps - 1 ? XS(@"Finish") : XS(@"Continue");
 }
 
 // ZoomOutPageTransformer at position 1: scaled to 85%, half faded, 6% low, and a
@@ -508,52 +524,52 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
       [self buildWelcome:stack];
       break;
     case 1:
-      AddHeader(stack, kIconMemory, YES, @"BIOS Files",
-                @"Choose your Xbox BIOS, MCPX ROM, and hard disk image. Original "
+      AddHeader(stack, kIconMemory, YES, XS(@"BIOS Files"),
+                XS(@"Choose your Xbox BIOS, MCPX ROM, and hard disk image. Original "
                  "Xbox games need all three. Xbox 360 games need none of them, "
-                 "so you can skip this if that is all you play.");
+                 "so you can skip this if that is all you play."));
       Gap(stack, 12);
       [self addFile:@"mcpx"
-              title:@"MCPX Boot ROM"
-               hint:@"mcpx_1.0.bin · exactly 512 bytes"
-             button:@"Choose MCPX ROM"
+              title:XS(@"MCPX Boot ROM")
+               hint:XS(@"mcpx_1.0.bin · exactly 512 bytes")
+             button:XS(@"Choose MCPX ROM")
                icon:kIconUploadFile
                  to:stack];
       Gap(stack, 8);
       [self addFile:@"flash"
-              title:@"Flash ROM (BIOS)"
-               hint:@"BIOS image · 256 KB, 512 KB or 1 MB"
-             button:@"Choose Flash ROM"
+              title:XS(@"Flash ROM (BIOS)")
+               hint:XS(@"BIOS image · 256 KB, 512 KB or 1 MB")
+             button:XS(@"Choose Flash ROM")
                icon:kIconMemory
                  to:stack];
       Gap(stack, 8);
       [self addFile:@"hdd"
-              title:@"Hard Disk"
-               hint:@"xbox_hdd.qcow2 · or a raw image"
-             button:@"Choose Hard Disk"
+              title:XS(@"Hard Disk")
+               hint:XS(@"xbox_hdd.qcow2 · or a raw image")
+             button:XS(@"Choose Hard Disk")
                icon:kIconHardDrive
                  to:stack];
       break;
     case 2:
-      AddHeader(stack, kIconFolderOpen, NO, @"Original Xbox Games Folder",
-                @"Pick the folder holding your original Xbox titles. Keep it "
+      AddHeader(stack, kIconFolderOpen, NO, XS(@"Original Xbox Games Folder"),
+                XS(@"Pick the folder holding your original Xbox titles. Keep it "
                  "separate from the Xbox 360 folder: each console scans its "
-                 "own.");
+                 "own."));
       Gap(stack, 20);
       [self addFolder:@"games.og"
-               button:@"Choose Original Xbox Folder"
-                 note:@"Games in Xenra / Games OG are found as well."
+               button:XS(@"Choose Original Xbox Folder")
+                 note:XS(@"Games in Xenra / Games OG are found as well.")
                    to:stack];
       break;
     case 3:
-      AddHeader(stack, kIconFolderOpen, NO, @"Xbox 360 Games Folder",
-                @"Pick the folder holding your Xbox 360 titles. Games copied to "
+      AddHeader(stack, kIconFolderOpen, NO, XS(@"Xbox 360 Games Folder"),
+                XS(@"Pick the folder holding your Xbox 360 titles. Games copied to "
                  "Xenra / Games in the Files app are found whether you do this "
-                 "or not.");
+                 "or not."));
       Gap(stack, 20);
       [self addFolder:@"games.360"
-               button:@"Choose Xbox 360 Folder"
-                 note:@"Optional. You can set it later."
+               button:XS(@"Choose Xbox 360 Folder")
+                 note:XS(@"Optional. You can set it later.")
                    to:stack];
       break;
     default:
@@ -618,12 +634,12 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
 
   UILabel* title = XenraMakeLabel(nil, 28, UIFontWeightBold, XenraText());
   title.attributedText = [[NSAttributedString alloc]
-      initWithString:@"Welcome to Xenra"
+      initWithString:XS(@"Welcome to Xenra")
           attributes:@{
             NSFontAttributeName : [UIFont systemFontOfSize:28
                                                     weight:UIFontWeightBold],
             NSForegroundColorAttributeName : XenraText(),
-            NSKernAttributeName : @(28 * 0.06),
+            NSKernAttributeName : @(XenraKern(28 * 0.06)),
           }];
   title.textAlignment = NSTextAlignmentCenter;
   [stack addArrangedSubview:title];
@@ -633,34 +649,34 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   UILabel* text = XenraMakeLabel(nil, 14, UIFontWeightRegular, XenraTextSecondary());
   Wraps(text);
   text.attributedText = XenraBodyText(
-      @"Xenra is an emulator frontend for running Xbox software on iOS.\n\nXenra "
+      XS(@"Xenra is an emulator frontend for running Xbox software on iOS.\n\nXenra "
        "is an open-source project and is not affiliated with or endorsed by "
        "Microsoft in any way. This project is intended for educational and "
        "research purposes as we continue developing and porting the emulator "
-       "to iOS.",
+       "to iOS."),
       14, XenraTextSecondary());
   [about.body addArrangedSubview:text];
   [stack addArrangedSubview:about];
   Gap(stack, 6);
 
   XenraCardView* legal = Card(12, 1, 12, 2, XenraSurface());
-  [legal.body addArrangedSubview:XenraMakeLabel(@"⚠ Legal Notice", 12,
+  [legal.body addArrangedSubview:XenraMakeLabel(XS(@"⚠ Legal Notice"), 12,
                                                 UIFontWeightMedium, Notice())];
   Gap(legal.body, 4);
   [legal.body
       addArrangedSubview:
-          Paragraph(@"We do not condone piracy. BIOS files and game backups "
+          Paragraph(XS(@"We do not condone piracy. BIOS files and game backups "
                      "must be legally owned. While emulator software itself is "
                      "legal, downloading or distributing copyrighted BIOS files "
                      "or games without ownership is illegal. Please be "
-                     "responsible and cautious online.",
+                     "responsible and cautious online."),
                     12, XenraTextMuted(), 1.3, NSTextAlignmentNatural)];
   [stack addArrangedSubview:legal];
   Gap(stack, 4);
 
   __weak XenraSetupController* weak = self;
   XenraPillButton* privacy =
-      [[XenraPillButton alloc] initWithTitle:@"Privacy policy"
+      [[XenraPillButton alloc] initWithTitle:XS(@"Privacy policy")
                                        style:XenraPillText
                                       action:^{
                                         XenraShowPrivacyPolicy(weak.view);
@@ -783,10 +799,10 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   UIColor* color = !picked   ? XenraTextMuted()
                    : warning ? XenraWarning()
                              : XenraAccent();
-  slot.status.text = !picked ? @"Tap to choose" : warning ? @"Check this" : @"Ready";
+  slot.status.text = !picked ? XS(@"Tap to choose") : warning ? XS(@"Check this") : XS(@"Ready");
   slot.status.textColor = color;
   slot.statusPill.backgroundColor = [color colorWithAlphaComponent:0.14];
-  slot.path.text = picked.lastPathComponent ?: @"Not set";
+  slot.path.text = picked.lastPathComponent ?: XS(@"Not set");
   slot.warning.text = warning;
   slot.warningRow.hidden = warning == nil;
 }
@@ -798,10 +814,10 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   XenraCardView* about = Card(16, 1.5, 16, 6, XenraSurfaceVariant());
   [about.body
       addArrangedSubview:
-          Paragraph(@"Games need JIT, which iOS only allows while a debugger "
+          Paragraph(XS(@"Games need JIT, which iOS only allows while a debugger "
                      "tool has attached to Xenra. That takes two things: an "
                      "install signed with a development certificate, and JIT "
-                     "enabled for Xenra in StikDebug.",
+                     "enabled for Xenra in StikDebug."),
                     14, XenraTextMuted(), 1.4, NSTextAlignmentNatural)];
   [stack addArrangedSubview:about];
   Gap(stack, 8);
@@ -812,7 +828,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   [status.body addArrangedSubview:PathPill(jitStatus_, 16, 13, 14)];
   Gap(status.body, 12);
   XenraPillButton* enable =
-      [[XenraPillButton alloc] initWithTitle:@"Enable JIT"
+      [[XenraPillButton alloc] initWithTitle:XS(@"Enable JIT")
                                        style:XenraPillOutlined
                                       action:^{
                                         XenraOpenJitEnabler();
@@ -822,8 +838,8 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   [stack addArrangedSubview:status];
   Gap(stack, 12);
 
-  [stack addArrangedSubview:Paragraph(@"Enable it once per launch. Tapping a game "
-                                       "does this for you.",
+  [stack addArrangedSubview:Paragraph(XS(@"Enable it once per launch. Tapping a game "
+                                       "does this for you."),
                                       12, XenraTextMuted(), 1.15,
                                       NSTextAlignmentCenter)];
 
@@ -885,7 +901,7 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
 - (void)tourShowJitWaiting {
   [jitTimer_ invalidate];
   jitTimer_ = nil;
-  [self showJit:@"Waiting for JIT. Enable it for Xenra in StikDebug, then come back."
+  [self showJit:XS(@"Waiting for JIT. Enable it for Xenra in StikDebug, then come back.")
          active:NO];
 }
 #endif
@@ -931,13 +947,13 @@ void XenraRestartSetup(UIWindow* window) {
 
 void XenraShowPrivacyPolicy(UIView* host) {
   [XenraBladeSheet showIn:host
-                    title:@"Privacy Policy"
-                  message:@"Xenra processes BIOS, HDD, game images, controller "
+                    title:XS(@"Privacy Policy")
+                  message:XS(@"Xenra processes BIOS, HDD, game images, controller "
                           "input, preferences, and diagnostic logs on your "
                           "device. User-selected game and firmware files are "
                           "not uploaded by the app.\n\nLogs remain in the "
                           "app's own folder unless you share them yourself "
                           "with Share Logs.\n\nLocal data remains until you "
-                          "clear it or delete the app."
+                          "clear it or delete the app.")
                     items:@[]];
 }

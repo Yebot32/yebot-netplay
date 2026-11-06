@@ -1,4 +1,5 @@
 #import "XenraLogs.h"
+#import "XenraStrings.h"
 
 #import <Metal/Metal.h>
 
@@ -220,10 +221,10 @@ void XenraLogsBegin(void) {
   const BOOL session_open = [files fileExistsAtPath:SessionPath()];
   [files removeItemAtPath:SessionPath() error:nil];
   if (crashed) {
-    g_notice = @"Xenra crashed the last time it ran.";
+    g_notice = XS(@"Xenra crashed the last time it ran.");
   } else if (session_open) {
-    g_notice = @"The last game did not exit cleanly. If you did not close it "
-                "yourself, iOS ended it.";
+    g_notice = XS(@"The last game did not exit cleanly. If you did not close it "
+                "yourself, iOS ended it.");
   }
 
   ShelveRuns(@"xenra-core");

@@ -4,6 +4,11 @@
 set -uo pipefail
 OUT="$1"
 mkdir -p "$OUT"
+# Before anything slow: a bad .strings file loses a whole language without a sound.
+perl ios/tools/check_strings.pl ios || exit 1
+for f in ios/res/*.lproj/Localizable.strings; do
+  plutil -lint "$f" >/dev/null || { plutil -lint "$f"; exit 1; }
+done
 SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 TARGET=arm64-apple-ios16.0-simulator
 APP="$PWD/build-ui/Xenra.app"
@@ -14,7 +19,7 @@ cc() {  # source, extra flags
   clang++ -x objective-c++ $FLAGS $2 -c "$1" -o "build-ui/obj/$(basename "$1").o" || exit 1
 }
 for f in Ambient AppDelegate BladeView ContentInstall Covers DashboardController PadNav UiSounds \
-         GameController GameScanner JitProbe Sampler LibraryController Logs Motion Settings SettingsController \
+         GameController GameScanner JitProbe Language Sampler LibraryController Logs Motion Settings SettingsController \
          SetupController TouchPad UI Xemu; do
   cc "ios/src/Xenra$f.mm" -fobjc-arc &
 done
@@ -38,6 +43,9 @@ sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.4.5/; s/${MACOSX_BUNDLE_BUNDLE
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable Xenra' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier Ali.Xanite.ui' "$APP/Info.plist"
 cp ios/res/*.png ios/res/X1_Covers.txt "$APP/"
+cp -R ios/res/*.lproj "$APP/"
+ls -d "$APP"/*.lproj | sed 's/.*\///' | tr '\n' ' '; echo
+[ "$(ls "$APP"/*.lproj/Localizable.strings | wc -l)" -eq 8 ] || { echo "languages missing from the bundle"; exit 1; }
 xcrun actool ios/res/Launch.xcassets --compile "$APP" --platform iphonesimulator \
   --minimum-deployment-target 16.0 --target-device iphone --target-device ipad \
   --output-format human-readable-text --notices --warnings --errors \
@@ -68,6 +76,26 @@ for i in $(seq 1 1500); do
   sleep 1
 done
 kill -INT $VIDEO; wait $VIDEO
+# The main screens in the languages that stress them, as a user with that language
+# set would launch. German and Russian run longest, Arabic is right to left, Japanese
+# is the widest script. A second Arabic run holds the layout left to right. Italian
+# is not a language here, so it must come up English: see "tour: language" in the log.
+if [ -e "$TOUR/done" ]; then
+  for RUN in de ar ar:ltr ja ru it:check; do
+    CODE=${RUN%%:*}
+    MODE=$CODE; EXTRA=""
+    [ "$RUN" = ar:ltr ] && { MODE=ar-ltr; EXTRA="-XenraTourForceLTR YES"; }
+    [ "$RUN" = it:check ] && MODE=check
+    xcrun simctl terminate "$DEVICE" Ali.Xanite.ui 2>/dev/null
+    rm -f "$TOUR/done"
+    xcrun simctl launch "$DEVICE" Ali.Xanite.ui -AppleLanguages "($CODE)" -XenraTourLanguage "$MODE" $EXTRA
+    for i in $(seq 1 300); do
+      [ -e "$TOUR/done" ] && break
+      sleep 1
+    done
+    [ -e "$TOUR/done" ] || echo "language tour $RUN did not finish"
+  done
+fi
 cp "$TOUR"/*.png "$OUT/" 2>/dev/null
 cp "$DATA/Documents/xenra-jit-log.txt" "$OUT/app-log.txt" 2>/dev/null
 cp -R "$DATA/Documents/logs" "$OUT/logs" 2>/dev/null
@@ -77,4 +105,5 @@ cp ~/Library/Logs/DiagnosticReports/Xenra* "$OUT/" 2>/dev/null
 grep -c "tour: shot" "$OUT/app-log.txt" | sed 's/^/screens: /'
 grep "NO SUCH CONTROL" "$OUT/app-log.txt" | head -20
 grep "tour: press\|tour: early" "$OUT/app-log.txt" | sort | uniq -c
+grep "tour: language" "$OUT/app-log.txt"
 [ -e "$TOUR/done" ]

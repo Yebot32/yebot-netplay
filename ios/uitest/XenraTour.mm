@@ -21,9 +21,11 @@
 
 #import "XenraBladeView.h"
 #import "XenraGameScanner.h"
+#import "XenraLanguage.h"
 #import "XenraMotion.h"
 #import "XenraScreens.h"
 #import "XenraSettings.h"
+#import "XenraStrings.h"
 #import "XenraTheme.h"
 #import "XenraPadNav.h"
 #import "XenraUI.h"
@@ -852,9 +854,238 @@ static void ConsoleTour(NSString* console, NSString* online) {
   PadTour(console);
 }
 
+// The language picker and the note after a pick. English goes back to English, so
+// the rest of the tour is not told about a language that is waiting for a relaunch.
+static void PickerTour(void) {
+  Tap(@"App Language");
+  Both(@"setup-language");
+  Tap(@"German");
+  Both(@"setup-language-note");
+  Tap(@"Nicht jetzt");
+  Pause();
+  Tap(@"App Language");
+  Shot(@"land-setup-language-pending");
+  Tap(@"English");
+  Pause();
+  Tap(@"Not Now");
+  Pause();
+  Step(^{
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:@"AppleLanguages"];
+  });
+}
+
+// The main screens in the language the app was launched in, for what a longer word
+// or another script does to them. Titles go through XS() here, as this is the one
+// place the tour reads a screen that is not in English.
+static void LanguageTour(NSString* code) {
+  NSString* (^name)(NSString*) = ^NSString*(NSString* what) {
+    return [NSString stringWithFormat:@"lang-%@-%@", code, what];
+  };
+  // Both() with the language in the name, which it puts land- or port- ahead of.
+  void (^both)(NSString*) = ^(NSString* what) {
+    Both(name(what));
+  };
+  void (^shot)(NSString*) = ^(NSString* what) {
+    Shot([@"land-" stringByAppendingString:name(what)]);
+  };
+  Rotate(@"landscape");
+
+  // Original Xbox, the dark theme.
+  both(@"og-dashboard");
+  Tap(XS(@"Back"));
+  shot(@"og-back-dialog");
+  Tap(XS(@"Back"));
+  Pause();
+  Tap(@"Xbox Live");
+  shot(@"og-online");
+  Tap(XS(@"OK"));
+  Pause();
+
+  Tap(XS(@"Game Library"));
+  both(@"og-library");
+  Step(^{
+    [Nav().topViewController performSelector:@selector(tourTapItem:) withObject:@1];
+  });
+  both(@"og-library-selected");
+  Tap(XS(@"Actions"));
+  shot(@"og-library-actions");
+  Step(^{
+    [[XenraBladeSheet topSheetIn:TopView()] dismiss];
+  });
+  Tap(XS(@"Back"));
+  Tap(XS(@"More"));
+  shot(@"og-library-more");
+  Tap(XS(@"More"));
+  Tap(XS(@"Covers"));
+  shot(@"og-library-grid");
+  Tap(XS(@"List"));
+  Step(^{
+    [Nav().topViewController performSelector:@selector(tourEmpty:) withObject:@YES];
+  });
+  both(@"og-library-empty");
+  Step(^{
+    [Nav().topViewController performSelector:@selector(tourEmpty:) withObject:@NO];
+    XenraToast(TopView(), XS(@"Failed to save custom cover"));
+  });
+  shot(@"og-toast");
+  Pop();
+  Pause();
+
+  Tap(XS(@"Settings"));
+  Pause();
+  Step(^{
+  });
+  for (XenraSettingTab* tab in [XenraSettings tabsForConsole:XenraConsoleOG]) {
+    Tap(tab.title);
+    shot([NSString stringWithFormat:@"og-settings-%lu",
+                                    (unsigned long)[[XenraSettings
+                                        tabsForConsole:XenraConsoleOG] indexOfObject:tab]]);
+    Step(^{
+      [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
+    });
+    shot([NSString stringWithFormat:@"og-settings-%lu-end",
+                                    (unsigned long)[[XenraSettings
+                                        tabsForConsole:XenraConsoleOG] indexOfObject:tab]]);
+  }
+  Tap(XS(@"System"));
+  Pause();
+  both(@"og-settings-system");
+  Tap(XS(@"App Language"));
+  both(@"language-picker");
+  Tap(XS(@"Close"));
+  Pause();
+  Tap(XS(@"AV pack"));
+  shot(@"og-settings-choice");
+  Tap(XS(@"Close"));
+  Pause();
+  Tap(XS(@"Maintenance"));
+  Step(^{
+    [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
+  });
+  Tap(XS(@"About Xenra"));
+  shot(@"og-settings-about");
+  Tap(XS(@"Back"));
+  Pause();
+  Tap(XS(@"Clear shader cache"));
+  shot(@"og-settings-clear");
+  Tap(XS(@"Cancel"));
+  Pause();
+  Step(^{
+    XenraSettingsController* perGame = [[XenraSettingsController alloc] init];
+    perGame.game = @"Crash Bandicoot - The Wrath of Cortex";
+    perGame.gameFile = @"Crash Bandicoot - The Wrath of Cortex (USA).iso";
+    [Nav() pushViewController:perGame animated:YES];
+  });
+  Pause();
+  both(@"og-pergame");
+  Pop();
+  Pause();
+  Pop();
+  Pause();
+
+  // Xbox 360, the light theme.
+  Tap([NSString stringWithFormat:XS(@"Console — %@"), @"Xbox Original"]);
+  Pause();
+  Pause();
+  both(@"360-dashboard");
+  Tap(XS(@"Netplay"));
+  shot(@"360-online");
+  Tap(XS(@"OK"));
+  Pause();
+  Tap(XS(@"Game Library"));
+  both(@"360-library");
+  Pop();
+  Pause();
+  Tap(XS(@"Settings"));
+  Pause();
+  for (XenraSettingTab* tab in [XenraSettings tabsForConsole:XenraConsole360]) {
+    Tap(tab.title);
+    shot([NSString stringWithFormat:@"360-settings-%lu",
+                                    (unsigned long)[[XenraSettings
+                                        tabsForConsole:XenraConsole360] indexOfObject:tab]]);
+  }
+  Tap(XS(@"Rendering"));
+  Pause();
+  Step(^{
+    [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
+  });
+  both(@"360-settings-rendering-end");
+  Step(^{
+    XenraSettingsController* perGame = [[XenraSettingsController alloc] init];
+    perGame.game = @"Halo 3";
+    perGame.gameFile = @"Halo 3.iso";
+    [Nav() pushViewController:perGame animated:YES];
+  });
+  Pause();
+  both(@"360-pergame");
+  Pop();
+  Pause();
+  Pop();
+  Pause();
+
+  // The game and its menu.
+  Step(^{
+    [Nav() pushViewController:[[XenraGameController alloc]
+                                  initWithPath:@"/none.iso"
+                                          name:@"Smashing Drive"]
+                     animated:YES];
+  });
+  Pause();
+  both(@"game-failure");
+  Step(^{
+    [Nav().topViewController performSelector:@selector(showMenu)];
+  });
+  both(@"game-menu");
+  Pop();
+  Pause();
+
+  // Setup, last, because it takes the app back to the start.
+  Step(^{
+    XenraRestartSetup(g_window);
+  });
+  Pause();
+  Pause();
+  for (int page = 1; page <= 5; page++) {
+    both([NSString stringWithFormat:@"setup-%d", page]);
+    if (page == 1) {
+      Tap(XS(@"App Language"));
+      shot(@"setup-language");
+      Tap(XS(@"Close"));
+      Pause();
+      Tap(XS(@"Privacy policy"));
+      shot(@"setup-privacy");
+      Tap(XS(@"OK"));
+      Pause();
+    }
+    if (page < 5) Tap(XS(@"Continue"));
+  }
+  // As the next run expects to find it.
+  Step(^{
+    [XenraSettings setConsole:XenraConsoleOG];
+    [XenraSettings setSetupComplete:YES];
+    [NSUserDefaults.standardUserDefaults synchronize];
+  });
+}
+
 void XenraTourStart(UIWindow* window) {
   g_window = window;
   g_steps = [NSMutableArray array];
+  NSString* language =
+      [NSUserDefaults.standardUserDefaults stringForKey:@"XenraTourLanguage"];
+  if (language) {
+    XenraLog([NSString
+        stringWithFormat:@"tour: language %@ preferred=%@ in bundle=%@ Continue=%@ rtl=%d",
+                         language, NSBundle.mainBundle.preferredLocalizations,
+                         NSBundle.mainBundle.localizations, XS(@"Continue"),
+                         UIApplication.sharedApplication.userInterfaceLayoutDirection ==
+                             UIUserInterfaceLayoutDirectionRightToLeft]);
+    if (![language isEqual:@"check"]) LanguageTour(language);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+                     Advance();
+                   });
+    return;
+  }
   XenraScannerSelfTest();
   [NSFileManager.defaultManager createDirectoryAtPath:TourDir()
                           withIntermediateDirectories:YES
@@ -894,6 +1125,7 @@ void XenraTourStart(UIWindow* window) {
   Rotate(@"landscape");
   for (int page = 1; page <= 4; page++) {
     Both([NSString stringWithFormat:@"setup-%d", page]);
+    if (page == 1) PickerTour();
     if (page == 2) SetupPicks();
     if (page == 3) {
       SetupTransition();

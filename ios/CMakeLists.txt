@@ -30,6 +30,7 @@ set(_xe_ios_arc_sources
   "${_xe_ios_dir}/src/XenraGameController.mm"
   "${_xe_ios_dir}/src/XenraGameScanner.mm"
   "${_xe_ios_dir}/src/XenraJitProbe.mm"
+  "${_xe_ios_dir}/src/XenraLanguage.mm"
   "${_xe_ios_dir}/src/XenraLogs.mm"
   "${_xe_ios_dir}/src/XenraSampler.mm"
   "${_xe_ios_dir}/src/XenraMotion.mm"
@@ -58,10 +59,12 @@ add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/XenraAudio.h"
   "${_xe_ios_dir}/src/XenraAudio.mm"
   "${_xe_ios_dir}/src/XenraAmbient.h"
+  "${_xe_ios_dir}/src/XenraLanguage.h"
   "${_xe_ios_dir}/src/XenraLogs.h"
   "${_xe_ios_dir}/src/XenraMotion.h"
   "${_xe_ios_dir}/src/XenraScreens.h"
   "${_xe_ios_dir}/src/XenraSettings.h"
+  "${_xe_ios_dir}/src/XenraStrings.h"
   "${_xe_ios_dir}/src/XenraTouchPad.h"
   "${_xe_ios_dir}/src/XenraUI.h"
   "${_xe_ios_dir}/src/XenraXemu.h"
@@ -203,6 +206,21 @@ set_source_files_properties("${_xe_ios_dir}/src/XenraLogs.mm" PROPERTIES
 # -fno-objc-arc on the command line, so they win.
 set_source_files_properties(${_xe_ios_arc_sources} PROPERTIES
   COMPILE_OPTIONS "-fobjc-arc")
+
+# Translations. Not through MACOSX_PACKAGE_LOCATION: under Ninja that puts a file in
+# <bundle>/Resources/, and an iOS bundle's resources are at its root, so the folders
+# go to the root by hand, the way Assets.car does. They go under Resources/ as well
+# because a bundle with that folder in it can be read as having its resources there,
+# and a language NSBundle cannot find fails silently, as English.
+foreach(_xe_ios_language ar de es fr ja pt-BR ru zh-Hans)
+  foreach(_xe_ios_place "" "Resources/")
+    add_custom_command(TARGET xenra-ios POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${_xe_ios_dir}/res/${_xe_ios_language}.lproj"
+        "$<TARGET_BUNDLE_CONTENT_DIR:xenra-ios>/${_xe_ios_place}${_xe_ios_language}.lproj"
+      VERBATIM)
+  endforeach()
+endforeach()
 
 # UILaunchScreen names a colour, and only a compiled catalogue at the bundle's root
 # can hold one. Not fatal: without it the launch screen is plain, not broken.

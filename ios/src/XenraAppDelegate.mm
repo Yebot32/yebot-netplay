@@ -1,4 +1,5 @@
 #import "XenraAppDelegate.h"
+#import "XenraStrings.h"
 
 #include <cstdio>
 #include <sys/sysctl.h>
@@ -41,15 +42,15 @@ NSString* XenraJitStatusText(void) {
   const xe::memory::JitSignatureState state =
       xe::memory::QueryJitSignatureState();
   if (state.cs_debugged) {
-    return @"JIT is on.";
+    return XS(@"JIT is on.");
   }
   if (!state.get_task_allow) {
-    return @"This install has no get-task-allow, so iOS will refuse JIT. "
+    return XS(@"This install has no get-task-allow, so iOS will refuse JIT. "
             "Reinstall with a development certificate, as SideStore, AltStore "
-            "or Sideloadly use. Distribution certificates cannot carry it.";
+            "or Sideloadly use. Distribution certificates cannot carry it.");
   }
-  return @"Waiting for JIT.\nEnable it for Xenra in StikDebug, then come back. "
-          "The game starts by itself.";
+  return XS(@"Waiting for JIT.\nEnable it for Xenra in StikDebug, then come back. "
+          "The game starts by itself.");
 }
 
 void XenraOpenJitEnabler(void) {
@@ -75,6 +76,13 @@ void XenraTourStart(UIWindow* window);
 - (BOOL)application:(UIApplication*)application
     didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
   XenraLogsBegin();
+#ifdef XENRA_UITEST
+  // Arabic both ways, to compare.
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"XenraTourForceLTR"]) {
+    UIView.appearance.semanticContentAttribute =
+        UISemanticContentAttributeForceLeftToRight;
+  }
+#endif
 
   self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
   self.window.backgroundColor = UIColor.blackColor;

@@ -1,4 +1,6 @@
 #import "XenraScreens.h"
+#import "XenraLanguage.h"
+#import "XenraStrings.h"
 
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -161,7 +163,7 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
     text.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:text];
     value_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccentText());
-    value_.textAlignment = NSTextAlignmentRight;
+    value_.textAlignment = XenraEndAlignment();
     value_.numberOfLines = 2;
     [self addSubview:value_];
     [NSLayoutConstraint activateConstraints:@[
@@ -339,7 +341,7 @@ void XenraShowAbout(UIView* host) {
     @[ @"Telegram", @"https://t.me/xanite_xbox" ],
     @[ @"GitHub", @"https://github.com/dev-Ali2008/xanite-original-android/tree/main" ],
     @[ @"YouTube", @"https://youtube.com/@emulator_xaniteog?si=v1ai9Gay2IsmII4w" ],
-    @[ @"Patreon (Donate)", @"https://www.patreon.com/cw/Xanite/membership" ],
+    @[ XS(@"Patreon (Donate)"), @"https://www.patreon.com/cw/Xanite/membership" ],
   ];
   __weak UIView* weak = host;
   for (NSArray* link in links) {
@@ -352,17 +354,17 @@ void XenraShowAbout(UIView* host) {
                                         options:@{}
                               completionHandler:^(BOOL success) {
                                 if (!success && weak) {
-                                  XenraToast(weak, @"Unable to open link.");
+                                  XenraToast(weak, XS(@"Unable to open link."));
                                 }
                               }];
                         }]];
   }
   [XenraBladeSheet showIn:host
-                    title:@"About Xenra"
+                    title:XS(@"About Xenra")
                   message:[NSString stringWithFormat:
-                                        @"Version %@\n\nDeveloper and owner: yebot32\n"
+                                        XS(@"Version %@\n\nDeveloper and owner: yebot32\n"
                                          "Founder and previous owner: Ali Alsaadi\n\n"
-                                         "Join the community:",
+                                         "Join the community:"),
                                         version]
                     items:items];
 }
@@ -427,17 +429,17 @@ void XenraShowAbout(UIView* host) {
 
   UILabel* title = XenraMakeLabel(nil, 22, UIFontWeightBold, XenraAccentText());
   title.attributedText = [[NSAttributedString alloc]
-      initWithString:@"Settings"
+      initWithString:XS(@"Settings")
           attributes:@{
             NSFontAttributeName : [UIFont systemFontOfSize:22 weight:UIFontWeightBold],
             NSForegroundColorAttributeName : XenraAccentText(),
-            NSKernAttributeName : @(22 * 0.06),
+            NSKernAttributeName : @(XenraKern(22 * 0.06)),
           }];
   [sidebar addSubview:title];
 
   XenraPressControl* close = [[XenraPressControl alloc] initWithFrame:CGRectZero];
-  close.title = @"Close Settings";
-  close.accessibilityLabel = @"Back";
+  close.title = XS(@"Close Settings");
+  close.accessibilityLabel = XS(@"Back");
   close.action = ^{
     [weak leave];
   };
@@ -871,7 +873,25 @@ void XenraShowAbout(UIView* host) {
   return stack;
 }
 
+// Android's dropdown is a sheet here, and shows the language by its own name.
+- (UIView*)languageRow:(XenraSettingRow*)row {
+  __weak XenraSettingsController* weak = self;
+  XenraSettingsValueRow* view = [[XenraSettingsValueRow alloc] initWithTitle:row.title
+                                                                      detail:row.detail
+                                                                      action:nil];
+  __weak XenraSettingsValueRow* weakView = view;
+  void (^paint)(void) = ^{
+    weakView.value = XenraLanguageName();
+  };
+  view.action = ^{
+    XenraShowLanguagePicker(weak.view, paint);
+  };
+  paint();
+  return view;
+}
+
 - (UIView*)actionForRow:(XenraSettingRow*)row {
+  if ([row.key isEqual:@"ui.language"]) return [self languageRow:row];
   __weak XenraSettingsController* weak = self;
   XenraPillButton* pill = [[XenraPillButton alloc] initWithTitle:row.title
                                                            style:XenraPillOutlined
@@ -888,8 +908,8 @@ void XenraShowAbout(UIView* host) {
     void (^paint)(void) = ^{
       NSURL* picked = [XenraSettings urlForBookmark:@"eeprom"];
       weakHint.text = picked ? picked.lastPathComponent
-                             : @"Using the one the core generated. Choose a file "
-                                "only to bring your own.";
+                             : XS(@"Using the one the core generated. Choose a file "
+                                "only to bring your own.");
       weakHint.hidden = NO;
     };
     paint();
@@ -945,11 +965,11 @@ void XenraShowAbout(UIView* host) {
   __weak XenraSettingsController* weak = self;
   [XenraBladeSheet
       showConfirmIn:self.view
-              title:@"Clear shader cache?"
-            message:@"Games compile their shaders again on next launch, so the "
-                     "first minutes of each will stutter."
-            leading:[XenraBladeItem title:@"Cancel" action:nil]
-           trailing:[XenraBladeItem title:@"Clear"
+              title:XS(@"Clear shader cache?")
+            message:XS(@"Games compile their shaders again on next launch, so the "
+                     "first minutes of each will stutter.")
+            leading:[XenraBladeItem title:XS(@"Cancel") action:nil]
+           trailing:[XenraBladeItem title:XS(@"Clear")
                                    action:^{
                                      [weak clearCache];
                                    }]];
@@ -976,8 +996,8 @@ void XenraShowAbout(UIView* host) {
   for (NSString* path in doomed) {
     if (![files removeItemAtPath:path error:nil]) failed = YES;
   }
-  XenraToast(self.view, failed ? @"Some files could not be removed."
-                               : @"Shader cache cleared.");
+  XenraToast(self.view, failed ? XS(@"Some files could not be removed.")
+                               : XS(@"Shader cache cleared."));
 }
 
 - (void)chooseEeprom:(XenraSettingRow*)row {
@@ -991,11 +1011,11 @@ void XenraShowAbout(UIView* host) {
        title:row.title
      message:nil
        items:@[
-         [XenraBladeItem title:@"Choose another file"
+         [XenraBladeItem title:XS(@"Choose another file")
                         action:^{
                           [weak pickEeprom];
                         }],
-         [XenraBladeItem title:@"Use the generated one"
+         [XenraBladeItem title:XS(@"Use the generated one")
                         action:^{
                           [XenraSettings clearBookmark:@"eeprom"];
                           [XenraSettings holdPickedFiles];
@@ -1066,7 +1086,7 @@ static UIColor* PerGameFill(void) {
   body.translatesAutoresizingMaskIntoConstraints = NO;
   [panel addSubview:body];
 
-  UILabel* heading = XenraMakeLabel(@"Per-Game Settings", 28, UIFontWeightRegular,
+  UILabel* heading = XenraMakeLabel(XS(@"Per-Game Settings"), 28, UIFontWeightRegular,
                                     XenraText());
   [body addArrangedSubview:heading];
   [body setCustomSpacing:12 afterView:heading];
@@ -1082,8 +1102,8 @@ static UIColor* PerGameFill(void) {
     [body setCustomSpacing:12 afterView:file];
   }
   UILabel* intro = XenraMakeLabel(
-      @"Choose only the settings this game should override. Leave a field on Use "
-       "Global to keep the normal app setting.",
+      XS(@"Choose only the settings this game should override. Leave a field on Use "
+       "Global to keep the normal app setting."),
       12, UIFontWeightRegular, XenraTextMuted());
   intro.numberOfLines = 0;
   [body addArrangedSubview:intro];
@@ -1112,7 +1132,7 @@ static UIColor* PerGameFill(void) {
   }
 
   XenraPillButton* clear =
-      [[XenraPillButton alloc] initWithTitle:@"Clear Overrides"
+      [[XenraPillButton alloc] initWithTitle:XS(@"Clear Overrides")
                                        style:XenraPillOutlined
                                       action:^{
                                         [weak clearOverrides];
@@ -1160,9 +1180,9 @@ static UIColor* PerGameFill(void) {
 - (void)paintField:(XenraSettingRow*)row {
   XenraFieldButton* field = fields_[row.key];
   NSString* own = [XenraSettings overrideForRow:row game:_game];
-  field.value = own ? [XenraSettings titleForValue:own row:row] : @"Use Global";
+  field.value = own ? [XenraSettings titleForValue:own row:row] : XS(@"Use Global");
   field.detail = [NSString
-      stringWithFormat:@"Global default: %@",
+      stringWithFormat:XS(@"Global default: %@"),
                        [XenraSettings titleForValue:[XenraSettings valueForRow:row
                                                                           game:nil]
                                                 row:row]];
@@ -1171,7 +1191,7 @@ static UIColor* PerGameFill(void) {
 - (void)openField:(XenraFieldButton*)field row:(XenraSettingRow*)row {
   if (!field) return;
   NSArray<NSString*>* values = [self valuesOf:row];
-  NSMutableArray<NSString*>* titles = [NSMutableArray arrayWithObject:@"Use Global"];
+  NSMutableArray<NSString*>* titles = [NSMutableArray arrayWithObject:XS(@"Use Global")];
   for (NSString* value in values) {
     [titles addObject:[XenraSettings titleForValue:value row:row]];
   }
@@ -1217,7 +1237,7 @@ static UIColor* PerGameFill(void) {
       [self paintField:row];
     }
   }
-  XenraToast(self.view, @"Per-game settings cleared");
+  XenraToast(self.view, XS(@"Per-game settings cleared"));
 }
 
 #ifdef XENRA_UITEST

@@ -1,4 +1,5 @@
 #import "XenraUI.h"
+#import "XenraStrings.h"
 
 #import <GameController/GameController.h>
 
@@ -40,6 +41,22 @@ UILabel* XenraMakeLabel(NSString* text, CGFloat size, UIFontWeight weight,
   return label;
 }
 
+CGFloat XenraKern(CGFloat kern) {
+  static const BOOL solid = [] {
+    NSString* language = NSBundle.mainBundle.preferredLocalizations.firstObject;
+    return [language hasPrefix:@"ar"] || [language hasPrefix:@"ja"] ||
+           [language hasPrefix:@"zh"];
+  }();
+  return solid ? 0 : kern;
+}
+
+NSTextAlignment XenraEndAlignment(void) {
+  return UIApplication.sharedApplication.userInterfaceLayoutDirection ==
+                 UIUserInterfaceLayoutDirectionRightToLeft
+             ? NSTextAlignmentLeft
+             : NSTextAlignmentRight;
+}
+
 NSAttributedString* XenraTrackedSpacing(NSString* text, CGFloat size,
                                         UIColor* color, CGFloat spacing) {
   return [[NSAttributedString alloc]
@@ -48,7 +65,7 @@ NSAttributedString* XenraTrackedSpacing(NSString* text, CGFloat size,
             NSFontAttributeName : [UIFont systemFontOfSize:size
                                                     weight:UIFontWeightBold],
             NSForegroundColorAttributeName : color,
-            NSKernAttributeName : @(size * spacing),
+            NSKernAttributeName : @(XenraKern(size * spacing)),
           }];
 }
 
@@ -1068,7 +1085,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
                          UIControlEventTouchUpOutside |
                          UIControlEventTouchCancel];
     readout_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccentText());
-    readout_.textAlignment = NSTextAlignmentRight;
+    readout_.textAlignment = XenraEndAlignment();
     readout_.adjustsFontSizeToFitWidth = YES;
     readout_.minimumScaleFactor = 0.8;
     UIStackView* line =
@@ -1210,7 +1227,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
               NSFontAttributeName : [UIFont systemFontOfSize:12
                                                       weight:UIFontWeightBold],
               NSForegroundColorAttributeName : XenraTextSecondary(),
-              NSKernAttributeName : @(1.2),
+              NSKernAttributeName : @(XenraKern(1.2)),
             }];
     return;
   }
@@ -1287,6 +1304,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 
 @implementation XenraBladeSheet {
   UIView* panel_;
+  UIView* heading_;  // in place of the title, if it has one
   NSMutableArray<UIView*>* rows_;
   BOOL leaving_;
 }
@@ -1331,7 +1349,10 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   [panel addSubview:column];
 
   __weak XenraBladeSheet* weak = self;
-  if (title.length) {
+  if (heading_) {
+    [column addArrangedSubview:heading_];
+    [column setCustomSpacing:6 afterView:heading_];
+  } else if (title.length) {
     UILabel* header = XenraMakeLabel(nil, 18, UIFontWeightBold, XenraAccentText());
     header.attributedText = XenraScreenTitle(title);
     header.numberOfLines = 2;
@@ -1368,10 +1389,10 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   // The cut corners leave the top right free, and 24 pt of padding keeps the
   // glyph inside the panel's line.
   XenraPressControl* close = [[XenraPressControl alloc] initWithFrame:CGRectZero];
-  close.title = @"Close";
-  close.accessibilityLabel = @"Close";
+  close.title = XS(@"Close");
+  close.accessibilityLabel = XS(@"Close");
   close.padSkipped = YES;  // B is the way out on a pad
-  close.hidden = title.length == 0;
+  close.hidden = title.length == 0 && !heading_;
   close.action = ^{
     [weak dismiss];
   };
@@ -1428,7 +1449,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 - (UIView*)footerWithTrailing:(UIView*)trailing {
   __weak XenraBladeSheet* weak = self;
   XenraHintButton* back = [[XenraHintButton alloc] initWithLetter:@"B"
-                                                            title:@"Back"
+                                                            title:XS(@"Back")
                                                            action:^{
                                                              [weak dismiss];
                                                            }];
@@ -1496,14 +1517,14 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 
   UIView* trailing;
   if (!items.count) {
-    trailing = [[XenraPillButton alloc] initWithTitle:@"OK"
+    trailing = [[XenraPillButton alloc] initWithTitle:XS(@"OK")
                                                 style:XenraPillFilled
                                                action:^{
                                                  [weak dismiss];
                                                }];
   } else if (GCController.controllers.count) {
     trailing = [[XenraHintButton alloc] initWithLetter:@"A"
-                                                 title:@"Select"
+                                                 title:XS(@"Select")
                                                 action:nil];
   }
   [sheet buildTitle:title
@@ -1565,6 +1586,35 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   return sheet;
 }
 
++ (instancetype)showIn:(UIView*)host
+               heading:(UIView*)heading
+                  rows:(NSArray<XenraPressControl*>*)rows {
+  XenraBladeSheet* sheet = [[XenraBladeSheet alloc] initInHost:host
+                                                         title:nil
+                                                      centered:NO];
+  sheet->heading_ = heading;
+  __weak XenraBladeSheet* weak = sheet;
+  UIStackView* body = [[UIStackView alloc] init];
+  body.axis = UILayoutConstraintAxisVertical;
+  body.translatesAutoresizingMaskIntoConstraints = NO;
+  for (XenraPressControl* row in rows) {
+    void (^action)(void) = row.action;
+    row.action = ^{
+      [weak dismiss];
+      if (action) action();
+    };
+    [body addArrangedSubview:row];
+    [sheet->rows_ addObject:row];
+  }
+  [sheet buildTitle:nil
+           centered:NO
+               body:body
+             footer:[sheet footerWithTrailing:nil]];
+  [host addSubview:sheet];
+  [sheet appear];
+  return sheet;
+}
+
 + (instancetype)topSheetIn:(UIView*)host {
   for (UIView* view in host.subviews.reverseObjectEnumerator) {
     if ([view isKindOfClass:[XenraBladeSheet class]]) {
@@ -1611,13 +1661,13 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
     self.translatesAutoresizingMaskIntoConstraints = NO;
     __weak XenraHintBar* weak = self;
     back_ = [[XenraHintButton alloc] initWithLetter:@"B"
-                                              title:@"Back"
+                                              title:XS(@"Back")
                                              action:^{
                                                XenraHintBar* bar = weak;
                                                if (bar.onBack) bar.onBack();
                                              }];
     select_ = [[XenraHintButton alloc] initWithLetter:@"A"
-                                                title:@"Select"
+                                                title:XS(@"Select")
                                                action:nil];
     [self addSubview:back_];
     [self addSubview:select_];

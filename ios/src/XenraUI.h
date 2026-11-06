@@ -209,6 +209,11 @@ typedef NS_ENUM(NSInteger, XenraSectionStyle) {
                       message:(NSString*)message
                       leading:(XenraBladeItem*)leading
                      trailing:(XenraBladeItem*)trailing;
+// dialog_language_picker: `heading` stays put in place of a title, over rows of any
+// control. A row dismisses the sheet and then runs its own action.
++ (instancetype)showIn:(UIView*)host
+               heading:(UIView*)heading
+                  rows:(NSArray<XenraPressControl*>*)rows;
 // The sheet on top in `host`, or nil. Back on a pad closes this first.
 + (instancetype)topSheetIn:(UIView*)host;
 - (void)dismiss;
@@ -251,6 +256,13 @@ UIImage* XenraBundleImage(NSString* name);
 
 UILabel* XenraMakeLabel(NSString* text, CGFloat size, UIFontWeight weight,
                         UIColor* color);
+
+// A kern for this language: none for one that has no use for it. Arabic letters
+// join, and tracking pulls them apart; Chinese and Japanese are set solid.
+CGFloat XenraKern(CGFloat kern);
+
+// The end of a line in this language: right, or left in Arabic.
+NSTextAlignment XenraEndAlignment(void);
 
 // Tracked capitals. Android varies the tracking: blade 0.12, screen title and
 // hint 0.15, meta and section 0.1 to 0.12. XenraTracked is 0.1.

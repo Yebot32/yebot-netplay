@@ -17,6 +17,7 @@
  */
 
 #import "XenraScreens.h"
+#import "XenraStrings.h"
 
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -80,7 +81,7 @@ NSAttributedString* Meta(NSString* text) {
           attributes:@{
             NSFontAttributeName : [UIFont systemFontOfSize:11],
             NSForegroundColorAttributeName : XenraTextTertiary(),
-            NSKernAttributeName : @(1.1),
+            NSKernAttributeName : @(XenraKern(1.1)),
           }];
 }
 
@@ -924,9 +925,9 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   [self.view addSubview:panel_];
 
   UILabel* title = [[UILabel alloc] init];
-  title.attributedText = XenraScreenTitle(@"Game Library");
+  title.attributedText = XenraScreenTitle(XS(@"Game Library"));
   stats_ = [[UILabel alloc] init];
-  stats_.textAlignment = NSTextAlignmentRight;
+  stats_.textAlignment = XenraEndAlignment();
   UIStackView* header =
       [[UIStackView alloc] initWithArrangedSubviews:@[ title, [UIView new], stats_ ]];
   header.alignment = UIStackViewAlignmentCenter;
@@ -940,19 +941,19 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
   __weak XenraLibraryController* weak = self;
   UILabel* display = [[UILabel alloc] init];
-  display.attributedText = XenraTrackedSpacing(@"Display", 10, XenraTextMuted(), 0.12);
+  display.attributedText = XenraTrackedSpacing(XS(@"Display"), 10, XenraTextMuted(), 0.12);
   listButton_ = [[XenraToolButton alloc] initWithIcon:ListIcon()
-                                                title:@"List"
+                                                title:XS(@"List")
                                                action:^{
                                                  [weak setGridMode:NO];
                                                }];
   gridButton_ = [[XenraToolButton alloc] initWithIcon:GridIcon()
-                                                title:@"Covers"
+                                                title:XS(@"Covers")
                                                action:^{
                                                  [weak setGridMode:YES];
                                                }];
   moreButton_ = [[XenraToolButton alloc] initWithIcon:MoreIcon()
-                                                title:@"More"
+                                                title:XS(@"More")
                                                action:^{
                                                  [weak showOverflow];
                                                }];
@@ -985,7 +986,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   [self buildEmptyCard];
 
   gridHint_ = [[UILabel alloc] init];
-  gridHint_.attributedText = Meta(@"Hold a game for options");
+  gridHint_.attributedText = Meta(XS(@"Hold a game for options"));
 
   UIStackView* top = [[UIStackView alloc] initWithArrangedSubviews:@[
     header, tools, loadingRow_, emptyCard_, gridHint_
@@ -1044,13 +1045,13 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
   __weak XenraLibraryController* weak = self;
   XenraPillButton* folder =
-      [[XenraPillButton alloc] initWithTitle:@"Set game folder"
+      [[XenraPillButton alloc] initWithTitle:XS(@"Set game folder")
                                        style:XenraPillFilled
                                       action:^{
                                         [weak pickFolder];
                                       }];
   XenraPillButton* install =
-      [[XenraPillButton alloc] initWithTitle:@"Install content"
+      [[XenraPillButton alloc] initWithTitle:XS(@"Install content")
                                        style:XenraPillOutlined
                                       action:^{
                                         [weak pickContent];
@@ -1099,7 +1100,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   detailSize_ = XenraMakeLabel(nil, 11, UIFontWeightRegular, XenraTextMuted());
   __weak XenraLibraryController* weak = self;
   XenraPillButton* actions =
-      [[XenraPillButton alloc] initWithTitle:@"Actions"
+      [[XenraPillButton alloc] initWithTitle:XS(@"Actions")
                                        style:XenraPillOutlined
                                       action:^{
                                         [weak showActionsForSelected];
@@ -1146,8 +1147,8 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 - (void)buildBar {
   hints_ = [[XenraHintBar alloc] initWithFrame:CGRectZero];
   hints_.panelStyle = YES;
-  hints_.backTitle = @"Back";
-  hints_.selectTitle = @"Open";
+  hints_.backTitle = XS(@"Back");
+  hints_.selectTitle = XS(@"Open");
   __weak XenraLibraryController* weak = self;
   hints_.onBack = ^{
     [weak goBack];
@@ -1335,12 +1336,12 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 - (void)updateHeader {
   const unsigned long count = games_.count;
   stats_.attributedText =
-      Meta([NSString stringWithFormat:@"TOTAL: %lu   AVAILABLE: %lu", count, count]);
+      Meta([NSString stringWithFormat:XS(@"TOTAL: %lu   AVAILABLE: %lu"), count, count]);
 
   const BOOL noCore = self.noCore;
   const BOOL scanning = !noCore && scanner_.scanning;
   [self showBusy:installing_ || (scanning && count == 0)
-         message:installing_ ? nil : @"Scanning games..."];
+         message:installing_ ? nil : XS(@"Scanning games...")];
 
   const BOOL empty = count == 0 && !scanning;
   emptyCard_.hidden = !empty;
@@ -1349,15 +1350,15 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   if (!empty) return;
   emptyActions_.hidden = noCore;
   if (noCore) {
-    emptyText_.text = @"This build has no original Xbox core. Switch the console "
-                       "to Xbox 360 on the dashboard.";
+    emptyText_.text = XS(@"This build has no original Xbox core. Switch the console "
+                       "to Xbox 360 on the dashboard.");
   } else if (scanner_.unreadableFolders.count) {
-    emptyText_.text = @"The games folder could not be read. It may have been "
-                       "moved or deleted.";
+    emptyText_.text = XS(@"The games folder could not be read. It may have been "
+                       "moved or deleted.");
   } else {
     emptyText_.text = [XenraSettings console] == XenraConsole360
-                          ? @"No Xbox 360 games found in this folder."
-                          : @"No supported games found in this folder.";
+                          ? XS(@"No Xbox 360 games found in this folder.")
+                          : XS(@"No supported games found in this folder.");
   }
 }
 
@@ -1527,8 +1528,8 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   detailTitle_.text = game.name;
   // Save states do not exist on this port, and nothing counts content yet: the
   // same two lines Android shows for a game with none.
-  detailSaves_.text = @"0 saves";
-  detailContent_.text = @"0 content items";
+  detailSaves_.text = XS(@"0 saves");
+  detailContent_.text = XS(@"0 content items");
   detailSize_.text =
       game.fileSize
           ? [NSString stringWithFormat:@"%llu MB", game.fileSize / 1024 / 1024]
@@ -1636,7 +1637,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   __weak XenraLibraryController* weak = self;
   NSMutableArray<XenraBladeItem*>* items = [NSMutableArray array];
   [items addObject:[XenraBladeItem
-                       title:@"Per-Game Settings"
+                       title:XS(@"Per-Game Settings")
                       action:^{
                         XenraSettingsController* perGame =
                             [[XenraSettingsController alloc] init];
@@ -1645,17 +1646,17 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
                         [weak.navigationController pushViewController:perGame
                                                              animated:YES];
                       }]];
-  [items addObject:[XenraBladeItem title:@"Set Custom Cover"
+  [items addObject:[XenraBladeItem title:XS(@"Set Custom Cover")
                                   action:^{
                                     [weak pickCoverFor:game];
                                   }]];
   if ([XenraCovers.shared hasCustomCoverForGame:game]) {
-    [items addObject:[XenraBladeItem title:@"Remove Custom Cover"
+    [items addObject:[XenraBladeItem title:XS(@"Remove Custom Cover")
                                     action:^{
                                       [weak removeCoverFor:game];
                                     }]];
   }
-  XenraBladeItem* remove = [XenraBladeItem title:@"Delete Game"
+  XenraBladeItem* remove = [XenraBladeItem title:XS(@"Delete Game")
                                           action:^{
                                             [weak confirmDelete:game];
                                           }];
@@ -1666,18 +1667,18 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
 - (void)confirmDelete:(XenraGameEntry*)game {
   __weak XenraLibraryController* weak = self;
-  XenraBladeItem* yes = [XenraBladeItem title:@"Delete"
+  XenraBladeItem* yes = [XenraBladeItem title:XS(@"Delete")
                                        action:^{
                                          [weak deleteGame:game];
                                        }];
   yes.destructive = YES;
   [XenraBladeSheet
       showConfirmIn:self.view
-              title:@"Delete Game"
+              title:XS(@"Delete Game")
             message:[NSString
-                        stringWithFormat:@"Are you sure you want to delete %@?",
+                        stringWithFormat:XS(@"Are you sure you want to delete %@?"),
                                          game.name]
-            leading:[XenraBladeItem title:@"Cancel" action:nil]
+            leading:[XenraBladeItem title:XS(@"Cancel") action:nil]
            trailing:yes];
 }
 
@@ -1691,7 +1692,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
 - (void)gameDeleted:(XenraGameEntry*)game ok:(BOOL)ok {
   XenraToast(self.view,
-             [NSString stringWithFormat:ok ? @"Deleted %@" : @"Failed to delete %@",
+             [NSString stringWithFormat:ok ? XS(@"Deleted %@") : XS(@"Failed to delete %@"),
                                         game.name]);
   if (ok) [self applyGames:scanner_.cachedGames];
 }
@@ -1712,7 +1713,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
                                       if (!ok || !strong) return;
                                       [strong coverChangedFor:game];
                                       XenraToast(strong.view,
-                                                 @"Custom cover removed");
+                                                 XS(@"Custom cover removed"));
                                     }];
 }
 
@@ -1725,20 +1726,20 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   }
   __weak XenraLibraryController* weak = self;
   NSMutableArray<XenraBladeItem*>* items = [NSMutableArray array];
-  [items addObject:[XenraBladeItem title:@"Set game folder"
+  [items addObject:[XenraBladeItem title:XS(@"Set game folder")
                                   action:^{
                                     [weak pickFolder];
                                   }]];
-  [items addObject:[XenraBladeItem title:@"Install content"
+  [items addObject:[XenraBladeItem title:XS(@"Install content")
                                   action:^{
                                     [weak pickContent];
                                   }]];
   if ([XenraSettings console] == XenraConsole360) {
-    [items addObject:[XenraBladeItem title:@"Profiles"
+    [items addObject:[XenraBladeItem title:XS(@"Profiles")
                                     action:^{
                                       [weak showProfilesNotice];
                                     }]];
-    [items addObject:[XenraBladeItem title:@"Open user data"
+    [items addObject:[XenraBladeItem title:XS(@"Open user data")
                                     action:^{
                                       [weak showUserDataPath];
                                     }]];
@@ -1752,16 +1753,16 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
 - (void)showProfilesNotice {
   [XenraBladeSheet showIn:self.view
-                    title:@"Profiles"
-                  message:@"Profiles aren't available on iPad and iPhone yet."
+                    title:XS(@"Profiles")
+                  message:XS(@"Profiles aren't available on iPad and iPhone yet.")
                     items:@[]];
 }
 
 - (void)showUserDataPath {
   [XenraBladeSheet showIn:self.view
-                    title:@"Open user data"
-                  message:@"In the Files app: On My iPad, then Xenra. Saves, "
-                          "content and logs are all there."
+                    title:XS(@"Open user data")
+                  message:XS(@"In the Files app: On My iPad, then Xenra. Saves, "
+                          "content and logs are all there.")
                     items:@[]];
 }
 
@@ -1783,7 +1784,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 // because a disc image is gigabytes and the installer only needs to read it.
 - (void)pickContent {
   if (installing_) {
-    XenraToast(self.view, @"An install is already running.");
+    XenraToast(self.view, XS(@"An install is already running."));
     return;
   }
   picking_ = XenraLibraryPickContent;
@@ -1826,7 +1827,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   [url stopAccessingSecurityScopedResource];
   [XenraSettings holdPickedFiles];
   [self refresh];
-  [self showBusy:YES message:@"Scanning games..."];
+  [self showBusy:YES message:XS(@"Scanning games...")];
 }
 
 - (void)useCover:(NSURL*)url {
@@ -1841,14 +1842,14 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
                                    if (!strong) return;
                                    if (ok) [strong coverChangedFor:game];
                                    XenraToast(strong.view,
-                                              ok ? @"Custom cover saved"
-                                                 : @"Failed to save custom cover");
+                                              ok ? XS(@"Custom cover saved")
+                                                 : XS(@"Failed to save custom cover"));
                                  }];
 }
 
 - (void)installFrom:(NSURL*)url {
   installing_ = YES;
-  [self showBusy:YES message:@"Reading the package…"];
+  [self showBusy:YES message:XS(@"Reading the package…")];
   __weak XenraLibraryController* weak = self;
   XenraInstallFromURL(
       url, [XenraSettings console],
@@ -1871,7 +1872,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   progress_.hidden = YES;
   [self updateHeader];
   [XenraBladeSheet showIn:self.view
-                    title:@"Install content"
+                    title:XS(@"Install content")
                   message:message
                     items:@[]];
   if (outcome == XenraInstallGame) [self refresh];

@@ -1,4 +1,5 @@
 #import "XenraScreens.h"
+#import "XenraStrings.h"
 
 #import <QuartzCore/QuartzCore.h>
 
@@ -82,7 +83,7 @@ void XenraApplyOrientation(UIViewController* controller) {
 
   __weak XenraDashboardController* weak = self;
   XenraBladeButton* library =
-      [[XenraBladeButton alloc] initWithTitle:@"Game Library"
+      [[XenraBladeButton alloc] initWithTitle:XS(@"Game Library")
                                        action:^{
                                          [weak.navigationController
                                              pushViewController:
@@ -94,7 +95,7 @@ void XenraApplyOrientation(UIViewController* controller) {
                                                     [weak showOnlineNotice];
                                                   }];
   XenraBladeButton* settings =
-      [[XenraBladeButton alloc] initWithTitle:@"Settings"
+      [[XenraBladeButton alloc] initWithTitle:XS(@"Settings")
                                        action:^{
                                          [weak.navigationController
                                              pushViewController:
@@ -266,10 +267,10 @@ void XenraApplyOrientation(UIViewController* controller) {
   if (!notice) return;
   __weak XenraDashboardController* weak = self;
   [XenraBladeSheet showConfirmIn:self.view
-                           title:@"Last Run"
+                           title:XS(@"Last Run")
                          message:notice
-                         leading:[XenraBladeItem title:@"Not Now" action:nil]
-                        trailing:[XenraBladeItem title:@"Share Logs"
+                         leading:[XenraBladeItem title:XS(@"Not Now") action:nil]
+                        trailing:[XenraBladeItem title:XS(@"Share Logs")
                                                 action:^{
                                                   XenraShareLogs(weak, nil);
                                                 }]];
@@ -298,9 +299,9 @@ void XenraApplyOrientation(UIViewController* controller) {
 - (void)updateBlades {
   const BOOL x360 = [XenraSettings console] == XenraConsole360;
   // The 360 has no Xbox Live here, only a community session broker.
-  onlineBlade_.title = x360 ? @"Netplay" : @"Xbox Live";
+  onlineBlade_.title = x360 ? XS(@"Netplay") : @"Xbox Live";
   consoleBlade_.title = [NSString
-      stringWithFormat:@"Console — %@", x360 ? @"Xbox 360" : @"Xbox Original"];
+      stringWithFormat:XS(@"Console — %@"), x360 ? @"Xbox 360" : @"Xbox Original"];
 }
 
 - (void)toggleConsole {
@@ -319,8 +320,8 @@ void XenraApplyOrientation(UIViewController* controller) {
 - (void)showOnlineNotice {
   [XenraBladeSheet showIn:self.view
                     title:onlineBlade_.title
-                  message:@"Online play isn't available on iPad and iPhone yet. "
-                          "Everything else works without it."
+                  message:XS(@"Online play isn't available on iPad and iPhone yet. "
+                          "Everything else works without it.")
                     items:@[]];
 }
 
@@ -328,13 +329,13 @@ void XenraApplyOrientation(UIViewController* controller) {
 - (void)showBackChoice {
   __weak XenraDashboardController* weak = self;
   [XenraBladeSheet showConfirmIn:self.view
-                           title:@"What would you like to do?"
+                           title:XS(@"What would you like to do?")
                          message:nil
-                         leading:[XenraBladeItem title:@"Setup Wizard"
+                         leading:[XenraBladeItem title:XS(@"Setup Wizard")
                                                 action:^{
                                                   XenraRestartSetup(weak.view.window);
                                                 }]
-                        trailing:[XenraBladeItem title:@"Close App"
+                        trailing:[XenraBladeItem title:XS(@"Close App")
                                                 action:^{
                                                   exit(0);
                                                 }]];
@@ -354,10 +355,17 @@ void XenraApplyOrientation(UIViewController* controller) {
 - (void)updateOrientationButton {
   NSString* current = [XenraSettings stringForKey:@"ui.orientation"
                                          fallback:@"auto"];
-  orientation_.title = current;  // shown in capitals
+  // The stored value is a key. These are its names.
+  NSDictionary* names = @{
+    @"auto" : XS(@"Auto"),
+    @"portrait" : XS(@"Portrait"),
+    @"landscape" : XS(@"Landscape"),
+  };
+  NSString* name = names[current] ?: current;
+  orientation_.title = name;  // shown in capitals
   orientation_.icon = XenraOrientationIcon(current, 24);
   orientation_.accessibilityLabel =
-      [NSString stringWithFormat:@"Orientation: %@. Tap to change.", current];
+      [NSString stringWithFormat:XS(@"Orientation: %@. Tap to change."), name];
 }
 
 @end

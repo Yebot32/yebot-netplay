@@ -5,6 +5,7 @@
  */
 
 #import "XenraContentInstall.h"
+#import "XenraStrings.h"
 
 #import "XenraGameScanner.h"
 #import "XenraScreens.h"
@@ -56,11 +57,11 @@ NSString* ContentRoot(void) {
 // the installer refuses to open is a bad package.
 NSString* Reason(int status) {
   if (status == (int)0xC000000D) {  // X_STATUS_INVALID_PARAMETER
-    return @"Not a content package. Content packages start with CON, LIVE or "
-            "PIRS.";
+    return XS(@"Not a content package. Content packages start with CON, LIVE or "
+            "PIRS.");
   }
-  if (status == -1) return @"The installer could not run.";
-  return [NSString stringWithFormat:@"The installer reported error %08X.",
+  if (status == -1) return XS(@"The installer could not run.");
+  return [NSString stringWithFormat:XS(@"The installer reported error %08X."),
                                     (unsigned)status];
 }
 
@@ -92,22 +93,22 @@ XenraInstallOutcome CopyGame(NSString* path, XenraGameEntry* game,
       [folder stringByAppendingPathComponent:path.lastPathComponent];
   if ([files fileExistsAtPath:target]) {
     *message = [NSString
-        stringWithFormat:@"“%@” is already in your games folder.", game.name];
+        stringWithFormat:XS(@"“%@” is already in your games folder."), game.name];
     return XenraInstallFailed;
   }
   dispatch_async(dispatch_get_main_queue(), ^{
-    progress([NSString stringWithFormat:@"Copying %@…", game.name], -1);
+    progress([NSString stringWithFormat:XS(@"Copying %@…"), game.name], -1);
   });
   NSError* error = nil;
   if (![files copyItemAtPath:path toPath:target error:&error]) {
     [files removeItemAtPath:target error:nil];
     *message = error.code == NSFileWriteOutOfSpaceError
-                   ? @"There is not enough free space."
-                   : @"The file could not be copied.";
+                   ? XS(@"There is not enough free space.")
+                   : XS(@"The file could not be copied.");
     return XenraInstallFailed;
   }
   *message = [NSString
-      stringWithFormat:@"“%@” is in your games folder now.", game.name];
+      stringWithFormat:XS(@"“%@” is in your games folder now."), game.name];
   return XenraInstallGame;
 }
 
@@ -115,7 +116,7 @@ XenraInstallOutcome InstallDisc(NSString* path, XenraGameEntry* game,
                                 XenraConsole console, Progress progress,
                                 NSString** message) {
   dispatch_async(dispatch_get_main_queue(), ^{
-    progress(@"Reading the package…", -1);
+    progress(XS(@"Reading the package…"), -1);
   });
   char* inner[kMaxDiscPackages];
   const int count = xenra_content_list_disc(path.fileSystemRepresentation, inner,
@@ -133,7 +134,7 @@ XenraInstallOutcome InstallDisc(NSString* path, XenraGameEntry* game,
   for (int i = 0; i < count; ++i) {
     if (status == 0) {
       NSString* step =
-          [NSString stringWithFormat:@"Installing %d of %d…", i + 1, count];
+          [NSString stringWithFormat:XS(@"Installing %d of %d…"), i + 1, count];
       __block dispatch_source_t watch = nil;
       dispatch_sync(dispatch_get_main_queue(), ^{
         watch = WatchProgress(step, progress);
@@ -148,12 +149,12 @@ XenraInstallOutcome InstallDisc(NSString* path, XenraGameEntry* game,
   }
   [NSFileManager.defaultManager removeItemAtPath:scratch error:nil];
   if (status != 0) {
-    *message = [NSString stringWithFormat:@"Installed %d of %d. %@", installed,
+    *message = [NSString stringWithFormat:XS(@"Installed %d of %d. %@"), installed,
                                           count, Reason(status)];
     return XenraInstallFailed;
   }
-  *message = [NSString stringWithFormat:@"Installed %d package(s) from the disc. "
-                                         "Boot the play disc to use them.",
+  *message = [NSString stringWithFormat:XS(@"Installed %d package(s) from the disc. "
+                                         "Boot the play disc to use them."),
                                         installed];
   return XenraInstallContent;
 }
@@ -163,8 +164,8 @@ XenraInstallOutcome Install(NSString* path, XenraConsole console,
   XenraGameEntry* game = [XenraGameScanner entryForFileAtPath:path console:console];
   if (console == XenraConsoleOG) {
     if (game) return CopyGame(path, game, console, progress, message);
-    *message = @"This is not an original Xbox game. Use .iso, .xiso, .cci or "
-                ".cso.";
+    *message = XS(@"This is not an original Xbox game. Use .iso, .xiso, .cci or "
+                ".cso.");
     return XenraInstallFailed;
   }
   if (game) {
@@ -173,8 +174,8 @@ XenraInstallOutcome Install(NSString* path, XenraConsole console,
         return InstallDisc(path, game, console, progress, message);
       case XenraGameFormatGOD:
         *message = [NSString
-            stringWithFormat:@"“%@” is a game with a data folder beside it. Use "
-                              "Set game folder on the folder that holds it.",
+            stringWithFormat:XS(@"“%@” is a game with a data folder beside it. Use "
+                              "Set game folder on the folder that holds it."),
                              game.name];
         return XenraInstallFailed;
       default:
@@ -184,7 +185,7 @@ XenraInstallOutcome Install(NSString* path, XenraConsole console,
 
   __block dispatch_source_t watch = nil;
   dispatch_sync(dispatch_get_main_queue(), ^{
-    watch = WatchProgress(@"Installing…", progress);
+    watch = WatchProgress(XS(@"Installing…"), progress);
   });
   const int status = xenra_content_install(path.fileSystemRepresentation,
                                            ContentRoot().fileSystemRepresentation);
@@ -193,7 +194,7 @@ XenraInstallOutcome Install(NSString* path, XenraConsole console,
     *message = Reason(status);
     return XenraInstallFailed;
   }
-  *message = [NSString stringWithFormat:@"Installed “%@”.",
+  *message = [NSString stringWithFormat:XS(@"Installed “%@”."),
                                         path.lastPathComponent];
   return XenraInstallContent;
 }

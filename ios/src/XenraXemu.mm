@@ -1,4 +1,5 @@
 #import "XenraXemu.h"
+#import "XenraStrings.h"
 
 #include <cstdlib>
 #include <dlfcn.h>
@@ -32,9 +33,9 @@ BOOL XenraXemuAvailable(void) {
 NSString* XenraXemuMissingFiles(void) {
   NSMutableArray* missing = [NSMutableArray array];
   NSDictionary* names = @{
-    @"mcpx" : @"MCPX Boot ROM",
-    @"flash" : @"Flash ROM (BIOS)",
-    @"hdd" : @"Hard Disk",
+    @"mcpx" : XS(@"MCPX Boot ROM"),
+    @"flash" : XS(@"Flash ROM (BIOS)"),
+    @"hdd" : XS(@"Hard Disk"),
   };
   for (NSString* key in @[ @"mcpx", @"flash", @"hdd" ]) {
     if (![XenraSettings urlForBookmark:key]) [missing addObject:names[key]];
@@ -170,14 +171,14 @@ NSString* XenraXemuFileProblem(void) {
     [sizes appendFormat:@" %@=%@ %@", name, size ?: @"unreadable",
                         url.lastPathComponent];
     if (!size) {
-      problem = [NSString stringWithFormat:@"%@ cannot be read. It may have "
+      problem = [NSString stringWithFormat:XS(@"%@ cannot be read. It may have "
                                             "moved. Choose it again in the "
-                                            "Setup Wizard.",
+                                            "Setup Wizard."),
                                            url.lastPathComponent];
     } else if ([name isEqual:@"MCPX"] && size.longLongValue != 512) {
-      problem = [NSString stringWithFormat:@"%@ is not an MCPX boot ROM, which "
+      problem = [NSString stringWithFormat:XS(@"%@ is not an MCPX boot ROM, which "
                                             "is exactly 512 bytes. Choose "
-                                            "mcpx_1.0.bin in the Setup Wizard.",
+                                            "mcpx_1.0.bin in the Setup Wizard."),
                                            url.lastPathComponent];
     }
   }

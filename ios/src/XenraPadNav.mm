@@ -1,4 +1,5 @@
 #import "XenraPadNav.h"
+#import "XenraStrings.h"
 
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1028,7 +1029,7 @@ static void BringIntoView(XenraPadSpot* spot) {
   for (XenraPadSpot* spot in Collect(root)) {
     UIView* view = spot.view;
     if ([view isKindOfClass:[XenraPressControl class]] &&
-        [((XenraPressControl*)view).title caseInsensitiveCompare:@"Back"] ==
+        [((XenraPressControl*)view).title caseInsensitiveCompare:XS(@"Back")] ==
             NSOrderedSame) {
       [(XenraPressControl*)view
           sendActionsForControlEvents:UIControlEventTouchUpInside];

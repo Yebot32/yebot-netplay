@@ -1,4 +1,5 @@
 #import "XenraScreens.h"
+#import "XenraStrings.h"
 
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
@@ -110,7 +111,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   [self.view addSubview:status_];
 
   cancel_ = [UIButton buttonWithType:UIButtonTypeSystem];
-  [cancel_ setTitle:@"Cancel" forState:UIControlStateNormal];
+  [cancel_ setTitle:XS(@"Cancel") forState:UIControlStateNormal];
   cancel_.tintColor = UIColor.whiteColor;
   cancel_.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
   cancel_.layer.cornerRadius = 22;
@@ -204,7 +205,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   }
   // The script is still starting when CS_DEBUGGED appears, and a brk sent
   // before it is listening goes unanswered. DukeX waits the same 6 seconds.
-  status_.text = @"Waiting for StikDebug to settle…";
+  status_.text = XS(@"Waiting for StikDebug to settle…");
   cancel_.hidden = NO;
   [self performSelector:@selector(boot) withObject:nil afterDelay:6];
 }
@@ -234,9 +235,9 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
 - (void)bootXemu {
   NSString* missing = XenraXemuMissingFiles();
   if (missing) {
-    [self showFailure:[NSString stringWithFormat:@"Still needed: %@. Choose "
+    [self showFailure:[NSString stringWithFormat:XS(@"Still needed: %@. Choose "
                                                   "them in the Setup Wizard, "
-                                                  "from Settings.",
+                                                  "from Settings."),
                                                  missing]];
     return;
   }
@@ -250,7 +251,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   metal_.tracksBounds = YES;
   [metal_ setNeedsLayout];
   [metal_ layoutIfNeeded];
-  status_.text = @"Booting…";
+  status_.text = XS(@"Booting…");
   [self sendPad];
   __weak XenraGameController* weak = self;
   sdlTimer_ = [NSTimer scheduledTimerWithTimeInterval:0.2
@@ -291,7 +292,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   XenraLog([NSString stringWithFormat:@"boot failed: %@", detail]);
   __weak XenraGameController* weak = self;
   XenraBladeItem* share = [XenraBladeItem
-      title:@"Share Logs"
+      title:XS(@"Share Logs")
       action:^{
         // The sheet closes on any tap, and this screen has no other way out.
         XenraShareLogs(weak, ^{
@@ -299,9 +300,9 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
         });
       }];
   [XenraBladeSheet showIn:self.view
-                    title:@"Could not start the game"
+                    title:XS(@"Could not start the game")
                   message:detail
-                    items:@[ share, [XenraBladeItem title:@"Quit App"
+                    items:@[ share, [XenraBladeItem title:XS(@"Quit App")
                                                    action:^{
                                                      [weak quit];
                                                    }] ]];
@@ -315,8 +316,8 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   [self pollController];
   const int state = xe_ios_status();
   if (state == 1) {
-    status_.text = @"Booting…\nThe first launch compiles shaders and can take "
-                    "a while.";
+    status_.text = XS(@"Booting…\nThe first launch compiles shaders and can take "
+                    "a while.");
   } else if (state == 2) {
     status_.text = nil;
   } else if (state < 0) {
@@ -393,30 +394,30 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   [self watchMenu];
   __weak XenraGameController* weak = self;
   XenraTouchPad* pad = pad_;
-  XenraBladeItem* resume = [XenraBladeItem title:@"Resume" action:nil];
+  XenraBladeItem* resume = [XenraBladeItem title:XS(@"Resume") action:nil];
   XenraBladeItem* touch = [XenraBladeItem
-      title:pad_.hidden ? @"Show Touch Controls" : @"Hide Touch Controls"
+      title:pad_.hidden ? XS(@"Show Touch Controls") : XS(@"Hide Touch Controls")
       action:^{
         pad.hidden = !pad.hidden;
         [weak sendPad];
       }];
-  XenraBladeItem* share = [XenraBladeItem title:@"Share Logs"
+  XenraBladeItem* share = [XenraBladeItem title:XS(@"Share Logs")
                                          action:^{
                                            XenraShareLogs(weak, nil);
                                          }];
-  XenraBladeItem* reset = [XenraBladeItem title:@"Reset"
+  XenraBladeItem* reset = [XenraBladeItem title:XS(@"Reset")
                                          action:^{
                                            XenraXemuReset();
                                          }];
   // One title per process, so leaving a game ends the app; the same is true
   // of Quit, and Android's Exit to Game Library has no iOS counterpart yet.
-  XenraBladeItem* quit = [XenraBladeItem title:@"Quit App"
+  XenraBladeItem* quit = [XenraBladeItem title:XS(@"Quit App")
                                         action:^{
                                           [weak quit];
                                         }];
   quit.destructive = YES;
   [XenraBladeSheet showIn:self.view
-                    title:@"Game Menu"
+                    title:XS(@"Game Menu")
                   message:nil
                     items:og_ ? @[ resume, touch, reset, share, quit ]
                               : @[ resume, touch, share, quit ]];
