@@ -153,6 +153,10 @@ static void ApplyPacing(CALayer* layer) {
 }
 
 NSString* XenraXemuFileProblem(void) {
+  if (!NeedsUniversalJit() && XenraJitChooseScheme() == XenraJitNone) {
+    return XS(@"iOS refused every way of running generated code, so the game "
+              "cannot start. Close Xenra, enable JIT again and retry.");
+  }
   // A wrong MCPX is the one mistake the core reports only to a menu we do not
   // show: it carries on from the flash image and the guest never starts.
   NSURL* mcpx = [XenraSettings urlForBookmark:@"mcpx"];

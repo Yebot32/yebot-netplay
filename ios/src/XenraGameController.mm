@@ -19,6 +19,18 @@
 
 // Radial, and rescaled, so a stick still reaches full travel and starts from nothing
 // just past the edge of the zone.
+static NSString* const kPendingGameKey = @"xenra.pendingGame";
+// Long enough to finish in StikDebug, short enough that a later launch of the app
+// does not start a game out of nowhere.
+static const NSTimeInterval kPendingGameLife = 600;
+
+static void RememberForJit(NSString* path, NSString* name) {
+  [NSUserDefaults.standardUserDefaults
+      setObject:@{@"path" : path, @"name" : name, @"when" : [NSDate date]}
+         forKey:kPendingGameKey];
+  [NSUserDefaults.standardUserDefaults synchronize];
+}
+
 static void ApplyDeadzone(float zone, short* x, short* y) {
   const float fx = *x / 32767.0f, fy = *y / 32767.0f;
   const float length = hypotf(fx, fy);
@@ -50,6 +62,20 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   short padAxes_[4];
   unsigned char padTriggers_[2];
   float deadzone_;
+}
+
++ (instancetype)takePendingAfterJit {
+  NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+  NSDictionary* pending = [defaults dictionaryForKey:kPendingGameKey];
+  [defaults removeObjectForKey:kPendingGameKey];
+  NSString* path = pending[@"path"];
+  NSString* name = pending[@"name"];
+  NSDate* when = pending[@"when"];
+  if (!path || !name || !when || !XenraJitActive()) return nil;
+  if (-when.timeIntervalSinceNow > kPendingGameLife) return nil;
+  if (![NSFileManager.defaultManager fileExistsAtPath:path]) return nil;
+  XenraLog([NSString stringWithFormat:@"resume after JIT: %@", path.lastPathComponent]);
+  return [[self alloc] initWithPath:path name:name];
 }
 
 - (instancetype)initWithPath:(NSString*)path name:(NSString*)name {
@@ -186,6 +212,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   // only way to learn it did is to keep asking.
   status_.text = XenraJitStatusText();
   cancel_.hidden = NO;
+  RememberForJit(path_, name_);
   XenraOpenJitEnabler();
   __weak XenraGameController* weak = self;
   jitTimer_ = [NSTimer scheduledTimerWithTimeInterval:1
@@ -463,6 +490,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
 }
 
 - (void)cancelWaiting {
+  [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingGameKey];
   [jitTimer_ invalidate];
   jitTimer_ = nil;
   [NSObject cancelPreviousPerformRequestsWithTarget:self

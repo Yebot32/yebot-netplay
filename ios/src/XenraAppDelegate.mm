@@ -120,6 +120,18 @@ void XenraTourStart(UIWindow* window);
                        (long)os.minorVersion,
                        NSBundle.mainBundle.bundleIdentifier, jit.get_task_allow,
                        jit.cs_debugged, rc]);
+#ifndef XENRA_UITEST
+  // StikDebug relaunches the app rather than returning to it, so the game that
+  // asked for JIT has to be picked up again here. After the first layout pass:
+  // the root screen has to exist before anything is pushed on it.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    XenraGameController* game = [XenraGameController takePendingAfterJit];
+    auto* navigation = (UINavigationController*)self.window.rootViewController;
+    if (game && [XenraSettings setupComplete]) {
+      [navigation pushViewController:game animated:NO];
+    }
+  });
+#endif
   return YES;
 }
 

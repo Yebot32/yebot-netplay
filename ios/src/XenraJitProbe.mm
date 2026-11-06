@@ -207,7 +207,12 @@ XenraJitScheme XenraJitChooseScheme(void) {
   }
 
   for (size_t i = 0; i < 4; i++) sigaction(kSignals[i], &g_saved[i], nullptr);
-  [defaults setObject:bad forKey:kBadKey];
+  // Nothing left means the verdicts are no use. A later launch starts over.
+  if (chosen == XenraJitNone) {
+    [defaults removeObjectForKey:kBadKey];
+  } else {
+    [defaults setObject:bad forKey:kBadKey];
+  }
   [defaults synchronize];
   XenraLog([@"jit probe:\n" stringByAppendingString:g_report]);
   return chosen;

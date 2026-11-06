@@ -349,3 +349,5 @@
 "Language changed. Please restart the app for full effect." = "语言已更改。请重启应用以完全生效。";
 "Currently selected" = "当前已选择";
 "Choose the language for the interface" = "选择界面语言";
+
+"iOS refused every way of running generated code, so the game cannot start. Close Xenra, enable JIT again and retry." = "iOS 拒绝了所有运行生成代码的方式,因此游戏无法启动。请关闭 Xenra,重新启用 JIT 后重试。";

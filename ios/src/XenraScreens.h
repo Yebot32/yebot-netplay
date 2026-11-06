@@ -38,6 +38,9 @@ typedef NS_ENUM(NSInteger, XenraDashboardEntry) {
 
 @interface XenraGameController : UIViewController
 - (instancetype)initWithPath:(NSString*)path name:(NSString*)name;
+// The game that sent the user to StikDebug, if this launch is the app coming back
+// with JIT on. StikDebug relaunches Xenra, so the waiting screen does not survive.
++ (nullable instancetype)takePendingAfterJit;
 @end
 
 // Appends a timestamped line to Documents/xenra-jit-log.txt, which Files can see.
