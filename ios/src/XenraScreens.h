@@ -32,6 +32,8 @@ typedef NS_ENUM(NSInteger, XenraDashboardEntry) {
 @interface XenraSettingsController : UIViewController
 // Non-nil: Android's PerGameSettingsActivity for that game.
 @property(nonatomic, copy) NSString* game;
+// Its file name, shown under the title.
+@property(nonatomic, copy) NSString* gameFile;
 @end
 
 @interface XenraGameController : UIViewController

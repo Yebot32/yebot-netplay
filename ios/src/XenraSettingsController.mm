@@ -160,7 +160,7 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
     text.userInteractionEnabled = NO;
     text.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:text];
-    value_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccent());
+    value_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccentText());
     value_.textAlignment = NSTextAlignmentRight;
     value_.numberOfLines = 2;
     [self addSubview:value_];
@@ -177,7 +177,7 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
       [value_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
       [value_.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
       [value_.widthAnchor constraintEqualToConstant:140],
-      [self.heightAnchor constraintGreaterThanOrEqualToConstant:36],
+      [self.heightAnchor constraintGreaterThanOrEqualToConstant:32],
     ]];
   }
   return self;
@@ -234,8 +234,7 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
 
 @end
 
-// Android's exposed dropdown: the list opens under its field, and the field gets
-// the white ring while it is open. Goes away on any tap outside and on a rotation,
+// Android's exposed dropdown: the list opens under its field. Goes away on any tap outside and on a rotation,
 // when what it is anchored to moves.
 @interface XenraDropdown : UIView
 @property(nonatomic, copy) void (^onClose)(void);
@@ -273,12 +272,6 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
   // XenraFieldButton draws its 56 pt box 8 pt down, under the caption's half.
   const CGRect box = [field convertRect:CGRectMake(0, 8, field.bounds.size.width, 56)
                                  toView:host];
-  UIView* ring = [[UIView alloc] initWithFrame:box];
-  ring.userInteractionEnabled = NO;
-  ring.layer.cornerRadius = 8;
-  ring.layer.borderWidth = 2;
-  ring.layer.borderColor = XenraFocus().CGColor;
-  [dropdown addSubview:ring];
 
   const UIEdgeInsets safe = host.safeAreaInsets;
   const CGFloat full = titles.count * kRow;
@@ -432,12 +425,12 @@ void XenraShowAbout(UIView* host) {
   sidebar.backgroundColor = XenraCharcoal();
   sidebar.translatesAutoresizingMaskIntoConstraints = NO;
 
-  UILabel* title = XenraMakeLabel(nil, 22, UIFontWeightBold, XenraAccent());
+  UILabel* title = XenraMakeLabel(nil, 22, UIFontWeightBold, XenraAccentText());
   title.attributedText = [[NSAttributedString alloc]
       initWithString:@"Settings"
           attributes:@{
             NSFontAttributeName : [UIFont systemFontOfSize:22 weight:UIFontWeightBold],
-            NSForegroundColorAttributeName : XenraAccent(),
+            NSForegroundColorAttributeName : XenraAccentText(),
             NSKernAttributeName : @(22 * 0.06),
           }];
   [sidebar addSubview:title];
@@ -453,7 +446,7 @@ void XenraShowAbout(UIView* host) {
                         @[ [XenraVectorPath stroke:@"M20,12H5M11,6l-6,6 6,6"
                                              width:2] ],
                         24, 24)];
-  arrow.tintColor = XenraAccent();
+  arrow.tintColor = XenraAccentText();
   arrow.translatesAutoresizingMaskIntoConstraints = NO;
   [close addSubview:arrow];
   [sidebar addSubview:close];
@@ -1031,9 +1024,8 @@ void XenraShowAbout(UIView* host) {
 
 // --- Per-game settings ------------------------------------------------------
 
-// The fill under a field, opaque, since the caption cuts the outline with it. The
-// light console's panel fill is translucent, so it uses xenraSurface as Android's
-// card does.
+// The light console's panel fill is translucent, so it uses xenraSurface as
+// Android's card does.
 static UIColor* PerGameFill(void) {
   return XenraThemeMode == XenraThemeX360 ? XenraSurface() : XenraPanelFill();
 }
@@ -1051,6 +1043,7 @@ static UIColor* PerGameFill(void) {
 
   XenraHintBar* hints = [[XenraHintBar alloc] initWithFrame:CGRectZero];
   hints.showsSelect = NO;
+  hints.panelStyle = YES;
   hints.onBack = ^{
     [weak leave];
   };
@@ -1077,10 +1070,17 @@ static UIColor* PerGameFill(void) {
                                     XenraText());
   [body addArrangedSubview:heading];
   [body setCustomSpacing:12 afterView:heading];
-  UILabel* name = XenraMakeLabel(_game, 22, UIFontWeightRegular, XenraAccentLight());
+  UILabel* name = XenraMakeLabel(_game, 22, UIFontWeightRegular, XenraAccentLightText());
   name.numberOfLines = 0;
   [body addArrangedSubview:name];
   [body setCustomSpacing:12 afterView:name];
+  if (_gameFile.length) {
+    UILabel* file = XenraMakeLabel(_gameFile, 12, UIFontWeightRegular, XenraTextMuted());
+    file.numberOfLines = 0;
+    [body setCustomSpacing:4 afterView:name];
+    [body addArrangedSubview:file];
+    [body setCustomSpacing:12 afterView:file];
+  }
   UILabel* intro = XenraMakeLabel(
       @"Choose only the settings this game should override. Leave a field on Use "
        "Global to keep the normal app setting.",
@@ -1103,7 +1103,6 @@ static UIColor* PerGameFill(void) {
                                              [weak openField:weakField row:row];
                                            }];
       weakField = field;
-      [field setCaptionFill:PerGameFill()];
       fields_[row.key] = field;
       [self paintField:row];
       [body addArrangedSubview:field];
@@ -1195,8 +1194,10 @@ static UIColor* PerGameFill(void) {
   // The cursor stays in the list, and a touch outside only closes it.
   UIScrollView* page = scroll_;
   page.userInteractionEnabled = NO;
+  field.opened = YES;
   dropdown_.onClose = ^{
     page.userInteractionEnabled = YES;
+    field.opened = NO;
   };
 }
 

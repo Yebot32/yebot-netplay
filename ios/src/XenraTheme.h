@@ -52,6 +52,12 @@ static inline UIColor* XenraAccentAlpha(uint8_t alpha) {
 }
 static inline UIColor* XenraAccent(void) { return XenraAccentAlpha(0xFF); }
 
+// The accent as words. On the light console the accent itself is a mid green that
+// pale panels wash out, so text and small labels take a darker step of it.
+static inline UIColor* XenraAccentText(void) {
+  return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410) : XenraAccent();
+}
+
 static inline UIColor* XenraCharcoal(void) {
   return XenraPick(0xFF0D0B08, 0xFFCBE09A, 0xFF0B0B0C);
 }
@@ -129,6 +135,11 @@ static inline UIColor* XenraTextSecondary(void) {
 }
 static inline UIColor* XenraTextTertiary(void) {
   return XenraPick(0x8AFFFFFF, 0xA3000000, 0xFFA9ACB0);
+}
+
+// xenraAccentLight as words, by the same reasoning as XenraAccentText.
+static inline UIColor* XenraAccentLightText(void) {
+  return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410) : XenraAccentLight();
 }
 
 // xenraBg: also the label colour on a filled accent pill.
