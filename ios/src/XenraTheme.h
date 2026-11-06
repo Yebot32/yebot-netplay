@@ -150,6 +150,8 @@ static inline UIColor* XenraSurfaceVariant(void) {
 static inline UIColor* XenraAccentLight(void) {
   return XenraPick(0xFF7FE07F, 0xCC74A81A, 0xFFDCE1E4);
 }
+static inline UIColor* XenraAccentLight(void);
+
 // xenraAccentLight as words, by the same reasoning as XenraAccentText.
 static inline UIColor* XenraAccentLightText(void) {
   return XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF3F6410) : XenraAccentLight();
