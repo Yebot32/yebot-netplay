@@ -323,8 +323,11 @@ static void AddCells(UICollectionView* collection, UIView* root,
   }
 }
 
-static void Walk(UIView* view, UIView* root, NSMutableArray* out) {
-  if (view.hidden || view.alpha < 0.01 || !view.userInteractionEnabled) return;
+// `fading` counts what is clear for now: a pane that was just rebuilt starts at
+// nothing and fades in.
+static void Walk(UIView* view, UIView* root, BOOL fading, NSMutableArray* out) {
+  if (view.hidden || !view.userInteractionEnabled) return;
+  if (!fading && view.alpha < 0.01) return;
   if ([view isKindOfClass:[UIControl class]]) {
     if (!((UIControl*)view).enabled) return;
     if ([view isKindOfClass:[XenraPressControl class]] &&
@@ -339,17 +342,17 @@ static void Walk(UIView* view, UIView* root, NSMutableArray* out) {
     // Headers are subviews too, and may hold controls.
     for (UIView* child in view.subviews) {
       if (![child isKindOfClass:[UICollectionViewCell class]]) {
-        Walk(child, root, out);
+        Walk(child, root, fading, out);
       }
     }
     return;
   }
-  for (UIView* child in view.subviews) Walk(child, root, out);
+  for (UIView* child in view.subviews) Walk(child, root, fading, out);
 }
 
-static NSArray<XenraPadSpot*>* Collect(UIView* root) {
+static NSArray<XenraPadSpot*>* Collect(UIView* root, BOOL fading = NO) {
   NSMutableArray<XenraPadSpot*>* spots = [NSMutableArray array];
-  if (root) Walk(root, root, spots);
+  if (root) Walk(root, root, fading, spots);
   return spots;
 }
 
@@ -657,7 +660,7 @@ static void BringIntoView(XenraPadSpot* spot) {
 - (void)recoverCursor {
   const CGRect was = focused_.frame;
   [self clearCursor];
-  XenraPadSpot* nearest = [self nearestIn:Collect(root_) to:was];
+  XenraPadSpot* nearest = [self nearestIn:Collect(root_, YES) to:was];
   if (nearest) [self moveCursorTo:nearest sound:NO scroll:NO];
 }
 
@@ -721,6 +724,14 @@ static void BringIntoView(XenraPadSpot* spot) {
       if ([spot isSameSpot:remembered]) pick = spot;
     }
     if (!pick) pick = [self nearestIn:spots to:remembered.frame];
+  }
+  // A screen with tabs starts on the current one, not on what comes first, which
+  // in settings is the close arrow: one A from leaving.
+  if (!pick) {
+    UIView* tab = FindChosenBlade(root);
+    for (XenraPadSpot* spot in spots) {
+      if (tab && spot.view == tab) pick = spot;
+    }
   }
   if (!pick) {
     for (XenraPadSpot* spot in spots) {
