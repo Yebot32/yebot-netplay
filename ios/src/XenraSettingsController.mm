@@ -280,15 +280,15 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
   const BOOL under = below >= MIN(full, 3 * kRow) || below >= above;
   const CGFloat height = MIN(full, under ? below : above);
   UIScrollView* list = [[XenraScrollView alloc]
-      initWithFrame:CGRectMake(box.origin.x,
+      initWithFrame:CGRectMake(box.origin.x - 1,
                                under ? CGRectGetMaxY(box) + 4
                                      : CGRectGetMinY(box) - 4 - height,
-                               box.size.width, height)];
+                               box.size.width + 2, height)];
   list.backgroundColor = XenraThemeMode == XenraThemeX360 ? XenraSurfaceVariant()
                                                           : XenraOutlineVariant();
   list.layer.cornerRadius = 4;
   list.layer.borderWidth = 1;
-  list.layer.borderColor = XenraAccentAlpha(0x33).CGColor;
+  list.layer.borderColor = XenraAccentAlpha(0x66).CGColor;
   list.contentSize = CGSizeMake(box.size.width, full);
   __weak XenraDropdown* weak = dropdown;
   for (NSUInteger i = 0; i < titles.count; i++) {
@@ -1148,7 +1148,9 @@ static UIColor* PerGameFill(void) {
 
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
-  if (_game) hintsBottom_.constant = -XenraHintBarInset(self.view);
+  // A band, so it meets the bottom edge where the home indicator leaves it room.
+  const BOOL tablet = self.traitCollection.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+  if (_game) hintsBottom_.constant = tablet ? 0 : -XenraHintBarInset(self.view);
 }
 
 - (NSArray<NSString*>*)valuesOf:(XenraSettingRow*)row {
