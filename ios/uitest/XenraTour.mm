@@ -56,6 +56,9 @@ static UIWindow* g_window;
 static NSMutableArray* g_steps;
 static NSUInteger g_next;
 static int g_shot;
+// Past every entrance, so the picture shows the settled screen. The language runs
+// repeat screens the main tour has already timed, and there are several of them.
+static int g_stepMs = 1400;
 
 static NSString* TourDir(void) {
   return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -906,7 +909,7 @@ static void LanguageTour(NSString* code) {
   Step(^{
     [Nav().topViewController performSelector:@selector(tourTapItem:) withObject:@1];
   });
-  both(@"og-library-selected");
+  shot(@"og-library-selected");
   Tap(XS(@"Actions"));
   shot(@"og-library-actions");
   Step(^{
@@ -922,7 +925,7 @@ static void LanguageTour(NSString* code) {
   Step(^{
     [Nav().topViewController performSelector:@selector(tourEmpty:) withObject:@YES];
   });
-  both(@"og-library-empty");
+  shot(@"og-library-empty");
   Step(^{
     [Nav().topViewController performSelector:@selector(tourEmpty:) withObject:@NO];
     XenraToast(TopView(), XS(@"Failed to save custom cover"));
@@ -933,17 +936,9 @@ static void LanguageTour(NSString* code) {
 
   Tap(XS(@"Settings"));
   Pause();
-  Step(^{
-  });
   for (XenraSettingTab* tab in [XenraSettings tabsForConsole:XenraConsoleOG]) {
     Tap(tab.title);
     shot([NSString stringWithFormat:@"og-settings-%lu",
-                                    (unsigned long)[[XenraSettings
-                                        tabsForConsole:XenraConsoleOG] indexOfObject:tab]]);
-    Step(^{
-      [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
-    });
-    shot([NSString stringWithFormat:@"og-settings-%lu-end",
                                     (unsigned long)[[XenraSettings
                                         tabsForConsole:XenraConsoleOG] indexOfObject:tab]]);
   }
@@ -993,7 +988,7 @@ static void LanguageTour(NSString* code) {
   Tap(XS(@"OK"));
   Pause();
   Tap(XS(@"Game Library"));
-  both(@"360-library");
+  shot(@"360-library");
   Pop();
   Pause();
   Tap(XS(@"Settings"));
@@ -1009,7 +1004,7 @@ static void LanguageTour(NSString* code) {
   Step(^{
     [(XenraSettingsController*)Nav().topViewController tourScrollPaneToEnd];
   });
-  both(@"360-settings-rendering-end");
+  shot(@"360-settings-rendering-end");
   Step(^{
     XenraSettingsController* perGame = [[XenraSettingsController alloc] init];
     perGame.game = @"Halo 3";
@@ -1017,7 +1012,7 @@ static void LanguageTour(NSString* code) {
     [Nav() pushViewController:perGame animated:YES];
   });
   Pause();
-  both(@"360-pergame");
+  shot(@"360-pergame");
   Pop();
   Pause();
   Pop();
@@ -1031,7 +1026,7 @@ static void LanguageTour(NSString* code) {
                      animated:YES];
   });
   Pause();
-  both(@"game-failure");
+  shot(@"game-failure");
   Step(^{
     [Nav().topViewController performSelector:@selector(showMenu)];
   });
@@ -1046,7 +1041,12 @@ static void LanguageTour(NSString* code) {
   Pause();
   Pause();
   for (int page = 1; page <= 5; page++) {
-    both([NSString stringWithFormat:@"setup-%d", page]);
+    NSString* picture = [NSString stringWithFormat:@"setup-%d", page];
+    if (page <= 2) {
+      both(picture);
+    } else {
+      shot(picture);
+    }
     if (page == 1) {
       Tap(XS(@"App Language"));
       shot(@"setup-language");
@@ -1079,6 +1079,7 @@ void XenraTourStart(UIWindow* window) {
                          NSBundle.mainBundle.localizations, XS(@"Continue"),
                          UIApplication.sharedApplication.userInterfaceLayoutDirection ==
                              UIUserInterfaceLayoutDirectionRightToLeft]);
+    g_stepMs = 800;
     if (![language isEqual:@"check"]) LanguageTour(language);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
@@ -1205,8 +1206,7 @@ static void Advance(void) {
   }
   TourStep step = g_steps[g_next++];
   step();
-  // Past every entrance, so the picture shows the settled screen.
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1400 * NSEC_PER_MSEC),
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, g_stepMs * NSEC_PER_MSEC),
                  dispatch_get_main_queue(), ^{
                    Advance();
                  });

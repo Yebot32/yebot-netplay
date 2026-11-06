@@ -22,7 +22,7 @@ permissions:
 jobs:
   tour:
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Tour
