@@ -8,6 +8,7 @@
 
 #import "XenraBladeView.h"
 #import "XenraMotion.h"
+#import "XenraPadNav.h"
 #import "XenraScreens.h"
 #import "XenraTheme.h"
 
@@ -186,6 +187,15 @@ CGFloat XenraHintBarInset(UIView* view) {
 }
 
 - (void)pressedChanged {
+}
+
+- (void)setPadFocused:(BOOL)padFocused {
+  _padFocused = padFocused;
+  [self padFocusChanged];
+}
+
+- (void)padFocusChanged {
+  XenraPadRing(self, _padFocused);
 }
 
 @end
@@ -430,7 +440,7 @@ CGFloat XenraHintBarInset(UIView* view) {
 - (void)paintBlade {
   blade_.state = self.pressed ? XenraBladePressed
                  : _chosen    ? XenraBladeChosen
-                 : _padFocused ? XenraBladeFocused
+                 : self.padFocused ? XenraBladeFocused
                               : XenraBladeResting;
 }
 
@@ -472,8 +482,8 @@ CGFloat XenraHintBarInset(UIView* view) {
   [self paintBlade];
 }
 
-- (void)setPadFocused:(BOOL)padFocused {
-  _padFocused = padFocused;
+- (void)padFocusChanged {
+  [super padFocusChanged];
   [self paintBlade];
 }
 
@@ -1038,6 +1048,10 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   return self;
 }
 
+- (float)step {
+  return step_;
+}
+
 - (float)snapped:(float)value {
   return step_ > 0 ? roundf(value / step_) * step_ : value;
 }
@@ -1123,6 +1137,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
       [label_.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
     ]];
     self.action = action;
+    self.padSkipped = YES;  // the pad has these buttons on it
     self.userInteractionEnabled = action != nil;
     self.title = title;
   }
@@ -1240,6 +1255,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   XenraPressControl* close = [[XenraPressControl alloc] initWithFrame:CGRectZero];
   close.title = @"Close";
   close.accessibilityLabel = @"Close";
+  close.padSkipped = YES;  // B is the way out on a pad
   close.hidden = title.length == 0;
   close.action = ^{
     [weak dismiss];

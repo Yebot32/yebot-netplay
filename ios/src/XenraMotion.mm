@@ -3,10 +3,12 @@
 #import <QuartzCore/QuartzCore.h>
 
 #import "XenraAmbient.h"
+#import "XenraPadNav.h"
 #import "XenraScreens.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
+#import "XenraUiSounds.h"
 
 void XenraAnimate(NSTimeInterval duration, NSTimeInterval delay,
                   XenraCurve curve, void (^animations)(void),
@@ -278,6 +280,7 @@ void XenraAddSpring(UIControl* control) {
   edge_.edges = rtl ? UIRectEdgeRight : UIRectEdgeLeft;
   edge_.delegate = self;
   [self.view addGestureRecognizer:edge_];
+  XenraPadNavStart();
 }
 
 // The window carries the style, so that pickers and share sheets presented over
@@ -369,6 +372,11 @@ void XenraAddSpring(UIControl* control) {
        didShowViewController:(UIViewController*)controller
                     animated:(BOOL)animated {
   XenraLog([NSString stringWithFormat:@"screen: %@", controller.class]);
+  XenraPadNavScreenChanged();
+  // The game wants the audio hardware to itself.
+  if ([controller isKindOfClass:[XenraGameController class]]) {
+    XenraUiSoundsRelease();
+  }
   // The music belongs to the menus. Android stops it from onPause.
   // The free skin's wizard has none either.
   if ([controller isKindOfClass:[XenraGameController class]] ||

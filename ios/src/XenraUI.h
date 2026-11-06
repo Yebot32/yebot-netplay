@@ -55,7 +55,13 @@ extern const NSTimeInterval XenraPressDelay;
 @property(nonatomic, copy) NSString* title;
 @property(nonatomic, copy) void (^action)(void);
 @property(nonatomic, readonly) BOOL pressed;
+// The controller cursor is on it, which draws the white ring; padFocusChanged is
+// the place to add to that. padSkipped keeps the cursor off, for what a pad has a
+// button for already. See XenraPadNav.h.
+@property(nonatomic, assign) BOOL padFocused;
+@property(nonatomic, assign) BOOL padSkipped;
 - (void)pressedChanged;
+- (void)padFocusChanged;
 @end
 
 // A framed panel with cut corners, Android's ChamferedPanelView. Chamfer 20, panel
@@ -88,7 +94,6 @@ extern const NSTimeInterval XenraPressDelay;
 @property(nonatomic, assign) BOOL chosen;   // the current settings tab
 @property(nonatomic, assign) BOOL primary;  // the default action, filled
 @property(nonatomic, assign) BOOL compact;  // 48 pt, 14 pt text
-@property(nonatomic, assign) BOOL padFocused;  // the controller cursor is on it
 - (instancetype)initWithTitle:(NSString*)title action:(void (^)(void))action;
 @end
 
@@ -167,6 +172,7 @@ typedef NS_ENUM(NSInteger, XenraSectionStyle) {
 @property(nonatomic, copy) NSString* (^format)(float value);
 @property(nonatomic, copy) void (^onChange)(float value);  // while dragging
 @property(nonatomic, copy) void (^onCommit)(float value);  // on release
+@property(nonatomic, readonly) float step;  // what the initialiser was given
 - (instancetype)initWithTitle:(NSString*)title
                        detail:(NSString*)detail
                       minimum:(float)minimum

@@ -33,6 +33,8 @@ set(_xe_ios_arc_sources
   "${_xe_ios_dir}/src/XenraLogs.mm"
   "${_xe_ios_dir}/src/XenraSampler.mm"
   "${_xe_ios_dir}/src/XenraMotion.mm"
+  "${_xe_ios_dir}/src/XenraPadNav.mm"
+  "${_xe_ios_dir}/src/XenraUiSounds.mm"
   "${_xe_ios_dir}/src/XenraLibraryController.mm"
   "${_xe_ios_dir}/src/XenraSettings.mm"
   "${_xe_ios_dir}/src/XenraSettingsController.mm"

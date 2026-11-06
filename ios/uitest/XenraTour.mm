@@ -25,7 +25,9 @@
 #import "XenraScreens.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
+#import "XenraPadNav.h"
 #import "XenraUI.h"
+#import "XenraUiSounds.h"
 #include "ios_emu.h"
 
 #include <unistd.h>
@@ -343,6 +345,9 @@ static void PressTiming(NSString* title) {
   second.spacing = 12;
   second.alignment = UIStackViewAlignmentCenter;
   [buttons.body addArrangedSubview:second];
+  UISwitch* toggleRow = [[UISwitch alloc] init];
+  toggleRow.onTintColor = XenraAccent();
+  [second insertArrangedSubview:toggleRow atIndex:4];
 
   XenraCardView* blades = [[XenraCardView alloc] initWithFrame:CGRectZero];
   blades.body.spacing = 8;
@@ -473,6 +478,249 @@ static void SettingsTour(NSString* console) {
   Shot([NSString stringWithFormat:@"land-%@-swipe-done", console]);
 }
 
+// The controller. A simulator has none, so these stand in for what GCController
+// reads and leave the rest of XenraPadNav as it is on a device, the display link
+// and its timing included. Every line is in the log as "tour: pad".
+static void PadLog(NSString* what) {
+  XenraLog([NSString
+      stringWithFormat:@"tour: pad %@ focus=%@ blips=%d polling=%d top=%@", what,
+                       XenraPadNavTestFocus() ?: @"-", XenraUiSoundsTestCount(),
+                       XenraPadNavTestPolling(), Nav().topViewController.class]);
+}
+
+static void PadNeutral(void) {
+  XenraPadTestState state = {};
+  XenraPadNavTestSet(&state);
+}
+
+static void PadHoldKey(NSString* key) {
+  XenraPadTestState state = {};
+  if ([key isEqual:@"U"]) state.dy = -1;
+  if ([key isEqual:@"D"]) state.dy = 1;
+  if ([key isEqual:@"L"]) state.dx = -1;
+  if ([key isEqual:@"R"]) state.dx = 1;
+  state.a = [key isEqual:@"A"];
+  state.b = [key isEqual:@"B"];
+  state.lb = [key isEqual:@"LB"];
+  state.rb = [key isEqual:@"RB"];
+  XenraPadNavTestSet(&state);
+}
+
+static void After(int ms, void (^block)(void)) {
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC),
+                 dispatch_get_main_queue(), block);
+}
+
+// Up to six keys, 200 ms apart, which is past the step throttle.
+static void Pad(NSString* keys) {
+  Step(^{
+    NSArray<NSString*>* list = [keys componentsSeparatedByString:@" "];
+    for (NSUInteger i = 0; i < list.count; i++) {
+      After(int(i) * 200, ^{
+        PadHoldKey(list[i]);
+      });
+      After(int(i) * 200 + 70, ^{
+        PadNeutral();
+      });
+    }
+    After(int(list.count) * 200 + 20, ^{
+      PadLog(keys);
+    });
+  });
+}
+
+static void PadSeekStep(NSString* name, NSString* key, int left) {
+  if ([XenraPadNavTestFocus() isEqual:name] || left == 0) {
+    PadLog([NSString stringWithFormat:@"seek %@", name]);
+    return;
+  }
+  PadHoldKey(key);
+  After(70, ^{
+    PadNeutral();
+  });
+  After(190, ^{
+    PadSeekStep(name, key, left - 1);
+  });
+}
+
+// Walks until the cursor is on `name`, a title or a class.
+static void PadSeek(NSString* name, NSString* key) {
+  Step(^{
+    PadSeekStep(name, key, 6);
+  });
+}
+
+// Held 1.3 s: a step at once, at 450 ms, then every 250 ms. So five.
+static void PadHoldTest(NSString* key) {
+  Step(^{
+    const int before = XenraUiSoundsTestCount();
+    PadHoldKey(key);
+    After(1300, ^{
+      PadNeutral();
+      PadLog([NSString stringWithFormat:@"hold steps=%d want 5",
+                                        XenraUiSoundsTestCount() - before]);
+    });
+  });
+}
+
+static void PadStick(float x, float y) {
+  XenraPadTestState state = {};
+  state.sx = x;
+  state.sy = y;
+  XenraPadNavTestSet(&state);
+}
+
+// ControllerNavigator's numbers. Under 0.5 is nothing, a diagonal is nothing, a
+// push off true is still that direction, and 0.35 holds a direction that 0.5 took.
+static void PadStickTest(void) {
+  Step(^{
+    const int before = XenraUiSoundsTestCount();
+    PadStick(0, 0.45);
+    After(100, ^{
+      PadStick(0.6, 0.6);
+    });
+    After(200, ^{
+      PadNeutral();
+      PadLog([NSString stringWithFormat:@"stick weak and diagonal steps=%d want 0",
+                                        XenraUiSoundsTestCount() - before]);
+    });
+  });
+  Step(^{
+    const int before = XenraUiSoundsTestCount();
+    PadStick(0.2, 0.6);
+    After(100, ^{
+      PadStick(0, 0.35);
+    });
+    After(250, ^{
+      PadStick(0, 0.1);
+    });
+    After(350, ^{
+      PadStick(0, 0.6);
+    });
+    After(450, ^{
+      PadNeutral();
+      PadLog([NSString stringWithFormat:@"stick hysteresis steps=%d want 2",
+                                        XenraUiSoundsTestCount() - before]);
+    });
+  });
+}
+
+static void PadTour(NSString* console) {
+  NSString* (^name)(NSString*) = ^NSString*(NSString* what) {
+    return [NSString stringWithFormat:@"land-%@-pad-%@", console, what];
+  };
+  Step(^{
+    PadNeutral();
+    XenraLog([NSString stringWithFormat:@"tour: pad sound %@",
+                                        XenraUiSoundsTestReport()]);
+  });
+
+  // The dashboard: nothing until a press, and the first press only places it.
+  Shot(name(@"dash-none"));
+  Pad(@"D");
+  Shot(name(@"dash-placed"));
+  PadSeek(@"Settings", @"D");
+  Shot(name(@"dash-settings"));
+  Step(^{
+    XenraPadNavTouched();
+    PadLog(@"touch");
+  });
+  Shot(name(@"dash-touched"));
+  Pad(@"D");  // back where it was
+
+  // B with a cursor or without opens the back choice, and closes it.
+  Pad(@"B");
+  Pad(@"D R");
+  Shot(name(@"back-sheet"));
+  Pad(@"B");
+  Shot(name(@"back-closed"));
+
+  // Into settings on A.
+  Pad(@"A");
+  Pause();
+  Shot(name(@"settings-none"));
+  Pad(@"D");
+  Both([NSString stringWithFormat:@"%@-pad-settings-tab", console]);
+  Pad(@"RB");
+  Shot(name(@"settings-rb"));
+  Pad(@"LB");
+  Pad(@"R");
+  Shot(name(@"settings-pane"));
+  Pad(@"D D D D D D");
+  Shot(name(@"settings-scrolled"));
+  Pad(@"B");
+  Pause();
+  Shot(name(@"settings-left"));
+
+  // Every kind of widget.
+  Step(^{
+    [Nav() pushViewController:[[TourGallery alloc] init] animated:YES];
+  });
+  Pause();
+  Pad(@"D");
+  Shot(name(@"widget-first"));
+  PadSeek(@"UISlider", @"D");
+  Pad(@"R R");
+  Step(^{
+    PadLog([NSString
+        stringWithFormat:@"slider value=%.0f want 80",
+                         ((XenraSliderRow*)FindClass(TopView(),
+                                                     [XenraSliderRow class]))
+                             .value]);
+  });
+  Shot(name(@"widget-slider"));
+  PadSeek(@"Frame limit", @"D");
+  Shot(name(@"widget-field"));
+  PadSeek(@"Continue", @"D");
+  Shot(name(@"widget-pill"));
+  PadSeek(@"UISwitch", @"R");
+  Pad(@"A");
+  Step(^{
+    PadLog([NSString
+        stringWithFormat:@"switch on=%d want 1",
+                         ((UISwitch*)FindClass(TopView(), [UISwitch class])).on]);
+  });
+  Shot(name(@"widget-switch"));
+  PadSeek(@"Chosen row", @"D");
+  Shot(name(@"widget-chosen"));
+  PadSeek(@"Dashboard blade", @"D");
+  Shot(name(@"widget-blade"));
+  Pop();
+  Pause();
+
+  // A long sheet: the cursor is held in it and it follows the cursor.
+  Step(^{
+    NSMutableArray* rows = [NSMutableArray array];
+    for (int i = 1; i <= 16; i++) {
+      [rows addObject:[XenraBladeItem
+                          title:[NSString stringWithFormat:@"Choice number %d", i]
+                         action:nil]];
+    }
+    [XenraBladeSheet showIn:TopView() title:@"Pad test" message:nil items:rows];
+  });
+  Pause();
+  Pad(@"D");
+  PadHoldTest(@"D");
+  Shot(name(@"sheet-held"));
+  PadStickTest();
+  Pad(@"B");
+  Pause();
+
+  // The library, cell by cell.
+  Tap(@"Game Library");
+  Pause();
+  Pad(@"D");
+  Shot(name(@"library-placed"));
+  Pad(@"R D");
+  Shot(name(@"library-moved"));
+  Pad(@"B");
+  Pause();
+  Step(^{
+    PadLog(@"tour ended");
+    XenraPadNavTestSet(nullptr);
+  });
+}
+
 static void ConsoleTour(NSString* console, NSString* online) {
   Both([NSString stringWithFormat:@"%@-dashboard", console]);
   Pressed(@"Settings", [NSString stringWithFormat:@"land-%@-pressed-blade", console]);
@@ -512,6 +760,7 @@ static void ConsoleTour(NSString* console, NSString* online) {
   Tap(@"List");
   Pop();
   SettingsTour(console);
+  PadTour(console);
 }
 
 void XenraTourStart(UIWindow* window) {
@@ -554,6 +803,18 @@ void XenraTourStart(UIWindow* window) {
     Tap(@"Continue");
   }
   Both(@"setup-5");
+  // No hint bar here: B has to find the Back pill.
+  Step(^{
+    PadNeutral();
+  });
+  Pad(@"B");
+  Shot(@"land-setup-pad-back");
+  Pad(@"D");
+  Shot(@"land-setup-pad-placed");
+  Step(^{
+    XenraPadNavTestSet(nullptr);
+  });
+  Tap(@"Continue");
   Step(^{
     [SetupScreen() tourShowJitWaiting];
   });
@@ -580,6 +841,22 @@ void XenraTourStart(UIWindow* window) {
     [Nav().topViewController performSelector:@selector(showMenu)];
   });
   Both(@"game-menu");
+
+  // The game owns the controller, with its menu open or not, until it is gone.
+  Step(^{
+    PadNeutral();
+    PadLog(@"in game, want polling=0");
+  });
+  Pad(@"D A");
+  Step(^{
+    PadLog(@"in game after D A, want focus=-");
+  });
+  Pop();
+  Pause();
+  Step(^{
+    PadLog(@"game gone, want polling=1");
+    XenraPadNavTestSet(nullptr);
+  });
 
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                  dispatch_get_main_queue(), ^{
