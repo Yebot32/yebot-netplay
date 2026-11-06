@@ -834,6 +834,13 @@ static void ConsoleTour(NSString* console, NSString* online) {
   Tap(@"Covers");
   Both([NSString stringWithFormat:@"%@-library-grid", console]);
   Tap(@"List");
+  Step(^{
+    [Nav().topViewController performSelector:@selector(tourEmpty:) withObject:@YES];
+  });
+  Both([NSString stringWithFormat:@"%@-library-empty", console]);
+  Step(^{
+    [Nav().topViewController performSelector:@selector(tourEmpty:) withObject:@NO];
+  });
   Pop();
   SettingsTour(console);
   PadTour(console);
@@ -853,9 +860,15 @@ void XenraTourStart(UIWindow* window) {
       @"Crash Bandicoot - The Wrath of Cortex (USA).iso",
       @"Halo - Combat Evolved (USA).iso", @"Jet Set Radio Future (USA).iso",
       @"Smashing Drive (USA).iso", @"Forza Motorsport (USA).iso",
-      @"Voodoo Vince (USA).iso", @"Project Gotham Racing 2 (USA).iso"
+      @"Voodoo Vince (USA).iso", @"Project Gotham Racing 2 (USA).iso",
+      @"The Lord of the Rings - The Return of the King and a Title Far Longer "
+      @"Than Any Row Has Room For On This Screen (USA).iso"
     ],
-    @"Games" : @[ @"Halo 3.iso", @"Forza Horizon 2.iso", @"DiRT 3.iso" ],
+    @"Games" : @[
+      @"Halo 3.iso", @"Forza Horizon 2.iso", @"DiRT 3.iso",
+      @"Tom Clancy's Rainbow Six Vegas 2 Complete Collector Edition With a "
+      @"Title Too Long For Any Tile To Show In Two Lines.iso"
+    ],
   };
   for (NSString* folder in folders) {
     NSString* dir = [docs stringByAppendingPathComponent:folder];

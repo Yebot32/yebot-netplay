@@ -57,7 +57,7 @@ NSAttributedString* XenraTracked(NSString* text, CGFloat size, UIColor* color) {
 }
 
 NSAttributedString* XenraScreenTitle(NSString* text) {
-  return XenraTrackedSpacing(text, 18, XenraAccent(), 0.15);
+  return XenraTrackedSpacing(text, 18, XenraAccentText(), 0.15);
 }
 
 NSAttributedString* XenraBodyText(NSString* text, CGFloat size, UIColor* color) {
@@ -275,9 +275,11 @@ CGFloat XenraHintBarInset(UIView* view) {
 @end
 
 // An outlined field with its label cut into the border, Android's exposed
-// dropdown. The label's own background is what makes the gap in the outline.
+// dropdown. The outline really stops either side of the label, so it sits on any
+// background, a translucent card included.
 @implementation XenraFieldButton {
   UIView* box_;
+  CAShapeLayer* outline_;
   UILabel* caption_;
   UILabel* value_;
   UILabel* help_;
@@ -290,8 +292,11 @@ CGFloat XenraHintBarInset(UIView* view) {
     box_ = [[UIView alloc] init];
     box_.userInteractionEnabled = NO;
     box_.layer.cornerRadius = 8;
-    box_.layer.borderWidth = 1.5;
-    box_.layer.borderColor = XenraAccent().CGColor;
+    outline_ = [CAShapeLayer layer];
+    outline_.fillColor = nil;
+    outline_.strokeColor = XenraAccent().CGColor;
+    outline_.lineWidth = 1.5;
+    [box_.layer addSublayer:outline_];
     box_.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:box_];
     value_ = XenraMakeLabel(nil, 17, UIFontWeightRegular, XenraText());
@@ -303,7 +308,6 @@ CGFloat XenraHintBarInset(UIView* view) {
     chevron.translatesAutoresizingMaskIntoConstraints = NO;
     [box_ addSubview:chevron];
     caption_ = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
-    caption_.backgroundColor = XenraPanelFill();
     [self addSubview:caption_];
     help_ = XenraMakeLabel(nil, 12, UIFontWeightRegular, XenraTextMuted());
     help_.numberOfLines = 0;
@@ -340,6 +344,48 @@ CGFloat XenraHintBarInset(UIView* view) {
 - (void)setTitle:(NSString*)title {
   [super setTitle:title];
   caption_.text = [NSString stringWithFormat:@" %@ ", title];
+  [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+  [super layoutSubviews];
+  const CGSize s = box_.bounds.size;
+  const CGFloat r = 8;
+  UIBezierPath* path = [UIBezierPath bezierPath];
+  [path moveToPoint:CGPointMake(CGRectGetMaxX(caption_.frame), 0)];
+  [path addArcWithCenter:CGPointMake(s.width - r, r)
+                  radius:r
+              startAngle:-M_PI_2
+                endAngle:0
+               clockwise:YES];
+  [path addArcWithCenter:CGPointMake(s.width - r, s.height - r)
+                  radius:r
+              startAngle:0
+                endAngle:M_PI_2
+               clockwise:YES];
+  [path addArcWithCenter:CGPointMake(r, s.height - r)
+                  radius:r
+              startAngle:M_PI_2
+                endAngle:M_PI
+               clockwise:YES];
+  [path addArcWithCenter:CGPointMake(r, r)
+                  radius:r
+              startAngle:M_PI
+                endAngle:M_PI_2 * 3
+               clockwise:YES];
+  [path addLineToPoint:CGPointMake(CGRectGetMinX(caption_.frame), 0)];
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  outline_.frame = box_.bounds;
+  outline_.path = path.CGPath;
+  [CATransaction commit];
+}
+
+- (void)setOpened:(BOOL)opened {
+  _opened = opened;
+  outline_.strokeColor = (opened ? XenraFocus() : XenraAccent()).CGColor;
+  outline_.lineWidth = opened ? 2 : 1.5;
+  caption_.textColor = opened ? XenraAccentText() : XenraTextMuted();
 }
 
 - (void)setValue:(NSString*)value {
@@ -350,10 +396,6 @@ CGFloat XenraHintBarInset(UIView* view) {
 - (void)setDetail:(NSString*)detail {
   _detail = [detail copy];
   help_.text = detail;
-}
-
-- (void)setCaptionFill:(UIColor*)fill {
-  caption_.backgroundColor = fill;
 }
 
 - (void)pressedChanged {
@@ -603,7 +645,7 @@ CGFloat XenraHintBarInset(UIView* view) {
     content = XenraBg();
     wash = XenraAccentLight();
   } else {
-    content = _destructive ? XenraError() : XenraAccentLight();
+    content = _destructive ? XenraError() : XenraAccentLightText();
     wash = _destructive ? [XenraError() colorWithAlphaComponent:0.2]
                         : XenraAccentAlpha(0x33);
     if (_style == XenraPillOutlined) {
@@ -867,7 +909,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
     for (NSUInteger i = 0; i < titles.count; i++) {
       XenraGroupCell* cell = [[XenraGroupCell alloc] initWithFrame:CGRectZero];
       cell.title = titles[i];
-      UILabel* label = XenraMakeLabel(titles[i], 13, UIFontWeightBold, XenraAccent());
+      UILabel* label = XenraMakeLabel(titles[i], 13, UIFontWeightBold, XenraAccentText());
       label.textAlignment = NSTextAlignmentCenter;
       label.adjustsFontSizeToFitWidth = YES;
       label.minimumScaleFactor = 0.8;
@@ -881,7 +923,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
       __weak XenraGroupCell* weakCell = cell;
       cell.paintContent = ^(BOOL selected) {
         weakCell.backgroundColor = selected ? XenraAccent() : XenraSurfaceVariant();
-        label.textColor = selected ? UIColor.blackColor : XenraAccent();
+        label.textColor = selected ? UIColor.blackColor : XenraAccentText();
       };
       cell.action = ^{
         [weak tapped:(NSInteger)i];
@@ -955,8 +997,8 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   if (self) {
     self.translatesAutoresizingMaskIntoConstraints = NO;
     const BOOL pill = style == XenraSectionPill;
-    UILabel* label = XenraMakeLabel(title, 14, UIFontWeightMedium, XenraAccentLight());
-    if (!pill) label.attributedText = XenraTrackedSpacing(title, 12, XenraAccent(), 0.12);
+    UILabel* label = XenraMakeLabel(title, 14, UIFontWeightMedium, XenraAccentLightText());
+    if (!pill) label.attributedText = XenraTrackedSpacing(title, 12, XenraAccentText(), 0.12);
     UIView* chip = [[UIView alloc] init];
     chip.translatesAutoresizingMaskIntoConstraints = NO;
     if (pill) {
@@ -1025,7 +1067,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
         forControlEvents:UIControlEventTouchUpInside |
                          UIControlEventTouchUpOutside |
                          UIControlEventTouchCancel];
-    readout_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccent());
+    readout_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraAccentText());
     readout_.textAlignment = NSTextAlignmentRight;
     readout_.adjustsFontSizeToFitWidth = YES;
     readout_.minimumScaleFactor = 0.8;
@@ -1099,7 +1141,12 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 
 @implementation XenraHintButton {
   UIView* wash_;
+  UILabel* badge_;
   UILabel* label_;
+  NSLayoutConstraint* badgeLeading_;
+  NSLayoutConstraint* labelLeading_;
+  NSLayoutConstraint* labelTrailing_;
+  BOOL barStyle_;
 }
 
 - (instancetype)initWithLetter:(NSString*)letter
@@ -1120,20 +1167,25 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
     badge.layer.cornerRadius = 16;
     badge.layer.masksToBounds = YES;
     [self addSubview:badge];
+    badge_ = badge;
     label_ = XenraMakeLabel(nil, 13, UIFontWeightBold, XenraTextTertiary());
     [self addSubview:label_];
+    badgeLeading_ = [badge.leadingAnchor constraintEqualToAnchor:self.leadingAnchor];
+    labelLeading_ = [label_.leadingAnchor constraintEqualToAnchor:badge.trailingAnchor
+                                                         constant:8];
+    labelTrailing_ = [label_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor];
     [NSLayoutConstraint activateConstraints:@[
       [wash_.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:-4],
       [wash_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:12],
       [wash_.topAnchor constraintEqualToAnchor:self.topAnchor constant:-4],
       [wash_.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:4],
-      [badge.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+      badgeLeading_,
       [badge.topAnchor constraintEqualToAnchor:self.topAnchor],
       [badge.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
       [badge.widthAnchor constraintEqualToConstant:32],
       [badge.heightAnchor constraintEqualToConstant:32],
-      [label_.leadingAnchor constraintEqualToAnchor:badge.trailingAnchor constant:8],
-      [label_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+      labelLeading_,
+      labelTrailing_,
       [label_.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
     ]];
     self.action = action;
@@ -1151,8 +1203,71 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 
 - (void)setTitle:(NSString*)title {
   [super setTitle:title];
+  if (barStyle_) {
+    label_.attributedText = [[NSAttributedString alloc]
+        initWithString:title ?: @""
+            attributes:@{
+              NSFontAttributeName : [UIFont systemFontOfSize:12
+                                                      weight:UIFontWeightBold],
+              NSForegroundColorAttributeName : XenraTextSecondary(),
+              NSKernAttributeName : @(1.2),
+            }];
+    return;
+  }
   label_.attributedText =
       XenraTrackedSpacing(title ?: @"", 13, XenraTextTertiary(), 0.15);
+}
+
+- (void)useBarStyleWithBadgeTrailing:(BOOL)trailing {
+  if (barStyle_) return;
+  barStyle_ = YES;
+  self.title = self.title;
+
+  // circuit_wire_left and _right: 36 pt, a 48 unit viewport, behind the badge.
+  const CGFloat unit = 36.0 / 48.0;
+  UIBezierPath* wire = [UIBezierPath bezierPath];
+  if (trailing) {
+    [wire moveToPoint:CGPointMake(4 * unit, 4 * unit)];
+    [wire addLineToPoint:CGPointMake(24 * unit, 4 * unit)];
+    [wire addQuadCurveToPoint:CGPointMake(44 * unit, 24 * unit)
+                 controlPoint:CGPointMake(44 * unit, 4 * unit)];
+    [wire addLineToPoint:CGPointMake(44 * unit, 44 * unit)];
+  } else {
+    [wire moveToPoint:CGPointMake(44 * unit, 4 * unit)];
+    [wire addLineToPoint:CGPointMake(44 * unit, 24 * unit)];
+    [wire addQuadCurveToPoint:CGPointMake(24 * unit, 44 * unit)
+                 controlPoint:CGPointMake(44 * unit, 44 * unit)];
+    [wire addLineToPoint:CGPointMake(4 * unit, 44 * unit)];
+  }
+  CAShapeLayer* art = [CAShapeLayer layer];
+  art.path = wire.CGPath;
+  art.fillColor = UIColor.clearColor.CGColor;
+  art.strokeColor = XenraAccentAlpha(0x33).CGColor;
+  art.lineWidth = 1.5;
+  art.frame = CGRectMake(-2, -2, 36, 36);  // over a 32 pt badge at the origin
+  [badge_.superview.layer insertSublayer:art below:badge_.layer];
+  badge_.layer.masksToBounds = YES;
+
+  if (!trailing) return;
+  [art removeFromSuperlayer];
+  UIView* holder = [[UIView alloc] init];
+  holder.userInteractionEnabled = NO;
+  holder.translatesAutoresizingMaskIntoConstraints = NO;
+  [self insertSubview:holder belowSubview:badge_];
+  [holder.layer addSublayer:art];
+  art.frame = CGRectMake(0, 0, 36, 36);
+  [NSLayoutConstraint deactivateConstraints:@[
+    badgeLeading_, labelLeading_, labelTrailing_
+  ]];
+  [NSLayoutConstraint activateConstraints:@[
+    [label_.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+    [label_.trailingAnchor constraintEqualToAnchor:badge_.leadingAnchor constant:-8],
+    [badge_.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+    [holder.centerXAnchor constraintEqualToAnchor:badge_.centerXAnchor],
+    [holder.centerYAnchor constraintEqualToAnchor:badge_.centerYAnchor],
+    [holder.widthAnchor constraintEqualToConstant:36],
+    [holder.heightAnchor constraintEqualToConstant:36],
+  ]];
 }
 
 // The badge is 32 pt. A thumb is not.
@@ -1217,7 +1332,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
 
   __weak XenraBladeSheet* weak = self;
   if (title.length) {
-    UILabel* header = XenraMakeLabel(nil, 18, UIFontWeightBold, XenraAccent());
+    UILabel* header = XenraMakeLabel(nil, 18, UIFontWeightBold, XenraAccentText());
     header.attributedText = XenraScreenTitle(title);
     header.numberOfLines = 2;
     header.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -1275,6 +1390,9 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   NSLayoutConstraint* fit =
       [scroll.heightAnchor constraintEqualToAnchor:body.heightAnchor];
   fit.priority = UILayoutPriorityDefaultHigh;
+  // Blades only have a minimum height, so without this the slack goes to one of them.
+  NSLayoutConstraint* tight = [body.heightAnchor constraintEqualToConstant:0];
+  tight.priority = UILayoutPriorityDefaultLow - 1;
   NSLayoutConstraint* preferred = [panel.widthAnchor constraintEqualToConstant:440];
   preferred.priority = UILayoutPriorityDefaultHigh;
   [NSLayoutConstraint activateConstraints:@[
@@ -1301,6 +1419,7 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
     [glyph.centerXAnchor constraintEqualToAnchor:close.centerXAnchor],
     [glyph.centerYAnchor constraintEqualToAnchor:close.centerYAnchor],
     fit,
+    tight,
     preferred,
   ]];
 }
@@ -1529,6 +1648,10 @@ static UIStackView* GroupRow(UIView* owner, CGFloat radius, CGFloat stroke,
   trailing_.constant = panelStyle ? -16 : -24;
   height_.constant = panelStyle ? 48 : 80;
   center_.constant = panelStyle ? -4 : 0;
+  if (panelStyle) {
+    [back_ useBarStyleWithBadgeTrailing:NO];
+    [select_ useBarStyleWithBadgeTrailing:YES];
+  }
 }
 
 - (void)setOnSelect:(void (^)(void))onSelect {

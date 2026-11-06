@@ -419,11 +419,17 @@ void WithoutActions(void (^change)(void)) {
   self = [super initWithFrame:frame];
   if (self) {
     shadow_ = [[UIView alloc] init];
-    shadow_.layer.shadowColor = UIColor.blackColor.CGColor;
+    // Kept inside the tile's 6 pt padding, or the edge of the list cuts it off in
+    // a straight line, which shows on the light console. Tinted there too: black
+    // over pale green reads as grey.
+    shadow_.layer.shadowColor =
+        (XenraThemeMode == XenraThemeX360 ? XenraHex(0xFF313D14)
+                                          : UIColor.blackColor)
+            .CGColor;
     shadow_.layer.shadowOpacity =
-        XenraThemeMode == XenraThemeX360 ? 0.16f : 0.5f;
-    shadow_.layer.shadowRadius = 9;
-    shadow_.layer.shadowOffset = CGSizeMake(0, 5);
+        XenraThemeMode == XenraThemeX360 ? 0.22f : 0.5f;
+    shadow_.layer.shadowRadius = 5;
+    shadow_.layer.shadowOffset = CGSizeMake(0, 3);
     [self.contentView addSubview:shadow_];
 
     card_ = [[UIView alloc] init];
@@ -1242,14 +1248,15 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
   if (!rendered_) {
     rendered_ = YES;
     [self renderWithEntrance];
-  } else if (gridMode_) {
-    // The tile size changed, and with it the size of every cover.
-    [self applyGridMetrics];
-    [layout_ invalidateLayout];
-    [collection_ reloadData];
-  } else {
-    [layout_ invalidateLayout];
+    return;
   }
+  // Not invalidateLayout alone: in the same pass as the detail panel opening it
+  // moved the rows and left them at their old width, cut off at both ends. A tile
+  // also has a new cover size. Everything comes from the cover cache, so this
+  // draws nothing different but the size.
+  [self applyGridMetrics];
+  [collection_ reloadData];
+  [collection_ layoutIfNeeded];
 }
 
 - (void)viewWillTransitionToSize:(CGSize)size
@@ -1516,9 +1523,15 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
   [self.view setNeedsLayout];
   [self.view layoutIfNeeded];
-  [collection_ scrollToItemAtIndexPath:path
-                      atScrollPosition:UICollectionViewScrollPositionNone
-                              animated:YES];
+  // The strip in portrait can land on top of the row just tapped.
+  UICollectionViewLayoutAttributes* row =
+      [layout_ layoutAttributesForItemAtIndexPath:path];
+  const CGRect visible = {collection_.contentOffset, collection_.bounds.size};
+  if (row && !CGRectContainsRect(visible, row.frame)) {
+    [collection_ scrollToItemAtIndexPath:path
+                        atScrollPosition:UICollectionViewScrollPositionNone
+                                animated:YES];
+  }
   detail_.alpha = 0;
   XenraAnimate(0.2, 0, XenraCurveStandard,
                ^{
@@ -1583,6 +1596,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
                         XenraSettingsController* perGame =
                             [[XenraSettingsController alloc] init];
                         perGame.game = game.name;
+                        perGame.gameFile = game.fileName;
                         [weak.navigationController pushViewController:perGame
                                                              animated:YES];
                       }]];
@@ -1819,6 +1833,17 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 }
 
 #ifdef XENRA_UITEST
+// There is no way to photograph the empty card on a tour with games in it.
+- (void)tourEmpty:(NSNumber*)empty {
+  if (empty.boolValue) {
+    games_ = @[];
+    [self updateHeader];
+    [collection_ reloadData];
+  } else {
+    [self applyGames:scanner_.cachedGames];
+  }
+}
+
 // The tour taps by control title, and a cell has none.
 - (void)tourTapItem:(NSNumber*)item {
   if (item.integerValue >= (NSInteger)games_.count) return;

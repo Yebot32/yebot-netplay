@@ -78,10 +78,9 @@ extern const NSTimeInterval XenraPressDelay;
 @interface XenraFieldButton : XenraPressControl
 @property(nonatomic, copy) NSString* value;
 @property(nonatomic, copy) NSString* detail;
+// Its list is showing: the white ring and the accent caption.
+@property(nonatomic, assign) BOOL opened;
 - (instancetype)initWithTitle:(NSString*)title action:(void (^)(void))action;
-// What the caption's gap in the outline is filled with. Must be the opaque colour
-// the field sits on, or the outline shows through. Defaults to the panel fill.
-- (void)setCaptionFill:(UIColor*)fill;
 @end
 
 // One tappable blade, Android's Widget.Xaniteog.Blade. Set `compact` for any row
@@ -218,6 +217,9 @@ typedef NS_ENUM(NSInteger, XenraSectionStyle) {
 // A badge and its label, Widget.Xaniteog.HintBadge and HintLabel. With an action
 // it is a button, with none a legend and it lets touches through.
 @interface XenraHintButton : XenraPressControl
+// The library's bottom bar: 12 pt words as written, circuit_wire art behind the
+// badge, and the badge on the outside edge. XenraHintBar.panelStyle sets this.
+- (void)useBarStyleWithBadgeTrailing:(BOOL)trailing;
 - (instancetype)initWithLetter:(NSString*)letter
                          title:(NSString*)title
                         action:(void (^)(void))action;
