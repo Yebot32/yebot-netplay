@@ -241,6 +241,10 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   NSDictionary* environment = @{
     @"XEMU_IOS_JIT_MODE" : universal ? @"universal-js" : @"wx-reprotection",
     @"XEMU_IOS_UNIVERSAL_JIT" : universal ? @"1" : @"0",
+    // Where each frame's time goes on the GPU thread, every 2 s, and which present
+    // modes the swapchain really offers: the evidence for the speed work.
+    @"XEMU_IOS_DISPLAY_PERF_STATS" : @"1",
+    @"XEMU_IOS_VK_SWAPCHAIN_TRACE" : @"1",
     @"XEMU_IOS_VK_PIPELINE_CACHE_PATH" : [shaders
         stringByAppendingPathComponent:
             [NSString stringWithFormat:@"%lx-vulkan-pipeline.bin",

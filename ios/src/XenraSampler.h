@@ -11,3 +11,7 @@
 #import <Foundation/Foundation.h>
 
 void XenraSamplerDump(NSString* reason);
+
+// One line of the busiest threads and their CPU share, for telling a CPU-bound game
+// from a GPU-bound one. Cheap: no thread is suspended.
+void XenraSamplerLoad(void);

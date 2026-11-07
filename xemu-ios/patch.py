@@ -200,3 +200,29 @@ replace(
     "bool xemu_ios_universal_jit_is_enabled(void)\n{\n    const char *env = getenv(\"XEMU_IOS_UNIVERSAL_JIT\");\n\n    return universal_jit_enabled ||\n           (env != NULL && g_ascii_strcasecmp(env, \"0\") != 0 &&\n            g_ascii_strcasecmp(env, \"false\") != 0 &&\n            g_ascii_strcasecmp(env, \"no\") != 0);\n}\n",
     "bool xemu_ios_universal_jit_is_enabled(void)\n{\n    static int from_env = -1;\n\n    if (from_env < 0) {\n        const char *env = getenv(\"XEMU_IOS_UNIVERSAL_JIT\");\n\n        from_env = env != NULL && g_ascii_strcasecmp(env, \"0\") != 0 &&\n                   g_ascii_strcasecmp(env, \"false\") != 0 &&\n                   g_ascii_strcasecmp(env, \"no\") != 0;\n    }\n    return universal_jit_enabled || from_env;\n}\n",
 )
+
+# Darwin has no ppoll, so this falls into xemu's busy-wait for timers due within
+# 1.25 ms: the main loop spins a whole core on the clock. Android removed it with
+# ppoll. Here: if nothing is ready yet, sleep until the deadline instead.
+replace(
+    "util/qemu-timer.c",
+    "    if ((0 < timeout) && (timeout < XBOX_BUSYWAIT_THRESHOLD_NS)) {\n        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);\n        int64_t end = now + timeout;\n        while (now < end) {\n            now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);\n        }\n        timeout = 0;\n    }\n",
+    """    if ((0 < timeout) && (timeout < XBOX_BUSYWAIT_THRESHOLD_NS)) {
+#ifdef CONFIG_IOS
+        int ready = g_poll(fds, nfds, 0);
+        if (ready != 0) {
+            return ready;
+        }
+        struct timespec ts = { 0, (long)timeout };
+        nanosleep(&ts, NULL);
+#else
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        int64_t end = now + timeout;
+        while (now < end) {
+            now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
+#endif
+        timeout = 0;
+    }
+""",
+)

@@ -1,5 +1,6 @@
 #import "XenraSampler.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <dlfcn.h>
 #include <mach/mach.h>
@@ -65,6 +66,44 @@ NSString* Where(uint64_t address) {
 }
 
 }  // namespace
+
+void XenraSamplerLoad(void) {
+  thread_act_array_t threads;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return;
+  struct Busy {
+    int cpu;
+    char name[48];
+  } busy[kMaxThreads];
+  int taken = 0, total = 0;
+  for (mach_msg_type_number_t i = 0; i < count; i++) {
+    thread_basic_info_data_t basic;
+    mach_msg_type_number_t size = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(threads[i], THREAD_BASIC_INFO,
+                    reinterpret_cast<thread_info_t>(&basic), &size) == KERN_SUCCESS &&
+        !(basic.flags & TH_FLAGS_IDLE)) {
+      total += basic.cpu_usage;
+      if (basic.cpu_usage >= 30 && taken < kMaxThreads) {
+        Busy& b = busy[taken++];
+        b.cpu = basic.cpu_usage;
+        b.name[0] = 0;
+        if (pthread_t handle = pthread_from_mach_thread_np(threads[i])) {
+          pthread_getname_np(handle, b.name, sizeof(b.name));
+        }
+      }
+    }
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  }
+  vm_deallocate(mach_task_self(), vm_address_t(threads), count * sizeof(thread_act_t));
+  std::sort(busy, busy + taken, [](const Busy& a, const Busy& b) { return a.cpu > b.cpu; });
+  NSMutableString* text = [NSMutableString
+      stringWithFormat:@"load: total %.0f%% of one core;", total / 10.0];
+  for (int i = 0; i < taken && i < 6; i++) {
+    [text appendFormat:@" %s %.0f%%", busy[i].name[0] ? busy[i].name : "?",
+                       busy[i].cpu / 10.0];
+  }
+  XenraLog(text);
+}
 
 void XenraSamplerDump(NSString* reason) {
   thread_act_array_t threads;

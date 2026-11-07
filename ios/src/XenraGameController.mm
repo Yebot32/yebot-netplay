@@ -385,8 +385,20 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                      if (!XenraXemuStatsLine()) XenraSamplerDump(@"no frame yet");
                    });
   }
+  [self watchLoad];
   // A timer, not a dispatch: see XenraXemuRun.
   [self performSelector:@selector(runXemu) withObject:nil afterDelay:0.1];
+}
+
+// Every 15 seconds while the game runs, off the main thread, which the core owns.
+- (void)watchLoad {
+  __weak XenraGameController* weak = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
+                 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                   if (!weak) return;
+                   XenraSamplerLoad();
+                   [weak watchLoad];
+                 });
 }
 
 - (void)keepSdlAway {
