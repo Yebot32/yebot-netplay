@@ -58,9 +58,19 @@ void XenraOpenJitEnabler(void) {
   NSURLComponents* url = [[NSURLComponents alloc] init];
   url.scheme = @"stikjit";
   url.host = @"enable-jit";
-  url.queryItems = @[ [NSURLQueryItem
-      queryItemWithName:@"bundle-id"
-                  value:NSBundle.mainBundle.bundleIdentifier] ];
+  NSMutableArray<NSURLQueryItem*>* items = [NSMutableArray arrayWithObjects:
+      [NSURLQueryItem queryItemWithName:@"bundle-id"
+                                  value:NSBundle.mainBundle.bundleIdentifier],
+      [NSURLQueryItem queryItemWithName:@"pid"
+                                  value:@(getpid()).stringValue], nil];
+  // Always from iOS 26, as DukeX does. StikDebug skips the script where it thinks
+  // the device has no TXM, and it thinks that of an M1: without the script the M1 on
+  // iOS 27 shows CS_DEBUGGED but faults on every page of generated code.
+  if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) {
+    [items addObject:[NSURLQueryItem queryItemWithName:@"script-name"
+                                                 value:@"universal.js"]];
+  }
+  url.queryItems = items;
   XenraLog([NSString stringWithFormat:@"JIT handoff: %@", url.URL]);
   [UIApplication.sharedApplication openURL:url.URL
                                    options:@{}

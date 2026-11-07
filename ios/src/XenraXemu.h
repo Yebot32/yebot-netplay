@@ -20,8 +20,8 @@ NSString* XenraXemuMissingFiles(void);
 // attached debugger may eat that signal. Returns an error, or nil.
 NSString* XenraXemuPrepare(void);
 
-// Universal.js is starting up and needs time before the first brk. YES only where
-// StikDebug runs a script, which it does with TXM.
+// Universal.js is attached and waiting for a brk, which it needs a moment to be ready
+// for. Once it is, a core that asks for its memory gets an executable region.
 BOOL XenraXemuNeedsSettle(void);
 
 

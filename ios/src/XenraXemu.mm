@@ -60,8 +60,8 @@ NSString* XenraXemuPrepare(void) {
   return nil;
 }
 
-// StikDebug runs Universal.js only on TXM devices, and that script stays attached
-// to answer the brk. Without TXM nothing is attached, and a brk would be a SIGTRAP.
+// The script stays attached to answer the brk. With nothing attached a brk would be
+// a SIGTRAP, and this is the only way to tell.
 static BOOL DebuggerAttached(void) {
   struct kinfo_proc info = {};
   size_t size = sizeof(info);
@@ -156,8 +156,9 @@ BOOL XenraXemuNeedsSettle(void) { return NeedsUniversalJit(); }
 
 NSString* XenraXemuFileProblem(void) {
   if (!NeedsUniversalJit() && XenraJitChooseScheme() == XenraJitNone) {
-    return XS(@"iOS refused every way of running generated code, so the game "
-              "cannot start. Close Xenra, enable JIT again and retry.");
+    return XS(@"JIT is on, but iOS still refuses to run generated code. This iPad "
+              "needs StikDebug's universal script: assign it to Xenra in StikDebug, "
+              "then start the game again.");
   }
   // A wrong MCPX is the one mistake the core reports only to a menu we do not
   // show: it carries on from the flash image and the guest never starts.

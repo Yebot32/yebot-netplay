@@ -230,7 +230,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
     }
   }
   if (XenraJitActive()) {
-    if (resumed_ && og_ && XenraXemuNeedsSettle()) {
+    if (resumed_ && XenraXemuNeedsSettle()) {
       [self settleThenBoot];
     } else {
       [self boot];
@@ -255,7 +255,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   if (!XenraJitActive()) return;
   [jitTimer_ invalidate];
   jitTimer_ = nil;
-  if (!og_ || !XenraXemuNeedsSettle()) {
+  if (!XenraXemuNeedsSettle()) {
     [self boot];
     return;
   }
@@ -280,6 +280,9 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
     return;
   }
   [XenraSettings applyForGame:name_];
+  // The 360 core's own detection goes by chip and calls this one TXM-free. The script
+  // being attached is the better evidence: it is waiting for the core's prepare.
+  if (XenraXemuNeedsSettle()) setenv("HAS_TXM", "1", 1);
   xe_ios_set_game_view(metal_);
   XenraLog([NSString stringWithFormat:@"boot: %@", path_.lastPathComponent]);
   XenraLogsBeginSession();

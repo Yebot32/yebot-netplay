@@ -350,4 +350,4 @@
 "Currently selected" = "現在選択中";
 "Choose the language for the interface" = "インターフェイスの言語を選択";
 
-"iOS refused every way of running generated code, so the game cannot start. Close Xenra, enable JIT again and retry." = "iOS が生成コードの実行方法をすべて拒否したため、ゲームを開始できません。Xenra を閉じ、JIT を再度有効にしてからやり直してください。";
+"JIT is on, but iOS still refuses to run generated code. This iPad needs StikDebug's universal script: assign it to Xenra in StikDebug, then start the game again." = "JIT は有効ですが、iOS が生成コードの実行を拒否しています。この iPad には StikDebug のユニバーサルスクリプトが必要です。StikDebug で Xenra に割り当ててから、ゲームをもう一度開始してください。";
