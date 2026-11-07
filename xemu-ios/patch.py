@@ -181,3 +181,22 @@ replace(
     "void xemu_ios_input_diagnostic_log(const char *fmt, ...)\n{\n    char message[512];\n    va_list args;\n\n",
     "void xemu_ios_input_diagnostic_log(const char *fmt, ...)\n{\n    char message[512];\n    va_list args;\n\n    static int enabled = -1;\n    if (enabled < 0) {\n        enabled = getenv(\"XEMU_IOS_INPUT_TRACE\") != NULL;\n    }\n    if (!enabled) {\n        return;\n    }\n\n",
 )
+
+# The vCPU loop asked getenv() three times for every block that returned to C, and
+# the universal-JIT check asked once more per chained jump and per translation. The
+# environment is set before xemu_ios_main and never changes: read each once.
+replace(
+    "accel/tcg/cpu-exec.c",
+    "static bool ios_tcg_limit_blocks_enabled(void)\n{\n    return ios_tcg_env_present(\"XEMU_IOS_TCG_MAX_INSNS\") ||\n           ios_tcg_env_present(\"XEMU_IOS_TCG_IRQ_INSNS\");\n}\n",
+    "static bool ios_tcg_limit_blocks_enabled(void)\n{\n    static int enabled = -1;\n\n    if (enabled < 0) {\n        enabled = ios_tcg_env_present(\"XEMU_IOS_TCG_MAX_INSNS\") ||\n                  ios_tcg_env_present(\"XEMU_IOS_TCG_IRQ_INSNS\");\n    }\n    return enabled;\n}\n\nstatic bool ios_tcg_nochain_enabled(void)\n{\n    static int enabled = -1;\n\n    if (enabled < 0) {\n        enabled = ios_tcg_env_enabled(\"XEMU_IOS_TCG_NOCHAIN\");\n    }\n    return enabled;\n}\n",
+)
+replace(
+    "accel/tcg/cpu-exec.c",
+    "            if (ios_tcg_env_enabled(\"XEMU_IOS_TCG_NOCHAIN\")) {\n",
+    "            if (ios_tcg_nochain_enabled()) {\n",
+)
+replace(
+    "tcg/ios-jit.c",
+    "bool xemu_ios_universal_jit_is_enabled(void)\n{\n    const char *env = getenv(\"XEMU_IOS_UNIVERSAL_JIT\");\n\n    return universal_jit_enabled ||\n           (env != NULL && g_ascii_strcasecmp(env, \"0\") != 0 &&\n            g_ascii_strcasecmp(env, \"false\") != 0 &&\n            g_ascii_strcasecmp(env, \"no\") != 0);\n}\n",
+    "bool xemu_ios_universal_jit_is_enabled(void)\n{\n    static int from_env = -1;\n\n    if (from_env < 0) {\n        const char *env = getenv(\"XEMU_IOS_UNIVERSAL_JIT\");\n\n        from_env = env != NULL && g_ascii_strcasecmp(env, \"0\") != 0 &&\n                   g_ascii_strcasecmp(env, \"false\") != 0 &&\n                   g_ascii_strcasecmp(env, \"no\") != 0;\n    }\n    return universal_jit_enabled || from_env;\n}\n",
+)
