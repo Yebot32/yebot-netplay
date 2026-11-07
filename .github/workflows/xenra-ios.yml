@@ -309,6 +309,19 @@ jobs:
           cp -R "$PAYLOAD_APP/Resources/." "$PAYLOAD_APP/"
           rm -rf "$PAYLOAD_APP/Resources"
         fi
+        # The launch colour lives in a compiled catalogue. actool needs a simulator
+        # runtime matching its Xcode, and the Xcode this build selects has none on
+        # the image, so try the others. Without it the launch screen is only plain.
+        if [ ! -f "$PAYLOAD_APP/Assets.car" ]; then
+          for XCODE in /Applications/Xcode_16.4*.app /Applications/Xcode_26*.app /Applications/Xcode_16.*.app; do
+            [ -d "$XCODE" ] || continue
+            if DEVELOPER_DIR="$XCODE/Contents/Developer" xcrun actool ios/res/Launch.xcassets                  --compile "$PAYLOAD_APP" --platform iphoneos --minimum-deployment-target 16.0                  --target-device iphone --target-device ipad                  --output-partial-info-plist "$RUNNER_TEMP/launch-assets.plist" >/dev/null 2>&1                && [ -f "$PAYLOAD_APP/Assets.car" ]; then
+              echo "Launch colour compiled with $XCODE"
+              break
+            fi
+          done
+          [ -f "$PAYLOAD_APP/Assets.car" ] || echo "::warning::No Assets.car, plain launch screen"
+        fi
         LANGS=$(ls "$PAYLOAD_APP"/*.lproj/Localizable.strings | wc -l)
         if [ "$LANGS" -ne 8 ]; then
           echo "::error::Expected 8 languages in the bundle, found $LANGS"
