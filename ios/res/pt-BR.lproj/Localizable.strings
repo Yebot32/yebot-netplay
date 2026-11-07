@@ -354,3 +354,7 @@
 "Waiting for StikDebug's universal script…" = "Aguardando o script universal do StikDebug…";
 "This game is still in iCloud Drive, so it cannot be read yet. Xenra asked iOS to download it: wait until it shows as downloaded in Files, then start it again." = "Este jogo ainda está no iCloud Drive e não pode ser lido. O Xenra pediu ao iOS para baixá-lo: espere até que apareça como baixado no Arquivos e inicie-o novamente.";
 "The game file could not be read (%s). Choose the games folder again in the library, or copy the game into Xenra's own folder in Files." = "Não foi possível ler o arquivo do jogo (%s). Escolha a pasta de jogos novamente na biblioteca ou copie o jogo para a pasta do Xenra no Arquivos.";
+"Memory limit" = "Limite de memória";
+"How much memory iOS gives Xenra, and how to raise it." = "Quanta memória o iOS dá ao Xenra e como aumentá-la.";
+"Open GetMoreRam" = "Abrir GetMoreRam";
+"iOS lets Xenra use %.1f GB. Xbox 360 games need as much as they can get.\n\nTo raise it: run GetMoreRam, sign in with the Apple ID you use in Sideloadly, turn on Increased Memory Limit for Xenra, then install Xenra again with Sideloadly. Xenra already asks for the extra memory; iOS gives it once your Apple ID allows it." = "O iOS permite que o Xenra use %.1f GB. Jogos de Xbox 360 precisam do máximo possível.\n\nPara aumentar: execute o GetMoreRam, entre com o Apple ID que você usa no Sideloadly, ative Increased Memory Limit para o Xenra e instale o Xenra novamente com o Sideloadly. O Xenra já pede a memória extra; o iOS a concede quando seu Apple ID permitir.";

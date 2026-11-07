@@ -1,4 +1,6 @@
 #import "XenraScreens.h"
+
+#include <mach/mach.h>
 #import "XenraLanguage.h"
 #import "XenraStrings.h"
 
@@ -952,6 +954,8 @@ void XenraShowAbout(UIView* host) {
     XenraShowAbout(self.view);
   } else if ([row.key isEqual:@"jit.enable"]) {
     XenraOpenJitEnabler();
+  } else if ([row.key isEqual:@"memory.limit"]) {
+    [self showMemoryLimit];
   } else if ([row.key isEqual:@"log.share"]) {
     XenraShareLogs(self, nil);
   } else if ([row.key isEqual:@"cache.clear"]) {
@@ -959,6 +963,38 @@ void XenraShowAbout(UIView* host) {
   } else if ([row.key isEqual:@"og.eeprom"]) {
     [self chooseEeprom:row];
   }
+}
+
+// Xenra always asks for the increased memory limit; iOS grants it only when the
+// Apple ID that signed the app allows it, which GetMoreRam sets and the next
+// Sideloadly install picks up. This shows what iOS gives right now.
+- (void)showMemoryLimit {
+  task_vm_info_data_t vm = {};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  double limit = 0;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm),
+                &count) == KERN_SUCCESS) {
+    limit = (vm.phys_footprint + vm.limit_bytes_remaining) / 1073741824.0;
+  }
+  NSString* message = [NSString stringWithFormat:
+      XS(@"iOS lets Xenra use %.1f GB. Xbox 360 games need as much as they can get.\n\n"
+         "To raise it: run GetMoreRam, sign in with the Apple ID you use in "
+         "Sideloadly, turn on Increased Memory Limit for Xenra, then install Xenra "
+         "again with Sideloadly. Xenra already asks for the extra memory; iOS gives "
+         "it once your Apple ID allows it."),
+      limit];
+  XenraBladeItem* open = [XenraBladeItem
+      title:XS(@"Open GetMoreRam")
+      action:^{
+        [UIApplication.sharedApplication
+                      openURL:[NSURL URLWithString:@"https://github.com/hugeBlack/GetMoreRam"]
+                      options:@{}
+            completionHandler:nil];
+      }];
+  [XenraBladeSheet showIn:self.view
+                    title:XS(@"Memory limit")
+                  message:message
+                    items:@[ open ]];
 }
 
 - (void)confirmClearCache {

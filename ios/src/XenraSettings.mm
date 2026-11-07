@@ -179,6 +179,8 @@ static XenraSettingSection* JitSection(void) {
   return Section(@"JIT", @[
     Action(@"jit.enable", XS(@"Enable JIT"),
            XS(@"Opens StikDebug. Needed once per launch.")),
+    Action(@"memory.limit", XS(@"Memory limit"),
+           XS(@"How much memory iOS gives Xenra, and how to raise it.")),
   ]);
 }
 

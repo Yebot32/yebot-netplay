@@ -354,3 +354,7 @@
 "Waiting for StikDebug's universal script…" = "正在等待 StikDebug 的通用脚本…";
 "This game is still in iCloud Drive, so it cannot be read yet. Xenra asked iOS to download it: wait until it shows as downloaded in Files, then start it again." = "此游戏仍在 iCloud 云盘中,暂时无法读取。Xenra 已请求 iOS 下载它:请等到它在“文件”中显示为已下载,然后再次启动。";
 "The game file could not be read (%s). Choose the games folder again in the library, or copy the game into Xenra's own folder in Files." = "无法读取游戏文件(%s)。请在游戏库中重新选择游戏文件夹,或在“文件”中将游戏复制到 Xenra 的文件夹。";
+"Memory limit" = "内存上限";
+"How much memory iOS gives Xenra, and how to raise it." = "iOS 分配给 Xenra 的内存量,以及如何提高。";
+"Open GetMoreRam" = "打开 GetMoreRam";
+"iOS lets Xenra use %.1f GB. Xbox 360 games need as much as they can get.\n\nTo raise it: run GetMoreRam, sign in with the Apple ID you use in Sideloadly, turn on Increased Memory Limit for Xenra, then install Xenra again with Sideloadly. Xenra already asks for the extra memory; iOS gives it once your Apple ID allows it." = "iOS 允许 Xenra 使用 %.1f GB。Xbox 360 游戏需要尽可能多的内存。\n\n提高方法:运行 GetMoreRam,用你在 Sideloadly 中使用的 Apple ID 登录,为 Xenra 打开 Increased Memory Limit,然后用 Sideloadly 重新安装 Xenra。Xenra 已经在请求额外内存;一旦你的 Apple ID 允许,iOS 就会提供。";
