@@ -173,3 +173,11 @@ replace(
     /*
      * Leave the initial context initialized""",
 )
+
+# Input diagnostics are written for every few polls while a button is held: thousands
+# of lines a session, each formatted and written on the input path. Only on request.
+replace(
+    "ui/xemu-input.c",
+    "void xemu_ios_input_diagnostic_log(const char *fmt, ...)\n{\n    char message[512];\n    va_list args;\n\n",
+    "void xemu_ios_input_diagnostic_log(const char *fmt, ...)\n{\n    char message[512];\n    va_list args;\n\n    static int enabled = -1;\n    if (enabled < 0) {\n        enabled = getenv(\"XEMU_IOS_INPUT_TRACE\") != NULL;\n    }\n    if (!enabled) {\n        return;\n    }\n\n",
+)

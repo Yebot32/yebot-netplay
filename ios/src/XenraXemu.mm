@@ -289,7 +289,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   if ([[XenraSettings stringForKey:@"core.trace_detail" fallback:@"false"]
           isEqual:@"true"]) {
     for (const char* name :
-         {"XEMU_IOS_TCG_TRACE", "XEMU_IOS_RR_RETURN_TRACE",
+         {"XEMU_IOS_TCG_TRACE", "XEMU_IOS_RR_RETURN_TRACE", "XEMU_IOS_INPUT_TRACE",
           "XEMU_IOS_FRAMEBUFFER_TRACE"}) {
       setenv(name, "1", 1);
     }
