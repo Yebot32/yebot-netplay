@@ -25,6 +25,7 @@ void XTimer::Initialize(uint32_t timer_type) {
   switch (timer_type) {
     case 0:  // NotificationTimer
       timer_ = xe::threading::Timer::CreateManualResetTimer();
+      manual_reset_ = true;
       break;
     case 1:  // SynchronizationTimer
       timer_ = xe::threading::Timer::CreateSynchronizationTimer();
@@ -108,6 +109,14 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
 X_STATUS XTimer::Cancel() {
   std::lock_guard<std::mutex> lock(timer_lock_);
   return timer_->Cancel() ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+}
+
+bool XTimer::IsSignaled() {
+  // A zero wait on a synchronization timer would consume its signal, so only
+  // a notification timer can be read.
+  return manual_reset_ && xe::threading::Wait(timer_.get(), false,
+                                              std::chrono::milliseconds(0)) ==
+                              xe::threading::WaitResult::kSuccess;
 }
 
 }  // namespace kernel
