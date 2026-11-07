@@ -297,8 +297,11 @@ dword_result_t XamLoaderSetLaunchData_entry(lpvoid_t data, dword_t size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
   loader_data.launch_data_present = size ? true : false;
-  loader_data.launch_data.resize(size);
-  std::memcpy(loader_data.launch_data.data(), data, size);
+  // The console keeps at most MAX_LAUNCH_DATA_SIZE bytes.
+  constexpr uint32_t kMaxLaunchDataSize = 0x3FC;
+  const uint32_t copy_size = std::min(size.value(), kMaxLaunchDataSize);
+  loader_data.launch_data.resize(copy_size);
+  std::memcpy(loader_data.launch_data.data(), data, copy_size);
   XELOGI("XamLoaderSetLaunchData: size={} data={}", uint32_t(size),
          HexBytes(loader_data.launch_data, kLaunchDataLogBytes));
   return 0;
