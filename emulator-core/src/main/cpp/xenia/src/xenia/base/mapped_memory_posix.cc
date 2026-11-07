@@ -10,12 +10,15 @@
 #include "xenia/base/mapped_memory.h"
 
 #include <fcntl.h>
+#include <cerrno>
+#include <cstring>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <memory>
 
 #include "xenia/base/filesystem.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 
@@ -86,6 +89,8 @@ class PosixMappedMemory : public MappedMemory {
     void* map_base = mmap(0, map_span, protection, MAP_SHARED, file_descriptor,
                           off_t(aligned_offset));
     if (map_base == MAP_FAILED) {
+      XELOGE("MappedMemory: mmap of {} bytes failed: {} ({})", map_span,
+             strerror(errno), errno);
       close(file_descriptor);
       return nullptr;
     }
@@ -132,6 +137,8 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(
   }
   int file_descriptor = open(path.c_str(), open_flags);
   if (file_descriptor < 0) {
+    XELOGE("MappedMemory: open {} failed: {} ({})", xe::path_to_utf8(path),
+           strerror(errno), errno);
     return nullptr;
   }
   return PosixMappedMemory::WrapFileDescriptor(file_descriptor, mode, offset,

@@ -352,3 +352,5 @@
 
 "JIT is on, but iOS still refuses to run generated code. This iPad needs StikDebug's universal script: assign it to Xenra in StikDebug, then start the game again." = "O JIT está ativo, mas o iOS ainda se recusa a executar código gerado. Este iPad precisa do script universal do StikDebug: atribua-o ao Xenra no StikDebug e inicie o jogo novamente.";
 "Waiting for StikDebug's universal script…" = "Aguardando o script universal do StikDebug…";
+"This game is still in iCloud Drive, so it cannot be read yet. Xenra asked iOS to download it: wait until it shows as downloaded in Files, then start it again." = "Este jogo ainda está no iCloud Drive e não pode ser lido. O Xenra pediu ao iOS para baixá-lo: espere até que apareça como baixado no Arquivos e inicie-o novamente.";
+"The game file could not be read (%s). Choose the games folder again in the library, or copy the game into Xenra's own folder in Files." = "Não foi possível ler o arquivo do jogo (%s). Escolha a pasta de jogos novamente na biblioteca ou copie o jogo para a pasta do Xenra no Arquivos.";

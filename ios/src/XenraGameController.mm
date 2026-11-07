@@ -5,6 +5,8 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
 #include <initializer_list>
 
 #import "XenraLogs.h"
@@ -31,6 +33,47 @@ static BOOL HasGamepad(void) {
     if (controller.extendedGamepad) return YES;
   }
   return NO;
+}
+
+// Whether the game file can really be read, before a core finds out the hard way.
+// Files from iCloud Drive can be listed while their contents are still in the
+// cloud, and then every read fails. Returns a reason for the user, or nil.
+static NSString* XenraGameFileProblem(NSString* path) {
+  NSURL* url = [NSURL fileURLWithPath:path];
+  NSDictionary* values = [url resourceValuesForKeys:@[
+    NSURLIsUbiquitousItemKey, NSURLUbiquitousItemDownloadingStatusKey, NSURLFileSizeKey,
+    NSURLIsDirectoryKey
+  ] error:nil];
+  const BOOL cloud = [values[NSURLIsUbiquitousItemKey] boolValue];
+  NSString* status = values[NSURLUbiquitousItemDownloadingStatusKey];
+  if ([values[NSURLIsDirectoryKey] boolValue]) return nil;
+  const int fd = open(path.fileSystemRepresentation, O_RDONLY);
+  const int open_errno = fd < 0 ? errno : 0;
+  ssize_t got = -1;
+  int read_errno = 0;
+  if (fd >= 0) {
+    char probe[2048];
+    got = pread(fd, probe, sizeof(probe), 0);
+    if (got < 0) read_errno = errno;
+    close(fd);
+  }
+  XenraLog([NSString stringWithFormat:@"game file: %@ size=%@ icloud=%d status=%@ "
+                                      @"open=%d read=%zd/%d",
+                                      path.lastPathComponent, values[NSURLFileSizeKey],
+                                      cloud, status ?: @"-", open_errno, got, read_errno]);
+  if (cloud && status && ![status isEqual:NSURLUbiquitousItemDownloadingStatusCurrent]) {
+    [NSFileManager.defaultManager startDownloadingUbiquitousItemAtURL:url error:nil];
+    return XS(@"This game is still in iCloud Drive, so it cannot be read yet. Xenra "
+              "asked iOS to download it: wait until it shows as downloaded in "
+              "Files, then start it again.");
+  }
+  if (fd < 0 || got <= 0) {
+    return [NSString stringWithFormat:
+        XS(@"The game file could not be read (%s). Choose the games folder again "
+           "in the library, or copy the game into Xenra's own folder in Files."),
+        strerror(open_errno ?: read_errno ?: EIO)];
+  }
+  return nil;
 }
 
 static void RememberForJit(NSString* path, NSString* name) {
@@ -337,6 +380,10 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   // The 360 core's own detection goes by chip and calls this one TXM-free. The script
   // being attached is the better evidence: it is waiting for the core's prepare.
   if (XenraXemuNeedsSettle()) setenv("HAS_TXM", "1", 1);
+  if (NSString* problem = XenraGameFileProblem(path_)) {
+    [self showFailure:problem];
+    return;
+  }
   xe_ios_set_game_view(metal_);
   XenraLog([NSString stringWithFormat:@"boot: %@", path_.lastPathComponent]);
   XenraLogsBeginSession();
