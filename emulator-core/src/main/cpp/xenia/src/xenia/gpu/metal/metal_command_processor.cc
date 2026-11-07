@@ -4471,9 +4471,11 @@ void MetalCommandProcessor::ScheduleSpirvArgumentBufferRelease(
 
 void MetalCommandProcessor::EndCommandBuffer() {
   EndRenderEncoder();
-  ResetMslCrossEncoderReuseCaches();
 
   if (current_command_buffer_) {
+    // Only a command buffer fills these. Without one (the worker runs here on
+    // every empty ring) they are already clear.
+    ResetMslCrossEncoderReuseCaches();
     if (UseSpirvCrossPath()) {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
