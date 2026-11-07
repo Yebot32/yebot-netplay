@@ -48,11 +48,20 @@ jobs:
           git -C "$HOME/xemu" fetch --depth 1 origin "$PIN" || git -C "$HOME/xemu" fetch origin
           git -C "$HOME/xemu" checkout -q "$PIN"
           python3 xemu-ios/patch.py "$HOME/xemu"
+
+      - name: Apply patches
+        run: |
+          # In name order; a patch that does not apply exactly fails the build.
+          set -e
           for p in xemu-ios/patches/*.patch; do
             [ -e "$p" ] || continue
             echo "applying $p"
+            git -C "$HOME/xemu" apply --check "$PWD/$p"
             git -C "$HOME/xemu" apply "$PWD/$p"
           done
+
+      - name: Configure fix
+        run: |
           # Meson only runs CMake subprojects (volk, glslang) in a cross build if
           # the cross file names cmake, and configure does not write it.
           perl -pi -e 's/^(\s*)echo "\[binaries\]" >> \$cross$/$1echo "[binaries]" >> \$cross\n$1echo "cmake = [\x27cmake\x27]" >> \$cross/' "$HOME/xemu/configure"
