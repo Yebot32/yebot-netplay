@@ -623,8 +623,8 @@ static NSArray* TabsOG(void) {
     Tab(XS(@"Maintenance"), @[
       Section(XS(@"Maintenance"), @[
         ShowFpsRow(),
-        Toggle(@"core.trace", XS(@"Detailed core logs"),
-               XS(@"For diagnosing boot problems. Slows the game a little."), YES),
+        Toggle(@"core.trace_detail", XS(@"Detailed core logs"),
+               XS(@"For diagnosing boot problems. Slows the game a little."), NO),
         ShareLogsRow(),
       ]),
       AppSection(),

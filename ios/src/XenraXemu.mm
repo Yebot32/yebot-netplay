@@ -286,7 +286,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   // The core's own traces. The CPU heartbeat is once a second; the rest fire on
   // events. They answer whether the guest is running and how far it has got
   // when nothing has reached the screen.
-  if ([[XenraSettings stringForKey:@"core.trace" fallback:@"true"]
+  if ([[XenraSettings stringForKey:@"core.trace_detail" fallback:@"false"]
           isEqual:@"true"]) {
     for (const char* name :
          {"XEMU_IOS_TCG_TRACE", "XEMU_IOS_RR_RETURN_TRACE",

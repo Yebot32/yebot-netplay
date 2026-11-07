@@ -73,6 +73,8 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   float deadzone_;
   // Started by the relaunch after StikDebug, not by a tap.
   BOOL resumed_;
+  // Paused because the app left the front, so coming back resumes it.
+  BOOL pausedForBackground_;
   // A physical pad was feeding the guest on the last tick.
   BOOL hadGamepad_;
 }
@@ -188,6 +190,23 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
               usingBlock:^(NSNotification* note) {
                 [weak watchController:note.object];
                 [weak controllersChanged];
+              }];
+  // iOS refuses GPU work from an app in the background, and MoltenVK answers a refused
+  // submit by losing the device, which xemu treats as fatal. Seen on the M1: home
+  // button mid-game, then an abort in pgraph_vk_finish. So stop the guest first.
+  [NSNotificationCenter.defaultCenter
+      addObserverForName:UIApplicationWillResignActiveNotification
+                  object:nil
+                   queue:NSOperationQueue.mainQueue
+              usingBlock:^(NSNotification*) {
+                [weak leavingFront];
+              }];
+  [NSNotificationCenter.defaultCenter
+      addObserverForName:UIApplicationDidBecomeActiveNotification
+                  object:nil
+                   queue:NSOperationQueue.mainQueue
+              usingBlock:^(NSNotification*) {
+                [weak backInFront];
               }];
   [NSNotificationCenter.defaultCenter
       addObserverForName:GCControllerDidDisconnectNotification
@@ -600,6 +619,21 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
 }
 
 // --- Pausing ------------------------------------------------------------------
+
+- (void)leavingFront {
+  // The menu already holds the guest, and closing it resumes it.
+  if (!booted_ || menuTimer_ || pausedForBackground_) return;
+  pausedForBackground_ = YES;
+  XenraLog(@"leaving the front: guest paused");
+  [self setGamePaused:YES];
+}
+
+- (void)backInFront {
+  if (!pausedForBackground_) return;
+  pausedForBackground_ = NO;
+  XenraLog(@"back in front: guest resumed");
+  [self setGamePaused:NO];
+}
 
 - (void)setGamePaused:(BOOL)paused {
   if (og_) {
