@@ -1,0 +1,71 @@
+Per-voice spinlocks for APU voice LOCK/UNLOCK (Android, pre-git baseline d5e51458
+plus the db7e85b7 deadlock fix).
+voice_lock() took d->lock, the APU mutex the frame thread holds for the whole
+voice-processing frame, so a guest voice LOCK/UNLOCK (an MMIO write on the vCPU
+under the BQL) stalled until the APU frame finished, and it signalled d->cond on
+both lock and unlock. It now flips the voice_locked bit under a per-voice
+spinlock and broadcasts d->cond only on release; Android attributes ~11.6% of
+all CPU in a Forza race to the old path.
+db7e85b7 replaced Android's enqueue-time spinlock wait with upstream's polled
+any_queued_voice_locked() gate; DukeX already has that gate (with its
+pause_requested check), so that part needs no change here. The worker-exit and
+single-worker changes in Android's vp.c are separate work and are not included.
+
+diff --git a/hw/xbox/mcpx/apu/vp/vp.c b/hw/xbox/mcpx/apu/vp/vp.c
+index c57ecb6..a6194b3 100644
+--- a/hw/xbox/mcpx/apu/vp/vp.c
++++ b/hw/xbox/mcpx/apu/vp/vp.c
+@@ -134,17 +134,25 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
+ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
+ {
+     assert(v < MCPX_HW_MAX_VOICES);
+-    qemu_mutex_lock(&d->lock);
+-
++    qemu_spin_lock(&d->vp.voice_spinlocks[v]);
+     uint64_t mask = 1LL << (v % 64);
+     if (lock) {
+         d->vp.voice_locked[v / 64] |= mask;
+     } else {
+         d->vp.voice_locked[v / 64] &= ~mask;
+     }
+-
+-    qemu_cond_signal(&d->cond);
+-    qemu_mutex_unlock(&d->lock);
++    qemu_spin_unlock(&d->vp.voice_spinlocks[v]);
++    /*
++     * Only a release can unblock anyone: the sole waiter, the
++     * any_queued_voice_locked() gate in voice_work_dispatch(), loops while
++     * is_voice_locked(v) is true. Broadcasting when a voice is *acquired* woke
++     * every waiter just to re-check, find the voice still locked and sleep
++     * again - a thundering herd that showed up as ~11.6% of all CPU spinning
++     * in this function during a Forza race.
++     */
++    if (!lock) {
++        qemu_cond_broadcast(&d->cond);
++    }
+ }
+ 
+ static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
+@@ -1859,6 +1867,10 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
+ 
+ void mcpx_apu_vp_init(MCPXAPUState *d)
+ {
++    for (int i = 0; i < MCPX_HW_MAX_VOICES; i++) {
++        qemu_spin_init(&d->vp.voice_spinlocks[i]);
++    }
++
+     voice_work_init(d);
+ }
+ 
+diff --git a/hw/xbox/mcpx/apu/vp/vp.h b/hw/xbox/mcpx/apu/vp/vp.h
+index 90ffce9..1f166fc 100644
+--- a/hw/xbox/mcpx/apu/vp/vp.h
++++ b/hw/xbox/mcpx/apu/vp/vp.h
+@@ -87,6 +87,7 @@ typedef struct {
+     uint8_t submix_headroom[NUM_MIXBINS];
+     float sample_buf[NUM_SAMPLES_PER_FRAME][2];
+     uint64_t voice_locked[4];
++    QemuSpin voice_spinlocks[MCPX_HW_MAX_VOICES];
+ 
+     struct {
+         int current_entry;
