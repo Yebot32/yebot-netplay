@@ -314,7 +314,8 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
                        [XenraSettings valueForKey:@"og.tb" game:name fallback:@"64"],
                        scheme == XenraJitRwFirst ? @",split-wx=on" : @",split-wx=off"];
   NSArray<NSString*>* arguments =
-      @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game, name) ];
+      @[ @"xemu-ios", @"-accel", accel, @"-name", @"xemu,debug-threads=on",
+         @"-config_path", WriteConfig(game, name) ];
   XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d traced=%d scheme=%d", accel,
                                       universal, DebuggerAttached(), int(scheme)]);
   std::vector<char*> argv;

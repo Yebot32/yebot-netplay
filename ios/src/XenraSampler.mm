@@ -5,6 +5,8 @@
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 #import "XenraScreens.h"
 
@@ -101,6 +103,93 @@ void XenraSamplerLoad(void) {
   for (int i = 0; i < taken && i < 6; i++) {
     [text appendFormat:@" %s %.0f%%", busy[i].name[0] ? busy[i].name : "?",
                        busy[i].cpu / 10.0];
+  }
+  XenraLog(text);
+}
+
+namespace {
+
+// The thread with this name, or the busiest one if none has it.
+thread_t FindThread(const char* wanted) {
+  thread_act_array_t threads;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return 0;
+  thread_t found = 0, busiest = 0;
+  int most = -1;
+  for (mach_msg_type_number_t i = 0; i < count; i++) {
+    char name[48] = {0};
+    if (pthread_t handle = pthread_from_mach_thread_np(threads[i])) {
+      pthread_getname_np(handle, name, sizeof(name));
+    }
+    thread_basic_info_data_t basic;
+    mach_msg_type_number_t size = THREAD_BASIC_INFO_COUNT;
+    const int cpu = thread_info(threads[i], THREAD_BASIC_INFO,
+                                reinterpret_cast<thread_info_t>(&basic), &size) ==
+                            KERN_SUCCESS
+                        ? basic.cpu_usage
+                        : 0;
+    if (!found && strcmp(name, wanted) == 0) found = threads[i];
+    if (cpu > most) {
+      most = cpu;
+      busiest = threads[i];
+    }
+  }
+  const thread_t chosen = found ? found : busiest;
+  for (mach_msg_type_number_t i = 0; i < count; i++) {
+    if (threads[i] != chosen) mach_port_deallocate(mach_task_self(), threads[i]);
+  }
+  vm_deallocate(mach_task_self(), vm_address_t(threads), count * sizeof(thread_act_t));
+  return chosen;
+}
+
+}  // namespace
+
+void XenraSamplerProfile(double seconds) {
+  // xemu names it so with -name debug-threads=on; single-threaded TCG.
+  const thread_t target = FindThread("ALL CPUs/TCG");
+  if (!target) return;
+  constexpr int kMax = 8192;
+  static uint64_t pcs[kMax];
+  int taken = 0;
+  const uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + uint64_t(seconds * 1e9);
+  while (taken < kMax && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < end) {
+    if (thread_suspend(target) == KERN_SUCCESS) {
+      arm_thread_state64_t state;
+      mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+      if (thread_get_state(target, ARM_THREAD_STATE64,
+                           reinterpret_cast<thread_state_t>(&state), &count) ==
+          KERN_SUCCESS) {
+        pcs[taken++] = arm_thread_state64_get_pc(state);
+      }
+      thread_resume(target);
+    }
+    usleep(1000);
+  }
+  mach_port_deallocate(mach_task_self(), target);
+  if (!taken) return;
+
+  // Resolved after sampling: dladdr is not safe while the thread is stopped.
+  NSMutableDictionary<NSString*, NSNumber*>* counts = [NSMutableDictionary dictionary];
+  for (int i = 0; i < taken; i++) {
+    Dl_info info;
+    NSString* key;
+    if (dladdr(reinterpret_cast<void*>(pcs[i]), &info) && info.dli_fname) {
+      const char* file = strrchr(info.dli_fname, '/');
+      key = [NSString stringWithFormat:@"%s %s", file ? file + 1 : info.dli_fname,
+                                       info.dli_sname ?: "?"];
+    } else {
+      key = @"(generated code)";
+    }
+    counts[key] = @(counts[key].intValue + 1);
+  }
+  NSArray<NSString*>* order = [counts keysSortedByValueUsingComparator:^(id a, id b) {
+    return [b compare:a];
+  }];
+  NSMutableString* text = [NSMutableString
+      stringWithFormat:@"cpu profile: %d samples over %.0f s\n", taken, seconds];
+  for (NSUInteger i = 0; i < order.count && i < 30; i++) {
+    [text appendFormat:@"  %5.1f%% %@\n", counts[order[i]].intValue * 100.0 / taken,
+                       order[i]];
   }
   XenraLog(text);
 }

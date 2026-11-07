@@ -15,3 +15,8 @@ void XenraSamplerDump(NSString* reason);
 // One line of the busiest threads and their CPU share, for telling a CPU-bound game
 // from a GPU-bound one. Cheap: no thread is suspended.
 void XenraSamplerLoad(void);
+
+// A sampling profile of the emulated CPU's thread: its program counter about a
+// thousand times a second for a few seconds, counted by function, generated code
+// in one bucket. Says where a CPU-bound game spends its time.
+void XenraSamplerProfile(double seconds);

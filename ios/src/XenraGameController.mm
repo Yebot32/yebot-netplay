@@ -397,6 +397,9 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                  dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                    if (!weak) return;
                    XenraSamplerLoad();
+                   // Every other time, a profile of the emulated CPU as well.
+                   static int round;
+                   if (++round % 2 == 0) XenraSamplerProfile(4);
                    [weak watchLoad];
                  });
 }
