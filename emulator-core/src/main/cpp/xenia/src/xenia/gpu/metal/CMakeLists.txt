@@ -15,6 +15,8 @@ add_library(xenia-gpu-metal STATIC
   metal_shared_memory.h
   metal_texture_cache.cc
   metal_texture_cache.h
+  metal_upload_buffer_pool.cc
+  metal_upload_buffer_pool.h
   msl_bindings.h
   msl_shader.cc
   msl_shader.h

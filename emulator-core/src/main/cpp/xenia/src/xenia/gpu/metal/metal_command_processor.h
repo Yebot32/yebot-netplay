@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -89,6 +90,9 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t current_draw_index() const { return current_draw_index_; }
   uint64_t GetCurrentSubmission() const;
   uint64_t GetCompletedSubmission() const override;
+  // The frame being recorded, or the next one between frames.
+  uint64_t GetCurrentFrame() const { return frame_current_; }
+  uint64_t GetCompletedFrame() const { return frame_completed_; }
   MTL::CommandBuffer* EnsureCommandBuffer();
   void EndRenderEncoder();
   void ResetRenderEncoderResourceUsage();
@@ -273,6 +277,14 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unique_ptr<MetalSharedMemory> shared_memory_;
   std::unique_ptr<MetalPrimitiveProcessor> primitive_processor_;
   bool frame_open_ = false;
+  uint64_t frame_current_ = 1;
+  uint64_t frame_completed_ = 0;
+  struct ClosedFrame {
+    uint64_t frame;
+    uint64_t last_submission;
+  };
+  // Closed frames not known to be completed yet, oldest first.
+  std::deque<ClosedFrame> closed_frames_;
 
   bool saw_swap_ = false;
   uint32_t last_swap_ptr_ = 0;
