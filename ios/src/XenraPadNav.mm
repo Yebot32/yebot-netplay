@@ -568,10 +568,17 @@ static void BringIntoView(XenraPadSpot* spot) {
   return GCController.controllers.count > 0;
 }
 
+// The game has the controller, unless a sheet is up on its screen: the menu and the
+// failure notice need the cursor, and the guest is paused or never ran under them.
+- (BOOL)gameOwnsController {
+  UIWindow* window = MainWindow();
+  UIViewController* top = TopController(window);
+  if (![top isKindOfClass:[XenraGameController class]]) return NO;
+  return !FindSheet(top.view, 5);
+}
+
 - (void)updatePolling {
-  const BOOL game =
-      [TopController(MainWindow()) isKindOfClass:[XenraGameController class]];
-  const BOOL poll = [self hasInput] && !game;
+  const BOOL poll = [self hasInput] && ![self gameOwnsController];
   if (!poll) [self standDown];
   link_.paused = !poll;
 }
@@ -605,8 +612,8 @@ static void BringIntoView(XenraPadSpot* spot) {
   }
 
   UIViewController* top = TopController(window);
-  if ([top isKindOfClass:[XenraGameController class]]) {
-    // The game owns the controller. didShowViewController wakes this again.
+  if ([self gameOwnsController]) {
+    // didShowViewController, or a sheet going up, wakes this again.
     [self standDown];
     link_.paused = YES;
     return;
@@ -808,8 +815,12 @@ static void BringIntoView(XenraPadSpot* spot) {
       }
     }
     if (step <= 0) step = (slider.maximumValue - slider.minimumValue) / 20;
+    // A mirrored slider grows to the left, and the thumb should follow the press.
+    const BOOL mirrored = slider.effectiveUserInterfaceLayoutDirection ==
+                          UIUserInterfaceLayoutDirectionRightToLeft;
     const float next = fmaxf(slider.minimumValue,
-                             fminf(slider.maximumValue, slider.value + sign * step));
+                             fminf(slider.maximumValue,
+                                   slider.value + (mirrored ? -sign : sign) * step));
     if (next == slider.value) return NO;
     slider.value = next;
     [slider sendActionsForControlEvents:UIControlEventValueChanged];

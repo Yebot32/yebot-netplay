@@ -99,9 +99,14 @@ XenraInstallOutcome CopyGame(NSString* path, XenraGameEntry* game,
   dispatch_async(dispatch_get_main_queue(), ^{
     progress([NSString stringWithFormat:XS(@"Copying %@…"), game.name], -1);
   });
+  // Under another name until it is whole: a kill halfway must not leave a broken
+  // game in the library that also blocks a retry.
+  NSString* partial = [target stringByAppendingPathExtension:@"part"];
+  [files removeItemAtPath:partial error:nil];
   NSError* error = nil;
-  if (![files copyItemAtPath:path toPath:target error:&error]) {
-    [files removeItemAtPath:target error:nil];
+  if (![files copyItemAtPath:path toPath:partial error:&error] ||
+      ![files moveItemAtPath:partial toPath:target error:&error]) {
+    [files removeItemAtPath:partial error:nil];
     *message = error.code == NSFileWriteOutOfSpaceError
                    ? XS(@"There is not enough free space.")
                    : XS(@"The file could not be copied.");

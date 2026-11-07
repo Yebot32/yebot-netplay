@@ -267,7 +267,7 @@ NSString* XenraLogsTakeUncleanExitNotice(void) {
 // --- The report -------------------------------------------------------------
 
 static void AppendText(NSFileHandle* out, NSString* text) {
-  [out writeData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+  [out writeData:[text dataUsingEncoding:NSUTF8StringEncoding] error:nil];
 }
 
 static void AppendLog(NSFileHandle* out, NSString* title, NSString* path) {
@@ -279,13 +279,13 @@ static void AppendLog(NSFileHandle* out, NSString* title, NSString* path) {
                                              title, size]);
   [in seekToFileOffset:0];
   if (size <= kHeadBytes + kTailBytes) {
-    [out writeData:[in readDataToEndOfFile]];
+    [out writeData:[in readDataToEndOfFile] error:nil];
   } else {
-    [out writeData:[in readDataOfLength:kHeadBytes]];
+    [out writeData:[in readDataOfLength:kHeadBytes] error:nil];
     AppendText(out, [NSString stringWithFormat:@"\n[... %llu bytes cut ...]\n",
                                                size - kHeadBytes - kTailBytes]);
     [in seekToFileOffset:size - kTailBytes];
-    [out writeData:[in readDataToEndOfFile]];
+    [out writeData:[in readDataToEndOfFile] error:nil];
   }
   [in closeFile];
 }

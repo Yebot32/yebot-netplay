@@ -9,6 +9,7 @@
 
 #import "XenraLogs.h"
 #import "XenraMetalView.h"
+#import "XenraPadNav.h"
 #import "XenraSampler.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
@@ -23,6 +24,14 @@ static NSString* const kPendingGameKey = @"xenra.pendingGame";
 // Long enough to finish in StikDebug, short enough that a later launch of the app
 // does not start a game out of nowhere.
 static const NSTimeInterval kPendingGameLife = 600;
+
+// A controller the guest can use. Some only offer a micro gamepad.
+static BOOL HasGamepad(void) {
+  for (GCController* controller in GCController.controllers) {
+    if (controller.extendedGamepad) return YES;
+  }
+  return NO;
+}
 
 static void RememberForJit(NSString* path, NSString* name) {
   [NSUserDefaults.standardUserDefaults
@@ -62,20 +71,28 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   short padAxes_[4];
   unsigned char padTriggers_[2];
   float deadzone_;
+  // Started by the relaunch after StikDebug, not by a tap.
+  BOOL resumed_;
+  // A physical pad was feeding the guest on the last tick.
+  BOOL hadGamepad_;
 }
 
 + (instancetype)takePendingAfterJit {
   NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
   NSDictionary* pending = [defaults dictionaryForKey:kPendingGameKey];
+  // Opened again before StikDebug attached: the attach still brings a relaunch.
+  if (!pending || !XenraJitActive()) return nil;
   [defaults removeObjectForKey:kPendingGameKey];
   NSString* path = pending[@"path"];
   NSString* name = pending[@"name"];
   NSDate* when = pending[@"when"];
-  if (!path || !name || !when || !XenraJitActive()) return nil;
+  if (!path || !name || !when) return nil;
   if (-when.timeIntervalSinceNow > kPendingGameLife) return nil;
   if (![NSFileManager.defaultManager fileExistsAtPath:path]) return nil;
   XenraLog([NSString stringWithFormat:@"resume after JIT: %@", path.lastPathComponent]);
-  return [[self alloc] initWithPath:path name:name];
+  XenraGameController* game = [[self alloc] initWithPath:path name:name];
+  game->resumed_ = YES;
+  return game;
 }
 
 - (instancetype)initWithPath:(NSString*)path name:(NSString*)name {
@@ -170,6 +187,14 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                    queue:NSOperationQueue.mainQueue
               usingBlock:^(NSNotification* note) {
                 [weak watchController:note.object];
+                [weak controllersChanged];
+              }];
+  [NSNotificationCenter.defaultCenter
+      addObserverForName:GCControllerDidDisconnectNotification
+                  object:nil
+                   queue:NSOperationQueue.mainQueue
+              usingBlock:^(NSNotification*) {
+                [weak controllersChanged];
               }];
 
   // Android's PerfHud, for the part of it the core can report.
@@ -205,7 +230,11 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
     }
   }
   if (XenraJitActive()) {
-    [self boot];
+    if (resumed_ && og_ && XenraXemuNeedsSettle()) {
+      [self settleThenBoot];
+    } else {
+      [self boot];
+    }
     return;
   }
   // The tool attaches seconds after the handoff, from another app, so the
@@ -226,18 +255,24 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   if (!XenraJitActive()) return;
   [jitTimer_ invalidate];
   jitTimer_ = nil;
-  if (!og_) {
+  if (!og_ || !XenraXemuNeedsSettle()) {
     [self boot];
     return;
   }
-  // The script is still starting when CS_DEBUGGED appears, and a brk sent
-  // before it is listening goes unanswered. DukeX waits the same 6 seconds.
+  [self settleThenBoot];
+}
+
+// The script is still starting when CS_DEBUGGED appears, and a brk sent before it
+// is listening goes unanswered. DukeX waits the same 6 seconds. Without TXM there
+// is no script and so nothing to wait for.
+- (void)settleThenBoot {
   status_.text = XS(@"Waiting for StikDebug to settle…");
   cancel_.hidden = NO;
   [self performSelector:@selector(boot) withObject:nil afterDelay:6];
 }
 
 - (void)boot {
+  [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingGameKey];
   cancel_.hidden = YES;
   pad_.hidden = !padWanted_;
   if (og_) {
@@ -333,6 +368,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                                                    action:^{
                                                      [weak quit];
                                                    }] ]];
+  XenraPadNavScreenChanged();
 }
 
 - (void)tick {
@@ -371,21 +407,40 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   padTriggers_[1] = rt;
   if (og_) {
     [self sendPad];
-  } else if (!GCController.controllers.count) {
+  } else if (!HasGamepad()) {
     xe_ios_input_set(buttons, lx, ly, rx, ry, lt, rt);
   }
 }
 
 // The pad owns port one while it is on screen; otherwise SDL's controller does.
 - (void)sendPad {
-  XenraXemuSetPad(!pad_.hidden && !GCController.controllers.count, padButtons_,
+  XenraXemuSetPad(!pad_.hidden && !HasGamepad(), padButtons_,
                   padAxes_[0], padAxes_[1], padAxes_[2], padAxes_[3],
                   padTriggers_[0], padTriggers_[1]);
 }
 
+// Port one changes hands between the touch pad and a controller. The 360 side works
+// this out on every tick; the OG side only when told.
+- (void)controllersChanged {
+  if (og_ && booted_) [self sendPad];
+}
+
 - (void)pollController {
-  GCExtendedGamepad* g = GCController.controllers.firstObject.extendedGamepad;
-  if (!g) return;
+  GCExtendedGamepad* g = nil;
+  for (GCController* controller in GCController.controllers) {
+    if ((g = controller.extendedGamepad)) break;
+  }
+  if (!g) {
+    // Pulled out mid-press: nothing else would let go of what it held. The touch
+    // pad's last state is what the guest should see now.
+    if (hadGamepad_) {
+      hadGamepad_ = NO;
+      xe_ios_input_set(padButtons_, padAxes_[0], padAxes_[1], padAxes_[2],
+                       padAxes_[3], padTriggers_[0], padTriggers_[1]);
+    }
+    return;
+  }
+  hadGamepad_ = YES;
   const auto axis = [](GCControllerAxisInput* a) {
     return short(a.value * 32767);
   };
@@ -448,6 +503,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                   message:nil
                     items:og_ ? @[ resume, touch, reset, share, quit ]
                               : @[ resume, touch, share, quit ]];
+  XenraPadNavScreenChanged();
 }
 
 - (void)quit {
@@ -479,17 +535,23 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   if (pad_.hidden && booted_) [self showMenu];
 }
 
+// Before boot the core has no main loop to pause.
+- (void)showMenuFromController {
+  if (booted_) [self showMenu];
+}
+
 - (void)watchController:(GCController*)controller {
   __weak XenraGameController* weak = self;
   controller.extendedGamepad.valueChangedHandler =
       ^(GCExtendedGamepad* pad, GCControllerElement*) {
         if (pad.buttonMenu.pressed && pad.buttonOptions.pressed) {
-          [weak showMenu];
+          [weak showMenuFromController];
         }
       };
 }
 
 - (void)cancelWaiting {
+  [UIApplication.sharedApplication setIdleTimerDisabled:NO];
   [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingGameKey];
   [jitTimer_ invalidate];
   jitTimer_ = nil;

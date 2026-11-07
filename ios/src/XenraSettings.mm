@@ -717,11 +717,25 @@ static NSArray* TabsOG(void) {
       dataForKey:[@"bookmark." stringByAppendingString:key]];
   if (!bookmark) return nil;
   BOOL stale = NO;
-  return [NSURL URLByResolvingBookmarkData:bookmark
-                                   options:0
-                             relativeToURL:nil
-                       bookmarkDataIsStale:&stale
-                                     error:nil];
+  NSURL* url = [NSURL URLByResolvingBookmarkData:bookmark
+                                         options:0
+                                   relativeToURL:nil
+                             bookmarkDataIsStale:&stale
+                                           error:nil];
+  // Left stale, a bookmark stops resolving after enough moves of the file.
+  if (url && stale && [url startAccessingSecurityScopedResource]) {
+    NSData* fresh = [url bookmarkDataWithOptions:0
+                  includingResourceValuesForKeys:nil
+                                   relativeToURL:nil
+                                           error:nil];
+    [url stopAccessingSecurityScopedResource];
+    if (fresh) {
+      [NSUserDefaults.standardUserDefaults
+          setObject:fresh
+             forKey:[@"bookmark." stringByAppendingString:key]];
+    }
+  }
+  return url;
 }
 
 static NSMutableArray<NSURL*>* g_held;

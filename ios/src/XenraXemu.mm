@@ -152,6 +152,8 @@ static void ApplyPacing(CALayer* layer) {
   }
 }
 
+BOOL XenraXemuNeedsSettle(void) { return NeedsUniversalJit(); }
+
 NSString* XenraXemuFileProblem(void) {
   if (!NeedsUniversalJit() && XenraJitChooseScheme() == XenraJitNone) {
     return XS(@"iOS refused every way of running generated code, so the game "

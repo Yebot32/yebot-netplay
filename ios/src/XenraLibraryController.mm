@@ -842,13 +842,16 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
                                       XenraPadScreen>
 @end
 
+// Outlives the screen: the installer's progress is one shared thing, and the
+// library can be left and opened again while it runs.
+static BOOL g_installing;
+
 @implementation XenraLibraryController {
   XenraGameScanner* scanner_;
   NSArray<XenraGameEntry*>* games_;
   XenraGameEntry* selected_;
   BOOL gridMode_;
   BOOL rendered_;
-  BOOL installing_;
   BOOL arranged_;
   BOOL detailPortrait_;
   BOOL detailShown_;
@@ -1348,8 +1351,8 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 
   const BOOL noCore = self.noCore;
   const BOOL scanning = !noCore && scanner_.scanning;
-  [self showBusy:installing_ || (scanning && count == 0)
-         message:installing_ ? nil : XS(@"Scanning games...")];
+  [self showBusy:g_installing || (scanning && count == 0)
+         message:g_installing ? nil : XS(@"Scanning games...")];
 
   const BOOL empty = count == 0 && !scanning;
   emptyCard_.hidden = !empty;
@@ -1617,7 +1620,11 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
     if (game) [self showActions:game];
     return game != nil;
   }
-  if (button == XenraPadButtonLeft && selected_ && !gridMode_ && cursor) {
+  // Away from the detail panel, which Arabic puts on the other side.
+  const BOOL mirrored = self.view.effectiveUserInterfaceLayoutDirection ==
+                        UIUserInterfaceLayoutDirectionRightToLeft;
+  const XenraPadButton away = mirrored ? XenraPadButtonRight : XenraPadButtonLeft;
+  if (button == away && selected_ && !gridMode_ && cursor) {
     [self clearSelection];
     return YES;
   }
@@ -1791,7 +1798,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 // Any file: a package has no extension to match on. In place rather than copied,
 // because a disc image is gigabytes and the installer only needs to read it.
 - (void)pickContent {
-  if (installing_) {
+  if (g_installing) {
     XenraToast(self.view, XS(@"An install is already running."));
     return;
   }
@@ -1856,7 +1863,7 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 }
 
 - (void)installFrom:(NSURL*)url {
-  installing_ = YES;
+  g_installing = YES;
   [self showBusy:YES message:XS(@"Reading the package…")];
   __weak XenraLibraryController* weak = self;
   XenraInstallFromURL(
@@ -1865,7 +1872,15 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
         [weak installStep:message fraction:fraction];
       },
       ^(XenraInstallOutcome outcome, NSString* message) {
-        [weak installDone:outcome message:message];
+        g_installing = NO;
+        XenraLibraryController* library = weak;
+        if (library) {
+          [library installDone:outcome message:message];
+        } else {
+          // The user left this screen; the result still has to reach them.
+          UIWindow* window = UIApplication.sharedApplication.delegate.window;
+          XenraToast(window.rootViewController.view, message);
+        }
       });
 }
 
@@ -1876,7 +1891,6 @@ typedef NS_ENUM(NSInteger, XenraLibraryPick) {
 }
 
 - (void)installDone:(XenraInstallOutcome)outcome message:(NSString*)message {
-  installing_ = NO;
   progress_.hidden = YES;
   [self updateHeader];
   [XenraBladeSheet showIn:self.view

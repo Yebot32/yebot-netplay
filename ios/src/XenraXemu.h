@@ -20,6 +20,10 @@ NSString* XenraXemuMissingFiles(void);
 // attached debugger may eat that signal. Returns an error, or nil.
 NSString* XenraXemuPrepare(void);
 
+// Universal.js is starting up and needs time before the first brk. YES only where
+// StikDebug runs a script, which it does with TXM.
+BOOL XenraXemuNeedsSettle(void);
+
 
 // A reason this launch cannot work, in words for the user, or nil. Logs the sizes.
 NSString* XenraXemuFileProblem(void);
