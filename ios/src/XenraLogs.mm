@@ -316,7 +316,7 @@ static NSString* Summary(void) {
                      (long)os.patchVersion,
                      NSProcessInfo.processInfo.physicalMemory / 1073741824.0,
                      free_bytes.doubleValue / 1073741824.0];
-  [text appendFormat:@"JIT: get-task-allow=%d cs_debugged=%d\n",
+  [text appendFormat:@"JIT: get-task-allow=%d cs_debugged=%d script_attached=%d\n",
                      jit.get_task_allow, jit.cs_debugged, XenraXemuNeedsSettle()];
   int lse = 0;
   size_t lse_size = sizeof(lse);
