@@ -3021,6 +3021,39 @@ void MetalRenderTargetCache::ClearCache() {
   RenderTargetCache::ClearCache();
 }
 
+// From XeniOS fb9638172: the common code hands a render target holding no
+// EDRAM data to a new EDRAM base of the same shape instead of creating one per
+// base, so the cache no longer grows without bound for surfaces moved around
+// the EDRAM.
+void MetalRenderTargetCache::RenderTargetReused(RenderTarget& render_target,
+                                                RenderTargetKey old_key) {
+  MetalRenderTarget& metal_render_target =
+      static_cast<MetalRenderTarget&>(render_target);
+  auto it = render_target_map_.find(old_key.key);
+  if (it != render_target_map_.end() && it->second == &metal_render_target) {
+    render_target_map_.erase(it);
+  }
+  render_target_map_[render_target.key().key] = &metal_render_target;
+  // Cleared on the first use like a new one.
+  metal_render_target.SetNeedsInitialClear(true);
+  render_pass_descriptor_dirty_ = true;
+}
+
+bool MetalRenderTargetCache::CanReuseRenderTarget(
+    const RenderTarget& render_target) const {
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (current_color_targets_[i] == &render_target ||
+        last_real_color_targets_[i] == &render_target) {
+      return false;
+    }
+  }
+  if (current_depth_target_ == &render_target ||
+      last_real_depth_target_ == &render_target) {
+    return false;
+  }
+  return true;
+}
+
 void MetalRenderTargetCache::BeginFrame() {
   ++frame_id_;
 
