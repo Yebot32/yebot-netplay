@@ -1,0 +1,141 @@
+Targeted TLB flush for memory access callbacks (Android e0503c0d).
+Adding or removing an NV2A surface callback flushed every vCPU's whole TLB and
+jump cache; drop only the entries mapping the callback's RAM range instead.
+Measured on Android, Forza race: ~310 full flushes/s -> 0, vCPU 93% -> 84%.
+
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index b9ae474..aa64020 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -938,6 +938,77 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
+     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+ }
+ 
++#ifdef XBOX
++/*
++ * True if @te maps a page of guest RAM inside [start, start + length).
++ * Uses the same address tlb_set_page_full hands to
++ * mem_access_callback_address_matches: the page's RAM address, which for RAM
++ * is xlat_section + the page's virtual address.
++ */
++static bool tlb_entry_maps_ram_range(const CPUTLBEntryFull *full,
++                                     const CPUTLBEntry *te,
++                                     ram_addr_t start, ram_addr_t length)
++{
++    uintptr_t cmp = te->addr_read;
++    if (cmp == (uintptr_t)-1) {
++        cmp = te->addr_write;
++    }
++    if (cmp == (uintptr_t)-1) {
++        cmp = te->addr_code;
++    }
++    if (cmp == (uintptr_t)-1) {
++        return false;
++    }
++    vaddr page = cmp & TARGET_PAGE_MASK;
++    ram_addr_t ram = (full->xlat_section + page) & TARGET_PAGE_MASK;
++    return ram - start < length;
++}
++
++/*
++ * Drop only the TLB entries that map [start, start + length) of guest RAM, so
++ * their next fill re-evaluates the memory access callbacks for those pages.
++ *
++ * Adding or removing a callback used to flush the whole TLB on every vCPU,
++ * and a full flush also empties the jump cache. MEASURED 2026-10-31, Forza
++ * Motorsport in a race on the OnePlus 12: ~310 full flushes a second - one per
++ * render-surface bind or unbind - and ~300k jump-cache misses a second falling
++ * through to the global TB hash, which with the flushes' own refill cost was
++ * the largest single slice of the vCPU thread after guest code itself.
++ *
++ * Runs on the vCPU's own thread (from the callback list's async-safe work), so
++ * the list change and the invalidation cannot be reordered.
++ */
++void tlb_flush_ram_range(CPUState *cpu, ram_addr_t start, ram_addr_t length)
++{
++    ram_addr_t end = TARGET_PAGE_ALIGN(start + length);
++    start &= TARGET_PAGE_MASK;
++    length = end - start;
++
++    qemu_spin_lock(&cpu->neg.tlb.c.lock);
++    for (int mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
++        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
++        CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
++        unsigned int n = tlb_n_entries(fast);
++
++        for (unsigned int i = 0; i < n; i++) {
++            if (tlb_entry_maps_ram_range(&desc->fulltlb[i], &fast->table[i],
++                                         start, length)) {
++                memset(&fast->table[i], -1, sizeof(fast->table[i]));
++                tlb_n_used_entries_dec(cpu, mmu_idx);
++            }
++        }
++        for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
++            if (tlb_entry_maps_ram_range(&desc->vfulltlb[i], &desc->vtable[i],
++                                         start, length)) {
++                memset(&desc->vtable[i], -1, sizeof(desc->vtable[i]));
++                tlb_n_used_entries_dec(cpu, mmu_idx);
++            }
++        }
++    }
++    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
++}
++#endif
++
+ /* Called with tlb_c.lock held */
+ static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
+                                          vaddr addr)
+diff --git a/include/exec/cputlb.h b/include/exec/cputlb.h
+index 9bec0e7..72ecdcb 100644
+--- a/include/exec/cputlb.h
++++ b/include/exec/cputlb.h
+@@ -32,6 +32,9 @@ void tlb_unprotect_code(ram_addr_t ram_addr);
+ 
+ #ifndef CONFIG_USER_ONLY
+ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length);
++#ifdef XBOX
++void tlb_flush_ram_range(CPUState *cpu, ram_addr_t start, ram_addr_t length);
++#endif
+ void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length);
+ #endif
+ 
+diff --git a/system/physmem.c b/system/physmem.c
+index 009c793..1d0d8d6 100644
+--- a/system/physmem.c
++++ b/system/physmem.c
+@@ -872,6 +872,7 @@ static void do_mem_access_callback_insert(CPUState *cpu, run_on_cpu_data data)
+ {
+     MemAccessCallback *cb = (MemAccessCallback *)data.host_ptr;
+     QTAILQ_INSERT_TAIL(&cpu->mem_access_callbacks, cb, entry);
++    tlb_flush_ram_range(cpu, cb->addr, cb->len);
+ }
+ 
+ MemAccessCallback *mem_access_callback_insert(CPUState *cpu, MemoryRegion *mr,
+@@ -891,8 +892,7 @@ MemAccessCallback *mem_access_callback_insert(CPUState *cpu, MemoryRegion *mr,
+     async_safe_run_on_cpu(cpu, do_mem_access_callback_insert,
+                           RUN_ON_CPU_HOST_PTR(cb));
+ 
+-    // FIXME: flush only applicable pages
+-    tlb_flush_all_cpus_synced(cpu);
++    /* The async work above drops only the TLB entries for this range. */
+ 
+     return cb;
+ }
+@@ -902,6 +902,7 @@ static void do_mem_access_callback_remove_by_ref(CPUState *cpu,
+ {
+     MemAccessCallback *cb = (MemAccessCallback *)data.host_ptr;
+     QTAILQ_REMOVE(&cpu->mem_access_callbacks, cb, entry);
++    tlb_flush_ram_range(cpu, cb->addr, cb->len);
+     g_free(cb);
+ }
+ 
+@@ -914,8 +915,7 @@ void mem_access_callback_remove_by_ref(CPUState *cpu, MemAccessCallback *cb)
+     async_safe_run_on_cpu(cpu, do_mem_access_callback_remove_by_ref,
+                           RUN_ON_CPU_HOST_PTR(cb));
+ 
+-    // FIXME: flush only applicable pages
+-    tlb_flush_all_cpus_synced(cpu);
++    /* The async work above drops only the TLB entries for this range. */
+ }
+ 
+ void mem_check_access_callback_vaddr(CPUState *cpu,
