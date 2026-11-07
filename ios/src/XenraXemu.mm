@@ -277,7 +277,6 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
     @"XEMU_IOS_SYNC_RAW" : @"0",
     @"XEMU_IOS_SYNC_DMA" : @"0",
     @"XEMU_IOS_COROUTINE_PRIME_COUNT" : @"640",
-    @"XEMU_IOS_DISPLAY_PERF_STATS" : @"0",
   };
   for (NSString* key in environment) {
     setenv(key.UTF8String, [environment[key] UTF8String], 1);

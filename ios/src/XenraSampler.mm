@@ -149,7 +149,11 @@ void XenraSamplerProfile(double seconds) {
   const thread_t target = FindThread("ALL CPUs/TCG");
   if (!target) return;
   constexpr int kMax = 8192;
+  constexpr int kDepth = 8;
   static uint64_t pcs[kMax];
+  // Return addresses, for samples that stop in the kernel: which core function
+  // was waiting, and on what.
+  static uint64_t callers[kMax][kDepth];
   int taken = 0;
   const uint64_t end = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + uint64_t(seconds * 1e9);
   while (taken < kMax && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < end) {
@@ -159,6 +163,17 @@ void XenraSamplerProfile(double seconds) {
       if (thread_get_state(target, ARM_THREAD_STATE64,
                            reinterpret_cast<thread_state_t>(&state), &count) ==
           KERN_SUCCESS) {
+        uint64_t* chain = callers[taken];
+        memset(chain, 0, sizeof(callers[taken]));
+        chain[0] = arm_thread_state64_get_lr(state);
+        uint64_t frame = arm_thread_state64_get_fp(state);
+        for (int d = 1; d < kDepth && frame && !(frame & 7); d++) {
+          uint64_t record[2];
+          if (!ReadWords(frame, record)) break;
+          chain[d] = record[1];
+          if (record[0] <= frame) break;
+          frame = record[0];
+        }
         pcs[taken++] = arm_thread_state64_get_pc(state);
       }
       thread_resume(target);
@@ -177,6 +192,17 @@ void XenraSamplerProfile(double seconds) {
       const char* file = strrchr(info.dli_fname, '/');
       key = [NSString stringWithFormat:@"%s %s", file ? file + 1 : info.dli_fname,
                                        info.dli_sname ?: "?"];
+      // A wait is only useful with the core function that waited.
+      if (strstr(info.dli_fname, "libsystem_")) {
+        for (int d = 0; d < kDepth && callers[i][d]; d++) {
+          Dl_info up;
+          if (dladdr(reinterpret_cast<void*>(callers[i][d]), &up) && up.dli_fname &&
+              strstr(up.dli_fname, "libxemu")) {
+            key = [NSString stringWithFormat:@"%@ <- %s", key, up.dli_sname ?: "?"];
+            break;
+          }
+        }
+      }
     } else {
       key = @"(generated code)";
     }

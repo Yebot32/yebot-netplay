@@ -142,6 +142,9 @@ jobs:
         env:
           XEMU_IOS_VCPKG_PREFIX: ${{ runner.temp }}/unused
           XEMU_IOS_NINJA_TARGETS: libxemu-ios-core.dylib
+          # Whole-program optimisation: the CPU loop, block lookup and softfloat
+          # live in separate files and call each other per guest block.
+          XEMU_IOS_CONFIGURE_ARGS: --enable-lto
           CCACHE_DIR: /Users/runner/.ccache-xemu
         run: |
           export XEMU_IOS_VCPKG_PREFIX="$HOME/vcpkg-prefix"
