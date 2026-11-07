@@ -281,6 +281,7 @@ X_STATUS XSocket::Close() {
 X_STATUS XSocket::GetOption(uint32_t level, uint32_t optname, void* optval_ptr,
                             uint32_t* optlen) {
   if (!tcp_socket_ && !udp_socket_ && !acceptor_) {
+    last_error_ = AsioErrorToWSAError(asio::error::not_socket);
     return X_STATUS_INVALID_HANDLE;
   }
 
@@ -303,6 +304,7 @@ X_STATUS XSocket::GetOption(uint32_t level, uint32_t optname, void* optval_ptr,
 
   int native_handle_val = static_cast<int>(native_handle());
   if (native_handle_val == -1) {
+    last_error_ = AsioErrorToWSAError(asio::error::not_socket);
     return X_STATUS_INVALID_HANDLE;
   }
 
@@ -717,8 +719,31 @@ X_STATUS XSocket::Listen(int backlog) {
   return X_STATUS_SUCCESS;
 }
 
+// Writes the accepted peer (host byte order) as a guest sockaddr_in, field by
+// field: host sockaddr_in layouts differ (Apple's starts with sin_len).
+static void WriteAcceptedName(N_XSOCKADDR* name, int* name_len,
+                              const asio::ip::tcp::endpoint* peer) {
+  if (name) {
+    std::memset(name, 0, sizeof(*name));
+  }
+  if (!peer) {
+    *name_len = 0;
+    return;
+  }
+  if (name) {
+    const xe::be<uint16_t> port = peer->port();
+    const xe::be<uint32_t> address = peer->address().to_v4().to_uint();
+    name->address_family = AF_INET;
+    std::memcpy(name->sa_data, &port, sizeof(port));
+    std::memcpy(name->sa_data + sizeof(port), &address, sizeof(address));
+  }
+  *name_len = sizeof(N_XSOCKADDR);
+}
+
 object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   if (!acceptor_) {
+    // WSAEOPNOTSUPP for a datagram socket, WSAEINVAL before listen().
+    last_error_ = udp_socket_ ? 10045 : 10022;
     return nullptr;
   }
 
@@ -732,22 +757,12 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
 
   if (ec) {
     last_error_ = AsioErrorToWSAError(ec);
-    if (name) {
-      std::memset(name, 0, *name_len);
-    }
-    *name_len = 0;
+    WriteAcceptedName(name, name_len, nullptr);
     return nullptr;
   }
 
   // Fill in the client address
-  if (name && *name_len >= static_cast<int>(sizeof(sockaddr_in))) {
-    sockaddr_in* addr = reinterpret_cast<sockaddr_in*>(name);
-    addr->sin_family = AF_INET;
-    addr->sin_port = htons(peer_endpoint.port());
-    addr->sin_addr.s_addr = htonl(peer_endpoint.address().to_v4().to_uint());
-    std::memset(reinterpret_cast<char*>(addr) + 8, 0, 8);  // Zero sin_zero
-  }
-  *name_len = sizeof(sockaddr_in);
+  WriteAcceptedName(name, name_len, &peer_endpoint);
 
   // Create a kernel object to represent the new socket
   auto socket =

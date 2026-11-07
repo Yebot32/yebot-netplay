@@ -2169,9 +2169,18 @@ dword_result_t NetDll_getsockopt_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
+  if (!optval_ptr || !optlen) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAEFAULT));
+    return -1;
+  }
   uint32_t native_len = *optlen;
   X_STATUS status = socket->GetOption(level, optname, optval_ptr, &native_len);
-  return XSUCCEEDED(status) ? 0 : -1;
+  if (XFAILED(status)) {
+    XThread::SetLastError(socket->GetLastWSAError());
+    return -1;
+  }
+  *optlen = native_len;
+  return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_getsockopt, kNetworking, kImplemented);
 
@@ -2289,7 +2298,8 @@ DECLARE_XAM_EXPORT1(NetDll_listen, kNetworking, kImplemented);
 dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
                                    pointer_t<XSOCKADDR> addr_ptr,
                                    lpdword_t addrlen_ptr) {
-  if (!addr_ptr) {
+  // The address is optional but one asked for needs room.
+  if (addr_ptr && (!addrlen_ptr || *addrlen_ptr < sizeof(XSOCKADDR))) {
     XThread::SetLastError(uint32_t(X_WSAError::X_WSAEFAULT));
     return -1;
   }
@@ -2301,13 +2311,19 @@ dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  N_XSOCKADDR native_addr(addr_ptr);
-  int native_len = *addrlen_ptr;
-  auto new_socket = socket->Accept(&native_addr, &native_len);
+  // Only the 16-byte address is filled, whatever length the guest passes.
+  N_XSOCKADDR native_addr;
+  std::memset(&native_addr, 0, sizeof(native_addr));
+  int native_len = sizeof(native_addr);
+  auto new_socket =
+      socket->Accept(addr_ptr ? &native_addr : nullptr, &native_len);
   if (new_socket) {
-    addr_ptr->address_family = native_addr.address_family;
-    std::memcpy(addr_ptr->sa_data, native_addr.sa_data, *addrlen_ptr - 2);
-    *addrlen_ptr = native_len;
+    if (addr_ptr) {
+      addr_ptr->address_family = native_addr.address_family;
+      std::memcpy(addr_ptr->sa_data, native_addr.sa_data,
+                  sizeof(native_addr.sa_data));
+      *addrlen_ptr = native_len;
+    }
 
     const auto* as_in = reinterpret_cast<const N_XSOCKADDR_IN*>(&native_addr);
     in_addr peer = {};
@@ -2316,9 +2332,9 @@ dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
            socket_handle.value(), ip_to_string(peer), new_socket->handle());
 
     return new_socket->handle();
-  } else {
-    return -1;
   }
+  XThread::SetLastError(socket->GetLastWSAError());
+  return -1;
 }
 DECLARE_XAM_EXPORT1(NetDll_accept, kNetworking, kImplemented);
 
