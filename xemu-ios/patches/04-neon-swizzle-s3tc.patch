@@ -1,0 +1,553 @@
+NEON swizzle/unswizzle for 2D RGBA8 and NEON + multi-threaded S3TC decode
+(Android pgraph/swizzle.c and s3tc.c as shipped: pre-git plus 0f2d0aa2).
+
+diff --git a/hw/xbox/nv2a/pgraph/s3tc.c b/hw/xbox/nv2a/pgraph/s3tc.c
+index 4f05fd6..9fe2583 100644
+--- a/hw/xbox/nv2a/pgraph/s3tc.c
++++ b/hw/xbox/nv2a/pgraph/s3tc.c
+@@ -23,6 +23,12 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include <pthread.h>
++
++#ifdef __aarch64__
++#include <arm_neon.h>
++#endif
++
+ #include "s3tc.h"
+ 
+ static void decode_bc1_colors(uint16_t c0, uint16_t c1, uint8_t r[4],
+@@ -62,6 +68,88 @@ static void decode_bc1_colors(uint16_t c0, uint16_t c1, uint8_t r[4],
+     }
+ }
+ 
++#ifdef __aarch64__
++static inline uint8x8_t s3tc_make_lookup_table(uint8_t v0, uint8_t v1,
++                                               uint8_t v2, uint8_t v3)
++{
++    uint32_t packed = v0 | ((uint32_t)v1 << 8) | ((uint32_t)v2 << 16) |
++                      ((uint32_t)v3 << 24);
++    return vreinterpret_u8_u32(vdup_n_u32(packed));
++}
++
++static inline uint8x8_t s3tc_make_index_vector(uint8_t packed_indices)
++{
++    uint64_t indices = (packed_indices & 0x03) |
++                       (((uint64_t)((packed_indices >> 2) & 0x03)) << 8) |
++                       (((uint64_t)((packed_indices >> 4) & 0x03)) << 16) |
++                       (((uint64_t)((packed_indices >> 6) & 0x03)) << 24);
++    return vcreate_u8(indices);
++}
++
++static inline uint8x8_t s3tc_load_alpha_row(const uint8_t *alpha_row)
++{
++    uint32_t packed = alpha_row[0] | ((uint32_t)alpha_row[1] << 8) |
++                      ((uint32_t)alpha_row[2] << 16) |
++                      ((uint32_t)alpha_row[3] << 24);
++    return vreinterpret_u8_u32(vdup_n_u32(packed));
++}
++
++static inline void s3tc_store_rgba_row(uint8_t *dst, uint8x8_t r,
++                                       uint8x8_t g, uint8x8_t b, uint8x8_t a)
++{
++    uint8x8_t rg = vzip1_u8(r, g);
++    uint8x8_t ba = vzip1_u8(b, a);
++    uint16x4_t rgba_lo =
++        vzip1_u16(vreinterpret_u16_u8(rg), vreinterpret_u16_u8(ba));
++    uint16x4_t rgba_hi =
++        vzip2_u16(vreinterpret_u16_u8(rg), vreinterpret_u16_u8(ba));
++
++    vst1q_u8(dst, vcombine_u8(vreinterpret_u8_u16(rgba_lo),
++                              vreinterpret_u8_u16(rgba_hi)));
++}
++
++static bool write_block_to_texture_neon(uint8_t *converted_data, uint32_t indices,
++                                        int i, int j, int width, int height,
++                                        int z_pos_factor, const uint8_t r[4],
++                                        const uint8_t g[4], const uint8_t b[4],
++                                        const uint8_t a[16],
++                                        bool separate_alpha)
++{
++    int x0 = i * 4;
++    int y0 = j * 4;
++    uint8x8_t r_table;
++    uint8x8_t g_table;
++    uint8x8_t b_table;
++    uint8x8_t a_table;
++
++    if (x0 + 4 > width || y0 + 4 > height) {
++        return false;
++    }
++
++    r_table = s3tc_make_lookup_table(r[0], r[1], r[2], r[3]);
++    g_table = s3tc_make_lookup_table(g[0], g[1], g[2], g[3]);
++    b_table = s3tc_make_lookup_table(b[0], b[1], b[2], b[3]);
++    a_table = s3tc_make_lookup_table(a[0], a[1], a[2], a[3]);
++
++    for (int row = 0; row < 4; row++) {
++        uint8_t packed_row_indices = (indices >> (row * 8)) & 0xFF;
++        uint8x8_t row_indices = s3tc_make_index_vector(packed_row_indices);
++        uint8x8_t row_r = vtbl1_u8(r_table, row_indices);
++        uint8x8_t row_g = vtbl1_u8(g_table, row_indices);
++        uint8x8_t row_b = vtbl1_u8(b_table, row_indices);
++        uint8x8_t row_a = separate_alpha
++                              ? s3tc_load_alpha_row(a + row * 4)
++                              : vtbl1_u8(a_table, row_indices);
++        uint8_t *dst = converted_data +
++                       (z_pos_factor + (y0 + row) * width + x0) * 4;
++
++        s3tc_store_rgba_row(dst, row_r, row_g, row_b, row_a);
++    }
++
++    return true;
++}
++#endif
++
+ static void write_block_to_texture(uint8_t *converted_data, uint32_t indices,
+                                    int i, int j, int width, int height,
+                                    int z_pos_factor, uint8_t r[4],
+@@ -74,6 +162,14 @@ static void write_block_to_texture(uint8_t *converted_data, uint32_t indices,
+     int x1 = x0 + 4,
+         y1 = y0 + 4;
+ 
++#ifdef __aarch64__
++    if (write_block_to_texture_neon(converted_data, indices, i, j, width,
++                                    height, z_pos_factor, r, g, b, a,
++                                    separate_alpha)) {
++        return;
++    }
++#endif
++
+     for (int y = y0; y < y1 && y < height; y++) {
+         int y_index = 4 * (y - y0);
+         int z_plus_y_pos_factor = z_pos_factor + y * width;
+@@ -165,6 +261,64 @@ static void decompress_dxt5_block(const uint8_t block_data[16],
+                            r, g, b, a, true);
+ }
+ 
++/*
++ * Parallel S3TC decompression constants.
++ * Used by both 2D (split by block rows) and 3D (split by z-blocks).
++ */
++#define S3TC_MIN_BLOCKS_FOR_MT  128  /* ~32x32 texture = 8x8 blocks */
++#define S3TC_MAX_THREADS        4
++
++typedef struct {
++    enum S3TC_DECOMPRESS_FORMAT color_format;
++    const uint8_t *data;
++    uint8_t *converted_data;
++    unsigned int width, height, depth;
++    int num_blocks_x, num_blocks_y;
++    int block_size;
++    int k_start, k_end;       /* z-block range for this worker */
++    int data_block_offset;    /* starting block index in input data */
++    int cur_depth_start;      /* starting depth slice index */
++} S3tc3dWorkerArgs;
++
++static void *s3tc_3d_worker_func(void *opaque)
++{
++    S3tc3dWorkerArgs *args = (S3tc3dWorkerArgs *)opaque;
++    int sub_block_index = args->data_block_offset;
++    int cur_depth = args->cur_depth_start;
++
++    for (int k = args->k_start; k < args->k_end; k++) {
++        int residual_depth = args->depth - cur_depth;
++        int block_depth = MIN(residual_depth, 4);
++        for (int j = 0; j < args->num_blocks_y; j++) {
++            for (int i = 0; i < args->num_blocks_x; i++) {
++                for (int slice = 0; slice < block_depth; slice++) {
++                    int z_pos_factor = (cur_depth + slice) *
++                                       args->width * args->height;
++                    if (args->color_format == S3TC_DECOMPRESS_FORMAT_DXT1) {
++                        decompress_dxt1_block(
++                            args->data + 8 * sub_block_index,
++                            args->converted_data, i, j,
++                            args->width, args->height, z_pos_factor);
++                    } else if (args->color_format == S3TC_DECOMPRESS_FORMAT_DXT3) {
++                        decompress_dxt3_block(
++                            args->data + 16 * sub_block_index,
++                            args->converted_data, i, j,
++                            args->width, args->height, z_pos_factor);
++                    } else {
++                        decompress_dxt5_block(
++                            args->data + 16 * sub_block_index,
++                            args->converted_data, i, j,
++                            args->width, args->height, z_pos_factor);
++                    }
++                    sub_block_index++;
++                }
++            }
++        }
++        cur_depth += block_depth;
++    }
++    return NULL;
++}
++
+ uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
+                             const uint8_t *data, unsigned int width,
+                             unsigned int height, unsigned int depth)
+@@ -174,40 +328,105 @@ uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
+     assert(depth > 0);
+     unsigned int physical_width = (width + 3) & ~3,
+                  physical_height = (height + 3) & ~3;
+-    int num_blocks_x = physical_width/4,
+-        num_blocks_y = physical_height/4,
+-        num_blocks_z = (depth + 3)/4;
+-    uint8_t *converted_data = (uint8_t*)g_malloc(width * height * depth * 4);
++    int num_blocks_x = physical_width / 4,
++        num_blocks_y = physical_height / 4,
++        num_blocks_z = (depth + 3) / 4;
++    int block_size = (color_format == S3TC_DECOMPRESS_FORMAT_DXT1) ? 8 : 16;
++    uint8_t *converted_data = (uint8_t *)g_malloc(width * height * depth * 4);
++
++    /* For small textures or single z-block, decompress single-threaded */
++    int num_threads = num_blocks_z < S3TC_MAX_THREADS
++                      ? num_blocks_z : S3TC_MAX_THREADS;
++    if (num_blocks_x * num_blocks_y * num_blocks_z < S3TC_MIN_BLOCKS_FOR_MT) {
++        num_threads = 1;
++    }
++
++    /* Pre-compute per-z-block offsets: block count and starting depth */
++    int zblock_block_count[num_blocks_z];
++    int zblock_depth_start[num_blocks_z];
+     int cur_depth = 0;
+-    int sub_block_index = 0;
+     for (int k = 0; k < num_blocks_z; k++) {
+-        int residual_depth = depth - cur_depth;
+-        int block_depth = MIN(residual_depth, 4);
+-        for (int j = 0; j < num_blocks_y; j++) {
+-            for (int i = 0; i < num_blocks_x; i++) {
+-                for (int slice = 0; slice < block_depth; slice++) {
+-                    int z_pos_factor = (cur_depth + slice) * width * height;
+-                    if (color_format == S3TC_DECOMPRESS_FORMAT_DXT1) {
+-                        decompress_dxt1_block(data + 8 * sub_block_index, converted_data,
+-                                              i, j, width, height, z_pos_factor);
+-                    } else if (color_format == S3TC_DECOMPRESS_FORMAT_DXT3) {
+-                        decompress_dxt3_block(data + 16 * sub_block_index, converted_data,
+-                                              i, j, width, height, z_pos_factor);
+-                    } else if (color_format == S3TC_DECOMPRESS_FORMAT_DXT5) {
+-                        decompress_dxt5_block(data + 16 * sub_block_index, converted_data,
+-                                              i, j, width, height, z_pos_factor);
+-                    } else {
+-                        assert(!"Invalid S3TC_DECOMPRESS_FORMAT");
+-                    }
+-                    sub_block_index++;
+-                }
+-            }
++        zblock_depth_start[k] = cur_depth;
++        int bd = MIN((int)depth - cur_depth, 4);
++        zblock_block_count[k] = num_blocks_y * num_blocks_x * bd;
++        cur_depth += bd;
++    }
++
++    pthread_t threads[S3TC_MAX_THREADS];
++    S3tc3dWorkerArgs thread_args[S3TC_MAX_THREADS];
++    int zblocks_per_thread = num_blocks_z / num_threads;
++    int remainder = num_blocks_z % num_threads;
++
++    int k = 0, block_offset = 0;
++    for (int t = 0; t < num_threads; t++) {
++        int zblocks = zblocks_per_thread + (t < remainder ? 1 : 0);
++        int blocks_in_range = 0;
++        for (int kk = k; kk < k + zblocks; kk++) {
++            blocks_in_range += zblock_block_count[kk];
+         }
+-        cur_depth += block_depth;
++        thread_args[t] = (S3tc3dWorkerArgs){
++            .color_format = color_format, .data = data,
++            .converted_data = converted_data,
++            .width = width, .height = height, .depth = depth,
++            .num_blocks_x = num_blocks_x, .num_blocks_y = num_blocks_y,
++            .block_size = block_size,
++            .k_start = k, .k_end = k + zblocks,
++            .data_block_offset = block_offset,
++            .cur_depth_start = zblock_depth_start[k],
++        };
++        block_offset += blocks_in_range;
++        k += zblocks;
++
++        if (t < num_threads - 1) {
++            pthread_create(&threads[t], NULL, s3tc_3d_worker_func,
++                           &thread_args[t]);
++        }
++    }
++
++    /* Last chunk runs on current thread */
++    s3tc_3d_worker_func(&thread_args[num_threads - 1]);
++
++    for (int t = 0; t < num_threads - 1; t++) {
++        pthread_join(threads[t], NULL);
+     }
++
+     return converted_data;
+ }
+ 
++typedef struct {
++    enum S3TC_DECOMPRESS_FORMAT color_format;
++    const uint8_t *data;
++    uint8_t *converted_data;
++    unsigned int width, height;
++    int num_blocks_x;
++    int j_start, j_end;
++    int block_size;
++} S3tcWorkerArgs;
++
++static void *s3tc_worker_func(void *opaque)
++{
++    S3tcWorkerArgs *args = (S3tcWorkerArgs *)opaque;
++    for (int j = args->j_start; j < args->j_end; j++) {
++        for (int i = 0; i < args->num_blocks_x; i++) {
++            int block_index = j * args->num_blocks_x + i;
++            if (args->color_format == S3TC_DECOMPRESS_FORMAT_DXT1) {
++                decompress_dxt1_block(args->data + 8 * block_index,
++                                      args->converted_data, i, j,
++                                      args->width, args->height, 0);
++            } else if (args->color_format == S3TC_DECOMPRESS_FORMAT_DXT3) {
++                decompress_dxt3_block(args->data + 16 * block_index,
++                                      args->converted_data, i, j,
++                                      args->width, args->height, 0);
++            } else {
++                decompress_dxt5_block(args->data + 16 * block_index,
++                                      args->converted_data, i, j,
++                                      args->width, args->height, 0);
++            }
++        }
++    }
++    return NULL;
++}
++
+ uint8_t *s3tc_decompress_2d(enum S3TC_DECOMPRESS_FORMAT color_format,
+                             const uint8_t *data, unsigned int width,
+                             unsigned int height)
+@@ -217,23 +436,56 @@ uint8_t *s3tc_decompress_2d(enum S3TC_DECOMPRESS_FORMAT color_format,
+     unsigned int physical_width = (width + 3) & ~3,
+                  physical_height = (height + 3) & ~3;
+     int num_blocks_x = physical_width / 4, num_blocks_y = physical_height / 4;
++    int total_blocks = num_blocks_x * num_blocks_y;
+     uint8_t *converted_data = (uint8_t *)g_malloc(width * height * 4);
+-    for (int j = 0; j < num_blocks_y; j++) {
+-        for (int i = 0; i < num_blocks_x; i++) {
+-            int block_index = j * num_blocks_x + i;
+-            if (color_format == S3TC_DECOMPRESS_FORMAT_DXT1) {
+-                decompress_dxt1_block(data + 8 * block_index,
+-                                      converted_data, i, j, width, height, 0);
+-            } else if (color_format == S3TC_DECOMPRESS_FORMAT_DXT3) {
+-                decompress_dxt3_block(data + 16 * block_index,
+-                                      converted_data, i, j, width, height, 0);
+-            } else if (color_format == S3TC_DECOMPRESS_FORMAT_DXT5) {
+-                decompress_dxt5_block(data + 16 * block_index,
+-                                      converted_data, i, j, width, height, 0);
+-            } else {
+-                assert(!"Invalid S3TC_DECOMPRESS_FORMAT");
+-            }
++
++    /* For small textures, decompress single-threaded */
++    if (total_blocks < S3TC_MIN_BLOCKS_FOR_MT) {
++        S3tcWorkerArgs args = {
++            .color_format = color_format, .data = data,
++            .converted_data = converted_data,
++            .width = width, .height = height,
++            .num_blocks_x = num_blocks_x,
++            .j_start = 0, .j_end = num_blocks_y,
++        };
++        s3tc_worker_func(&args);
++        return converted_data;
++    }
++
++    /* Split block rows across threads */
++    int num_threads = S3TC_MAX_THREADS;
++    if (num_blocks_y < num_threads) num_threads = num_blocks_y;
++
++    pthread_t threads[S3TC_MAX_THREADS];
++    S3tcWorkerArgs thread_args[S3TC_MAX_THREADS];
++    int rows_per_thread = num_blocks_y / num_threads;
++    int remainder = num_blocks_y % num_threads;
++
++    int j = 0;
++    for (int t = 0; t < num_threads; t++) {
++        int rows = rows_per_thread + (t < remainder ? 1 : 0);
++        thread_args[t] = (S3tcWorkerArgs){
++            .color_format = color_format, .data = data,
++            .converted_data = converted_data,
++            .width = width, .height = height,
++            .num_blocks_x = num_blocks_x,
++            .j_start = j, .j_end = j + rows,
++        };
++        j += rows;
++
++        if (t < num_threads - 1) {
++            pthread_create(&threads[t], NULL, s3tc_worker_func,
++                           &thread_args[t]);
+         }
+     }
++
++    /* Last chunk runs on current thread */
++    s3tc_worker_func(&thread_args[num_threads - 1]);
++
++    /* Wait for worker threads */
++    for (int t = 0; t < num_threads - 1; t++) {
++        pthread_join(threads[t], NULL);
++    }
++
+     return converted_data;
+ }
+diff --git a/hw/xbox/nv2a/pgraph/swizzle.c b/hw/xbox/nv2a/pgraph/swizzle.c
+index fe71bc4..a6d65f8 100644
+--- a/hw/xbox/nv2a/pgraph/swizzle.c
++++ b/hw/xbox/nv2a/pgraph/swizzle.c
+@@ -25,6 +25,10 @@
+ #include <assert.h>
+ #include <stdbool.h>
+ 
++#ifdef __aarch64__
++#include <arm_neon.h>
++#endif
++
+ #include "swizzle.h"
+ 
+ /*
+@@ -69,6 +73,81 @@ static void generate_swizzle_masks(unsigned int width,
+     *mask_z = z;
+ }
+ 
++static inline uint32_t swizzle_increment_offset(uint32_t offset, uint32_t mask)
++{
++    return (offset - mask) & mask;
++}
++
++#ifdef __aarch64__
++/*
++ * In 2D Morton order, each aligned 2x2 RGBA8 block maps to 16 contiguous
++ * bytes in swizzled memory. That lets us move four pixels at a time with a
++ * single NEON load/store pair while keeping the existing scalar path for
++ * everything else.
++ */
++static inline void swizzle_box_neon_2d_rgba8(const uint8_t *src_buf,
++                                             unsigned int width,
++                                             unsigned int height,
++                                             uint8_t *dst_buf,
++                                             unsigned int row_pitch,
++                                             uint32_t mask_x,
++                                             uint32_t mask_y)
++{
++    uint32_t off_y = 0;
++
++    for (unsigned int y = 0; y < height; y += 2) {
++        const uint8_t *src_row0 = src_buf + y * row_pitch;
++        const uint8_t *src_row1 = src_row0 + row_pitch;
++        uint32_t off_x = 0;
++
++        for (unsigned int x = 0; x < width; x += 2) {
++            uint8x8_t row0 = vld1_u8(src_row0 + x * 4);
++            uint8x8_t row1 = vld1_u8(src_row1 + x * 4);
++
++            vst1q_u8(dst_buf + ((size_t)off_y + off_x) * 4,
++                     vcombine_u8(row0, row1));
++
++            off_x = swizzle_increment_offset(off_x, mask_x);
++            off_x = swizzle_increment_offset(off_x, mask_x);
++        }
++
++        off_y = swizzle_increment_offset(off_y, mask_y);
++        off_y = swizzle_increment_offset(off_y, mask_y);
++    }
++}
++
++static inline void unswizzle_box_neon_2d_rgba8(const uint8_t *src_buf,
++                                               unsigned int width,
++                                               unsigned int height,
++                                               uint8_t *dst_buf,
++                                               unsigned int row_pitch,
++                                               uint32_t mask_x,
++                                               uint32_t mask_y)
++{
++    uint32_t off_y = 0;
++
++    for (unsigned int y = 0; y < height; y += 2) {
++        uint8_t *dst_row0 = dst_buf + y * row_pitch;
++        uint8_t *dst_row1 = dst_row0 + row_pitch;
++        uint32_t off_x = 0;
++
++        for (unsigned int x = 0; x < width; x += 2) {
++            uint8x16_t block =
++                vld1q_u8(src_buf + ((size_t)off_y + off_x) * 4);
++
++            vst1_u8(dst_row0 + x * 4, vget_low_u8(block));
++            vst1_u8(dst_row1 + x * 4, vget_high_u8(block));
++
++            off_x = swizzle_increment_offset(off_x, mask_x);
++            off_x = swizzle_increment_offset(off_x, mask_x);
++        }
++
++        off_y = swizzle_increment_offset(off_y, mask_y);
++        off_y = swizzle_increment_offset(off_y, mask_y);
++    }
++}
++#endif
++
+ static inline void swizzle_box_internal(
+     const uint8_t *src_buf,
+     unsigned int width,
+@@ -82,6 +161,14 @@ static inline void swizzle_box_internal(
+     uint32_t mask_x, mask_y, mask_z;
+     generate_swizzle_masks(width, height, depth, &mask_x, &mask_y, &mask_z);
+ 
++#ifdef __aarch64__
++    if (bytes_per_pixel == 4 && depth == 1 && width >= 2 && height >= 2) {
++        swizzle_box_neon_2d_rgba8(src_buf, width, height, dst_buf, row_pitch,
++                                  mask_x, mask_y);
++        return;
++    }
++#endif
++
+     /*
+      * Map linear texture to swizzled texture using swizzle masks.
+      * https://fgiesen.wordpress.com/2011/01/17/texture-tiling-and-swizzling/
+@@ -106,12 +193,12 @@ static inline void swizzle_box_internal(
+                  * Equivalent to:
+                  * off_x = (off_x + (~mask_x + 1)) & mask_x;
+                  */
+-                off_x = (off_x - mask_x) & mask_x;
++                off_x = swizzle_increment_offset(off_x, mask_x);
+             }
+-            off_y = (off_y - mask_y) & mask_y;
++            off_y = swizzle_increment_offset(off_y, mask_y);
+         }
+         src_buf += slice_pitch;
+-        off_z = (off_z - mask_z) & mask_z;
++        off_z = swizzle_increment_offset(off_z, mask_z);
+     }
+ }
+ 
+@@ -128,6 +215,14 @@ static inline void unswizzle_box_internal(
+     uint32_t mask_x, mask_y, mask_z;
+     generate_swizzle_masks(width, height, depth, &mask_x, &mask_y, &mask_z);
+ 
++#ifdef __aarch64__
++    if (bytes_per_pixel == 4 && depth == 1 && width >= 2 && height >= 2) {
++        unswizzle_box_neon_2d_rgba8(src_buf, width, height, dst_buf, row_pitch,
++                                    mask_x, mask_y);
++        return;
++    }
++#endif
++
+     int x, y, z;
+     int off_z = 0;
+     for (z = 0; z < depth; z++) {
+@@ -141,12 +236,12 @@ static inline void unswizzle_box_internal(
+                 uint8_t *dst = dst_tmp + x * bytes_per_pixel;
+                 memcpy(dst, src, bytes_per_pixel);
+ 
+-                off_x = (off_x - mask_x) & mask_x;
++                off_x = swizzle_increment_offset(off_x, mask_x);
+             }
+-            off_y = (off_y - mask_y) & mask_y;
++            off_y = swizzle_increment_offset(off_y, mask_y);
+         }
+         dst_buf += slice_pitch;
+-        off_z = (off_z - mask_z) & mask_z;
++        off_z = swizzle_increment_offset(off_z, mask_z);
+     }
+ }
+ 
