@@ -42,10 +42,16 @@ X_STATUS DiscImageFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offset,
     return X_STATUS_SUCCESS;
   }
 
-  if (entry_->data_offset() >= entry_->mmap()->size()) {
+  const size_t mmap_size = entry_->mmap()->size();
+  if (entry_->data_offset() >= mmap_size) {
     xe::FatalError("This ISO image is corrupted and cannot be played.");
     return X_STATUS_END_OF_FILE;
   }
+  if (real_offset >= mmap_size) {
+    // Truncated image: the file starts inside it but ends past its end.
+    return X_STATUS_END_OF_FILE;
+  }
+  real_length = std::min(real_length, mmap_size - real_offset);
 
   std::memcpy(buffer.data(), entry_->mmap()->data() + real_offset, real_length);
   *out_bytes_read = real_length;

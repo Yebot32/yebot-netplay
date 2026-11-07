@@ -53,6 +53,11 @@ std::unique_ptr<MappedMemory> DiscImageEntry::OpenMapped(
     return MappedMemory::Open(device->host_path(), MappedMemory::Mode::kRead,
                               real_offset, real_length);
   }
+  // A truncated image ends before the entry does: map only what it holds.
+  if (real_offset >= mmap_->size()) {
+    return nullptr;
+  }
+  real_length = std::min(real_length, mmap_->size() - real_offset);
   return mmap_->Slice(real_offset, real_length);
 }
 
