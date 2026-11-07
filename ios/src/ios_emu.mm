@@ -645,7 +645,23 @@ void xe_ios_shutdown(void) {
 void xe_ios_set_paused(int paused) {
   if (!g_app || !g_app->emu_) return;
   if (paused) {
-    g_app->emu_->Pause();
+    // iOS refuses GPU work from an app in the background (XeniOS 0d136f0c4).
+    // The command processor parks at the top of its loop with an open command
+    // buffer and earlier ones possibly still running, so drain the Metal queue
+    // on the worker first. CallInThread is first in, first out, so the drain
+    // runs before the park Emulator::Pause queues, and Pause returns only once
+    // both have run. XeniOS's guest-scheduler hold (PauseDispatch) is not
+    // ported: Xenra's soft pause parks the progress sources instead.
+    xe::Emulator* emu = g_app->emu_.get();
+    xe::gpu::GraphicsSystem* gs = emu->graphics_system();
+    if (!emu->is_paused() && gs && gs->name() == "Metal") {
+      if (xe::gpu::CommandProcessor* cp = gs->command_processor()) {
+        cp->CallInThread([cp]() {
+          xe::gpu::metal::MetalGraphicsSystem::AwaitGpuIdleOnWorkerThread(cp);
+        });
+      }
+    }
+    emu->Pause();
   } else {
     g_app->emu_->Resume();
   }

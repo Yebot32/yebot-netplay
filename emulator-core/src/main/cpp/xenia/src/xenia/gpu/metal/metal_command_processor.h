@@ -110,6 +110,12 @@ class MetalCommandProcessor : public CommandProcessor {
   void SetSwapDestSwap(uint32_t dest_base, bool swap);
   bool ConsumeSwapDestSwap(uint32_t dest_base, bool* swap_out);
 
+  // Commits the open command buffer and blocks until every submitted command
+  // buffer has completed. Worker thread only (through CallInThread). Used to
+  // drain the GPU before the app leaves the foreground, where iOS refuses GPU
+  // work.
+  void AwaitAllQueueOperationsCompletion() { PrepareForWait(); }
+
  protected:
   bool SetupContext() override;
   void ShutdownContext() override;
