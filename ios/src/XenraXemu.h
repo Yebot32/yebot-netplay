@@ -24,6 +24,11 @@ NSString* XenraXemuPrepare(void);
 // for. Once it is, a core that asks for its memory gets an executable region.
 BOOL XenraXemuNeedsSettle(void);
 
+// JIT is on but generated code still faults, and no script is attached: on iOS 26
+// and later that means StikDebug enabled JIT without its script, as it does when the
+// app is opened from StikDebug on a device it does not take for TXM. Runs the probe.
+BOOL XenraXemuNeedsScript(void);
+
 
 // A reason this launch cannot work, in words for the user, or nil. Logs the sizes.
 NSString* XenraXemuFileProblem(void);

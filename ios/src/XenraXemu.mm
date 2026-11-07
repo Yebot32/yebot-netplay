@@ -154,6 +154,11 @@ static void ApplyPacing(CALayer* layer) {
 
 BOOL XenraXemuNeedsSettle(void) { return NeedsUniversalJit(); }
 
+BOOL XenraXemuNeedsScript(void) {
+  return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+         !DebuggerAttached() && XenraJitChooseScheme() == XenraJitNone;
+}
+
 NSString* XenraXemuFileProblem(void) {
   if (!NeedsUniversalJit() && XenraJitChooseScheme() == XenraJitNone) {
     return XS(@"JIT is on, but iOS still refuses to run generated code. This iPad "

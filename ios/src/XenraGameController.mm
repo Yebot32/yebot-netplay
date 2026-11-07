@@ -230,6 +230,10 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
     }
   }
   if (XenraJitActive()) {
+    if (XenraXemuNeedsScript()) {
+      [self askForScript];
+      return;
+    }
     if (resumed_ && XenraXemuNeedsSettle()) {
       [self settleThenBoot];
     } else {
@@ -249,6 +253,37 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                                                 block:^(NSTimer*) {
                                                   [weak checkJit];
                                                 }];
+}
+
+// JIT came on without the script, so ask StikDebug to attach it to this process.
+// It goes by pid, so the app stays as it is, and the game starts once it is there.
+- (void)askForScript {
+  status_.text = XS(@"Waiting for StikDebug's universal script…");
+  cancel_.hidden = NO;
+  RememberForJit(path_, name_);
+  XenraLog(@"JIT is on without the script: asking StikDebug for it");
+  XenraOpenJitEnabler();
+  __weak XenraGameController* weak = self;
+  __block int seconds = 0;
+  jitTimer_ = [NSTimer scheduledTimerWithTimeInterval:1
+                                              repeats:YES
+                                                block:^(NSTimer* timer) {
+                                                  [weak checkScript:++seconds];
+                                                }];
+}
+
+- (void)checkScript:(int)seconds {
+  const BOOL attached = XenraXemuNeedsSettle();
+  if (!attached && seconds < 90) return;
+  [jitTimer_ invalidate];
+  jitTimer_ = nil;
+  XenraLog([NSString stringWithFormat:@"script %@ after %d s",
+                                      attached ? @"attached" : @"never attached", seconds]);
+  if (attached) {
+    [self settleThenBoot];
+  } else {
+    [self showFailure:XenraXemuFileProblem()];
+  }
 }
 
 - (void)checkJit {

@@ -351,3 +351,4 @@
 "Choose the language for the interface" = "インターフェイスの言語を選択";
 
 "JIT is on, but iOS still refuses to run generated code. This iPad needs StikDebug's universal script: assign it to Xenra in StikDebug, then start the game again." = "JIT は有効ですが、iOS が生成コードの実行を拒否しています。この iPad には StikDebug のユニバーサルスクリプトが必要です。StikDebug で Xenra に割り当ててから、ゲームをもう一度開始してください。";
+"Waiting for StikDebug's universal script…" = "StikDebug のユニバーサルスクリプトを待っています…";
