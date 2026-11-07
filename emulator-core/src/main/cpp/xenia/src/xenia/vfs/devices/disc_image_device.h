@@ -10,8 +10,11 @@
 #ifndef XENIA_VFS_DEVICES_DISC_IMAGE_DEVICE_H_
 #define XENIA_VFS_DEVICES_DISC_IMAGE_DEVICE_H_
 
+#include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "xenia/base/mapped_memory.h"
 #include "xenia/vfs/device.h"
@@ -38,9 +41,14 @@ class DiscImageDevice : public Device {
   uint32_t component_name_max_length() const override { return 255; }
 
   uint32_t total_allocation_units() const override {
-    return uint32_t(mmap_->size() / sectors_per_allocation_unit() /
+    return uint32_t(image_size_ / sectors_per_allocation_unit() /
                     bytes_per_sector());
   }
+
+  // Without a mapping (see Initialize) the image is read on demand through here.
+  // Safe from any thread. False when the range is outside the image or unread.
+  bool ReadAt(size_t offset, void* out, size_t length);
+  const std::filesystem::path& host_path() const { return host_path_; }
   uint32_t available_allocation_units() const override { return 0; }
   uint32_t sectors_per_allocation_unit() const override { return 1; }
   uint32_t bytes_per_sector() const override { return 0x200; }
@@ -58,6 +66,11 @@ class DiscImageDevice : public Device {
   std::filesystem::path host_path_;
   std::unique_ptr<Entry> root_entry_;
   std::unique_ptr<MappedMemory> mmap_;
+  // Used instead of mmap_ when the image is too large to map, as on iOS, where a
+  // 7.8 GB disc fails with ENOMEM.
+  FILE* file_ = nullptr;
+  std::mutex file_lock_;
+  size_t image_size_ = 0;
 
   typedef struct {
     uint8_t* ptr;
@@ -71,6 +84,11 @@ class DiscImageDevice : public Device {
   Error Verify(ParseState* state);
   bool VerifyMagic(ParseState* state, size_t offset);
   Error ReadAllEntries(ParseState* state, const uint8_t* root_buffer);
+  Error VerifyByReading(ParseState* state);
+  // A directory table, from the mapping or read into |storage|. Padded so an
+  // entry read near the end stays inside the buffer.
+  const uint8_t* DirectoryTable(ParseState* state, size_t offset, size_t length,
+                                std::vector<uint8_t>& storage);
   bool ReadEntry(ParseState* state, const uint8_t* buffer,
                  uint32_t entry_ordinal, DiscImageEntry* parent);
 };

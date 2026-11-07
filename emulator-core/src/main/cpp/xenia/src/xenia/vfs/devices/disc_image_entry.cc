@@ -10,6 +10,7 @@
 #include "xenia/vfs/devices/disc_image_entry.h"
 
 #include "xenia/base/math.h"
+#include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/disc_image_file.h"
 
 namespace xe {
@@ -46,6 +47,12 @@ std::unique_ptr<MappedMemory> DiscImageEntry::OpenMapped(
 
   size_t real_offset = data_offset_ + offset;
   size_t real_length = length ? std::min(length, data_size_) : data_size_;
+  if (!mmap_) {
+    // The image is read on demand; mapping just this file's range is fine.
+    auto device = static_cast<DiscImageDevice*>(this->device());
+    return MappedMemory::Open(device->host_path(), MappedMemory::Mode::kRead,
+                              real_offset, real_length);
+  }
   return mmap_->Slice(real_offset, real_length);
 }
 

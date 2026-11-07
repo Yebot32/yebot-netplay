@@ -10,6 +10,7 @@
 #include "xenia/vfs/devices/disc_image_file.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/disc_image_entry.h"
 namespace xe {
 namespace vfs {
@@ -27,14 +28,25 @@ X_STATUS DiscImageFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offset,
     return X_STATUS_END_OF_FILE;
   }
 
+  size_t real_offset = entry_->data_offset() + byte_offset;
+  size_t real_length =
+      std::min(buffer.size(), entry_->data_size() - byte_offset);
+  if (!entry_->mmap()) {
+    // Read on demand: the image was too large to map.
+    auto device = static_cast<DiscImageDevice*>(entry_->device());
+    if (!device->ReadAt(real_offset, buffer.data(), real_length)) {
+      XELOGE("Disc image read failed at {} ({} bytes)", real_offset, real_length);
+      return X_STATUS_END_OF_FILE;
+    }
+    *out_bytes_read = real_length;
+    return X_STATUS_SUCCESS;
+  }
+
   if (entry_->data_offset() >= entry_->mmap()->size()) {
     xe::FatalError("This ISO image is corrupted and cannot be played.");
     return X_STATUS_END_OF_FILE;
   }
 
-  size_t real_offset = entry_->data_offset() + byte_offset;
-  size_t real_length =
-      std::min(buffer.size(), entry_->data_size() - byte_offset);
   std::memcpy(buffer.data(), entry_->mmap()->data() + real_offset, real_length);
   *out_bytes_read = real_length;
   return X_STATUS_SUCCESS;
