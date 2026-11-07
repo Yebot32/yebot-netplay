@@ -20,6 +20,9 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 #include "xenia/base/cvar.h"
 
@@ -1438,6 +1441,16 @@ void CommandProcessor::ThrottlePresentation() {
 }
 
 void CommandProcessor::WorkerThreadMain() {
+#if XE_PLATFORM_IOS
+  // From XeniOS a7c8d7a6f. A title waits on this thread for ring space, so
+  // leaving it at the default QoS (on the efficiency cores whenever the
+  // performance ones are busy) while the guest's main thread spins on a
+  // performance core slows both. Only this thread: XeniOS also raised guest
+  // CPU 0 and reverted it (b87b6a61b) over spinlock priority inversion.
+  if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0) {
+    XELOGI("CommandProcessor: worker prefers the performance cores");
+  }
+#endif  // XE_PLATFORM_IOS
   if (!SetupContext()) {
     xe::FatalError("Unable to setup command processor internal state");
     return;
