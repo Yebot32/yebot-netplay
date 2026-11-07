@@ -50,6 +50,17 @@
 	<true/>
 
 	<!--
+	  Raises the jetsam limit further while a debugger is attached. Xenra's
+	  JIT already needs one attached (StikDebug or Xcode), so on those
+	  launches this may lift the cap past increased-memory-limit. XeniOS has
+	  shipped it in xenia_ios.entitlements since its first port (16d9272f8).
+	  Whether it raises the limit on a sideloaded build is unmeasured: read
+	  the limit the log reports at launch before crediting it.
+	-->
+	<key>com.apple.developer.kernel.increased-debugging-memory-limit</key>
+	<true/>
+
+	<!--
 	  Enables the 64-bit (rather than 36-bit) virtual address space for the
 	  process. The guest address space mapping in base/memory.cc reserves a
 	  large contiguous region and lets the OS choose the base (MapViewsMac);
@@ -70,13 +81,10 @@
 	  handed over explicitly.
 
 	  Taken from XeniOS (github.com/xenios-jp/XeniOS, BSD-3-Clause, same licence
-	  as this tree), whose shipping iOS entitlements carry exactly this plus
-	  increased-memory-limit and nothing else. Notably they do NOT ship
-	  extended-virtual-addressing, which is some evidence that Xenia's guest
-	  reservation does not actually require it. Ours is kept because it is inert
-	  without Apple approval and costs nothing - but do not treat it as load
-	  bearing, and if the reservation misbehaves, that difference is the first
-	  thing to test.
+	  as this tree). XeniOS's iOS entitlements (as of cef52a33f) now also carry
+	  extended-virtual-addressing (2da5b4d5c), increased-memory-limit,
+	  increased-debugging-memory-limit and get-task-allow; an earlier note here
+	  saying they did not ship extended-virtual-addressing is out of date.
 	-->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
