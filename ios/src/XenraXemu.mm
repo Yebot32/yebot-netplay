@@ -289,6 +289,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
     }
   }
   if (!universal && scheme == XenraJitRxFirst) setenv("XEMU_IOS_RX_FIRST", "1", 1);
+  if (!universal && scheme == XenraJitFlip) setenv("XEMU_IOS_JIT_FLIP", "1", 1);
   ApplyPacing(layer);
   // Sound through the mute switch, and pads that keep working with our window
   // key rather than SDL's.
@@ -301,7 +302,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   NSString* accel = [NSString
       stringWithFormat:@"tcg,thread=single,tb-size=%@%@",
                        [XenraSettings valueForKey:@"og.tb" game:name fallback:@"64"],
-                       scheme == XenraJitRwFirst ? @",split-wx=on" : @""];
+                       scheme == XenraJitRwFirst ? @",split-wx=on" : @",split-wx=off"];
   NSArray<NSString*>* arguments =
       @[ @"xemu-ios", @"-accel", accel, @"-config_path", WriteConfig(game, name) ];
   XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d traced=%d scheme=%d", accel,

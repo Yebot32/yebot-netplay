@@ -14,6 +14,13 @@
 #import <Foundation/Foundation.h>
 
 typedef NS_ENUM(NSInteger, XenraJitScheme) {
+  // Never writable and executable at once: a fault moves a page between the two.
+  // The only layout that can run on a device without TXM, and what the core does
+  // under XEMU_IOS_JIT_FLIP.
+  XenraJitFlip,
+  // The same, with mprotect called by hand, as XeniOS does. Never chosen: it says
+  // whether the mechanism or the fault handling is at fault if Flip fails.
+  XenraJitFlipExplicit,
   // Born executable, then a writable alias of the same pages. Dolphin's layout
   // for pre-TXM devices on iOS 26.
   XenraJitRxFirst,
@@ -23,6 +30,7 @@ typedef NS_ENUM(NSInteger, XenraJitScheme) {
   XenraJitRwFirst,
   XenraJitNone,
 };
+
 
 // The first layout that works. Needs JIT to be enabled. The result is cached for
 // the launch.

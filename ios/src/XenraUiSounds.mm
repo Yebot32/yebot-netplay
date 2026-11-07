@@ -1,4 +1,5 @@
 #import "XenraUiSounds.h"
+#import "XenraAmbient.h"
 
 #import <AVFoundation/AVFoundation.h>
 
@@ -81,16 +82,9 @@ NSUInteger g_next;
 int g_count;
 #endif
 
-// The menus share an Ambient session with the music, but the music only sets it
-// when it is switched on, and a game leaves Playback behind, which ignores the
-// mute switch.
-void UseAmbientSession(void) {
-  AVAudioSession* session = AVAudioSession.sharedInstance;
-  if (![session.category isEqualToString:AVAudioSessionCategoryAmbient]) {
-    [session setCategory:AVAudioSessionCategoryAmbient error:nil];
-  }
-  [session setActive:YES error:nil];
-}
+// The music only sets the session when it is switched on, and a game leaves a
+// session of its own behind.
+void UseAmbientSession(void) { XenraMenuAudioSession(); }
 
 void BuildVoices(void) {
   UseAmbientSession();

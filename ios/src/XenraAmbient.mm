@@ -2,6 +2,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <UIKit/UIKit.h>
 
 #include <algorithm>
 #include <atomic>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 
+#import "XenraScreens.h"
 #import "XenraSettings.h"
 
 // Numbers and structure are AmbientMusic.kt's; the reasons are written there.
@@ -206,6 +208,39 @@ void Render(int16_t* out) {
   s.lfo_mid -= int(s.lfo_mid);
 }
 
+// AudioQueueStart fails while the app is not yet in front, which a launch can be, and
+// an interruption stops a queue without saying so. It is also harmless on a running
+// queue, so every return to the front simply asks again.
+void StartQueue() {
+  if (!g_queue || g_stopping) return;
+  XenraMenuAudioSession();
+  const OSStatus started = AudioQueueStart(g_queue, nullptr);
+  AVAudioSession* session = AVAudioSession.sharedInstance;
+  XenraLog([NSString
+      stringWithFormat:@"ambient: start %d, gain %.2f, device volume %.2f, %@, route %@",
+                       int(started), g_target_gain.load(), session.outputVolume,
+                       session.category,
+                       session.currentRoute.outputs.firstObject.portType]);
+}
+
+void WatchTheApp() {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
+    void (^again)(NSNotification*) = ^(NSNotification*) {
+      StartQueue();
+    };
+    [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:again];
+    [center addObserverForName:AVAudioSessionInterruptionNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:again];
+  });
+}
+
 void TearDown() {
   if (!g_queue) return;
   AudioQueueDispose(g_queue, true);
@@ -233,6 +268,19 @@ void Fill(void*, AudioQueueRef queue, AudioQueueBufferRef buffer) {
 
 }  // namespace
 
+void XenraMenuAudioSession(void) {
+  // Playback, because iPadOS has a Silent Mode and no switch to show it is on, so
+  // Ambient looks like a broken app. Mixing keeps other apps' sound going.
+  AVAudioSession* session = AVAudioSession.sharedInstance;
+  NSError* error = nil;
+  if (![session setCategory:AVAudioSessionCategoryPlayback
+                withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                      error:&error] ||
+      ![session setActive:YES error:&error]) {
+    XenraLog([NSString stringWithFormat:@"ambient: session %@", error]);
+  }
+}
+
 void XenraAmbientStart(void) {
   const BOOL enabled = [[XenraSettings stringForKey:@"music.enabled"
                                            fallback:@"true"] isEqual:@"true"];
@@ -246,16 +294,17 @@ void XenraAmbientStart(void) {
                                                          : &kPaletteXbox;
   g_target_gain = volume / 100.0f * 1.05f;
   g_stopping = false;
-  if (g_queue) return;
+  if (g_queue) {
+    StartQueue();
+    return;
+  }
 
   for (int i = 0; i <= kTableSize; i++) {
     g_sine[i] = float(std::sin(2.0 * M_PI * i / kTableSize));
   }
   ResetVoice();
-  // Ambient: mixes with whatever is already playing and obeys the mute switch.
-  AVAudioSession* session = AVAudioSession.sharedInstance;
-  [session setCategory:AVAudioSessionCategoryAmbient error:nil];
-  [session setActive:YES error:nil];
+  XenraMenuAudioSession();
+  WatchTheApp();
 
   AudioStreamBasicDescription format = {};
   format.mSampleRate = kSampleRate;
@@ -268,8 +317,10 @@ void XenraAmbientStart(void) {
   format.mChannelsPerFrame = 2;
   format.mBitsPerChannel = 16;
   // Audio is decoration: no queue means a silent menu, not a failed one.
-  if (AudioQueueNewOutput(&format, Fill, nullptr, nullptr, nullptr, 0,
-                          &g_queue) != noErr) {
+  const OSStatus made =
+      AudioQueueNewOutput(&format, Fill, nullptr, nullptr, nullptr, 0, &g_queue);
+  if (made != noErr) {
+    XenraLog([NSString stringWithFormat:@"ambient: no queue, %d", int(made)]);
     g_queue = nullptr;
     return;
   }
@@ -279,7 +330,7 @@ void XenraAmbientStart(void) {
       Fill(nullptr, g_queue, buffer);
     }
   }
-  AudioQueueStart(g_queue, nullptr);
+  StartQueue();
 }
 
 void XenraAmbientStop(void) { g_stopping = true; }
