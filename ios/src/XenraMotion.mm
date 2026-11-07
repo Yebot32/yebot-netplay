@@ -53,6 +53,7 @@ void XenraEnter(NSArray<UIView*>* views, CGFloat dx, CGFloat dy,
                 NSTimeInterval delay, NSTimeInterval stagger,
                 NSTimeInterval duration, XenraCurve curve) {
   NSTimeInterval at = delay;
+  if (XenraRightToLeft()) dx = -dx;
   for (UIView* view in views) {
     view.alpha = 0;
     view.transform = CGAffineTransformMakeTranslation(dx, dy);

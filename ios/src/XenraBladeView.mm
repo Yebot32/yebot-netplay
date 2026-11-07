@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #import "XenraTheme.h"
+#import "XenraUI.h"
 
 NSInteger XenraThemeMode = XenraThemeOG;
 
@@ -126,6 +127,8 @@ static BladePaint LightDestructive(XenraBladeState state) {
 - (instancetype)initWithFrame:(CGRect)frame {
   self = [super initWithFrame:frame];
   if (self) {
+    // The rail starts the line, whichever side that is. It holds no text.
+    if (XenraRightToLeft()) self.transform = CGAffineTransformMakeScale(-1, 1);
     self.backgroundColor = UIColor.clearColor;
     base_ = [CALayer layer];
     base_.cornerRadius = kRadius;

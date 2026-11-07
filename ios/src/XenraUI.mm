@@ -50,11 +50,19 @@ CGFloat XenraKern(CGFloat kern) {
   return solid ? 0 : kern;
 }
 
-NSTextAlignment XenraEndAlignment(void) {
+BOOL XenraRightToLeft(void) {
   return UIApplication.sharedApplication.userInterfaceLayoutDirection ==
-                 UIUserInterfaceLayoutDirectionRightToLeft
-             ? NSTextAlignmentLeft
-             : NSTextAlignmentRight;
+         UIUserInterfaceLayoutDirectionRightToLeft;
+}
+
+NSTextAlignment XenraEndAlignment(void) {
+  return XenraRightToLeft() ? NSTextAlignmentLeft : NSTextAlignmentRight;
+}
+
+UIImage* XenraDirectional(UIImage* image) {
+  UIImage* turned = XenraRightToLeft() ? image.imageWithHorizontallyFlippedOrientation
+                                       : image;
+  return [turned imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
 NSAttributedString* XenraTrackedSpacing(NSString* text, CGFloat size,

@@ -364,7 +364,7 @@ static void AddHeader(UIStackView* stack, NSString* icon, BOOL compact,
                                               action:^{
                                                 [weak goOn];
                                               }];
-  continue_.icon = XenraMaterialIcon(kIconPlay, 22);
+  continue_.icon = XenraDirectional(XenraMaterialIcon(kIconPlay, 22));
   continue_.iconAtEnd = YES;
   UIView* spacer = [[UIView alloc] init];
   UIStackView* bottom =

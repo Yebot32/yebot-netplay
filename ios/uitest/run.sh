@@ -79,17 +79,15 @@ kill -INT $VIDEO; wait $VIDEO
 cp "$TOUR"/*.png "$OUT/" 2>/dev/null  # kept if a language run is what times out
 # The main screens in the languages that stress them, as a user with that language
 # set would launch. German and Russian run longest, Arabic is right to left, Japanese
-# is the widest script. A second Arabic run holds the layout left to right. Italian
-# is not a language here, so it must come up English: see "tour: language" in the log.
+# is the widest script. Italian is not a language here, so it must come up English: see "tour: language" in the log.
 if [ -e "$TOUR/done" ]; then
-  for RUN in de ar ar:ltr ja ru it:check; do
+  for RUN in de ar ja ru it:check; do
     CODE=${RUN%%:*}
-    MODE=$CODE; EXTRA=""
-    [ "$RUN" = ar:ltr ] && { MODE=ar-ltr; EXTRA="-XenraTourForceLTR YES"; }
+    MODE=$CODE
     [ "$RUN" = it:check ] && MODE=check
     xcrun simctl terminate "$DEVICE" Ali.Xanite.ui 2>/dev/null
     rm -f "$TOUR/done"
-    xcrun simctl launch "$DEVICE" Ali.Xanite.ui -AppleLanguages "($CODE)" -XenraTourLanguage "$MODE" $EXTRA
+    xcrun simctl launch "$DEVICE" Ali.Xanite.ui -AppleLanguages "($CODE)" -XenraTourLanguage "$MODE"
     for i in $(seq 1 240); do
       [ -e "$TOUR/done" ] && break
       sleep 1

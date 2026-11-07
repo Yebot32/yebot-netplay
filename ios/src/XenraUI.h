@@ -261,8 +261,15 @@ UILabel* XenraMakeLabel(NSString* text, CGFloat size, UIFontWeight weight,
 // join, and tracking pulls them apart; Chinese and Japanese are set solid.
 CGFloat XenraKern(CGFloat kern);
 
+// Arabic runs right to left, and the screens are mirrored for it as Android's are.
+// UIKit does that for stack views and constraints. These are for what it cannot see.
+BOOL XenraRightToLeft(void);
+
 // The end of a line in this language: right, or left in Arabic.
 NSTextAlignment XenraEndAlignment(void);
+
+// An icon that points along the line, an arrow or a play triangle. Template.
+UIImage* XenraDirectional(UIImage* image);
 
 // Tracked capitals. Android varies the tracking: blade 0.12, screen title and
 // hint 0.15, meta and section 0.1 to 0.12. XenraTracked is 0.1.

@@ -444,10 +444,10 @@ void XenraShowAbout(UIView* host) {
     [weak leave];
   };
   UIImageView* arrow = [[UIImageView alloc]
-      initWithImage:XenraVectorImage(
+      initWithImage:XenraDirectional(XenraVectorImage(
                         @[ [XenraVectorPath stroke:@"M20,12H5M11,6l-6,6 6,6"
                                              width:2] ],
-                        24, 24)];
+                        24, 24))];
   arrow.tintColor = XenraAccentText();
   arrow.translatesAutoresizingMaskIntoConstraints = NO;
   [close addSubview:arrow];

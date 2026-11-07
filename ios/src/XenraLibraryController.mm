@@ -375,6 +375,14 @@ void WithoutActions(void (^change)(void)) {
   title_.frame = CGRectMake(titleX, floor((s.height - 20) / 2),
                             MAX(0, s.width - titleX - 16 - 100), 20);
   size_.frame = CGRectMake(s.width - 16 - 94, floor((s.height - 16) / 2), 94, 16);
+  if (XenraRightToLeft()) {
+    for (UIView* view in @[ cover_, title_, size_ ]) {
+      CGRect frame = view.frame;
+      frame.origin.x = s.width - CGRectGetMaxX(frame);
+      view.frame = frame;
+    }
+    size_.textAlignment = NSTextAlignmentLeft;
+  }
 }
 
 - (void)showGame:(XenraGameEntry*)game {

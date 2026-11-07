@@ -76,13 +76,6 @@ void XenraTourStart(UIWindow* window);
 - (BOOL)application:(UIApplication*)application
     didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
   XenraLogsBegin();
-#ifdef XENRA_UITEST
-  // Arabic both ways, to compare.
-  if ([NSUserDefaults.standardUserDefaults boolForKey:@"XenraTourForceLTR"]) {
-    UIView.appearance.semanticContentAttribute =
-        UISemanticContentAttributeForceLeftToRight;
-  }
-#endif
 
   self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
   self.window.backgroundColor = UIColor.blackColor;
