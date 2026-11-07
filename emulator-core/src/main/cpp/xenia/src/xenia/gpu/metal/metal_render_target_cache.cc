@@ -4631,11 +4631,36 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
     return true;
   }
 
-  bool is_depth = resolve_info.IsCopyingDepth();
+  auto perform_resolve_clear = [&]() {
+    bool clear_depth = resolve_info.IsClearingDepth();
+    bool clear_color = resolve_info.IsClearingColor();
+    if (!clear_depth && !clear_color) {
+      return;
+    }
+    Transfer::Rectangle clear_rectangle;
+    RenderTarget* clear_targets[2] = {};
+    std::vector<Transfer> clear_transfers[2];
+    if (PrepareHostRenderTargetsResolveClear(
+            resolve_info, clear_rectangle, clear_targets[0], clear_transfers[0],
+            clear_targets[1], clear_transfers[1])) {
+      uint64_t clear_values[2];
+      clear_values[0] = resolve_info.rb_depth_clear;
+      clear_values[1] = resolve_info.rb_color_clear |
+                        (uint64_t(resolve_info.rb_color_clear_lo) << 32);
+      PerformTransfersAndResolveClears(2, clear_targets, clear_transfers,
+                                       clear_values, &clear_rectangle,
+                                       command_buffer);
+    }
+  };
 
   if (!resolve_info.copy_dest_extent_length) {
+    // A malformed or entirely clipped copy destination drops only the copy.
+    // The guest's post-resolve EDRAM clear is independent and must still run.
+    perform_resolve_clear();
     return true;
   }
+
+  bool is_depth = resolve_info.IsCopyingDepth();
 
   bool draw_resolution_scaled = IsDrawResolutionScaled();
 
@@ -4896,26 +4921,7 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
                                              draw_resolution_scaled);
             }
 
-            bool clear_depth = resolve_info.IsClearingDepth();
-            bool clear_color = resolve_info.IsClearingColor();
-            if (clear_depth || clear_color) {
-              Transfer::Rectangle clear_rectangle;
-              RenderTarget* clear_targets[2] = {};
-              std::vector<Transfer> clear_transfers[2];
-              if (PrepareHostRenderTargetsResolveClear(
-                      resolve_info, clear_rectangle, clear_targets[0],
-                      clear_transfers[0], clear_targets[1],
-                      clear_transfers[1])) {
-                uint64_t clear_values[2];
-                clear_values[0] = resolve_info.rb_depth_clear;
-                clear_values[1] =
-                    resolve_info.rb_color_clear |
-                    (uint64_t(resolve_info.rb_color_clear_lo) << 32);
-                PerformTransfersAndResolveClears(
-                    2, clear_targets, clear_transfers, clear_values,
-                    &clear_rectangle, command_buffer);
-              }
-            }
+            perform_resolve_clear();
             return true;
           }
         }
@@ -5088,7 +5094,8 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
     }
 
     auto* dest_metal_rt = static_cast<MetalRenderTarget*>(dest_rt);
-    if (dest_metal_rt->needs_initial_clear()) {
+    const bool dest_needed_initial_clear = dest_metal_rt->needs_initial_clear();
+    if (dest_needed_initial_clear) {
       dest_metal_rt->SetNeedsInitialClear(false);
       render_pass_descriptor_dirty_ = true;
     }
@@ -5992,6 +5999,19 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       transfer_encoder = cmd->renderCommandEncoder(rp);
       return transfer_encoder;
     };
+
+    // A load action is executed only if a render pass is actually encoded.
+    // Full clears have no explicit clear draw, and may have no transfers at
+    // all (XeniOS 681a999a3).
+    if (resolve_clear_via_load_action && !ensure_transfer_encoder()) {
+      XELOGE(
+          "MetalRenderTargetCache::PerformTransfersAndResolveClears: no "
+          "render pass for the resolve clear of RT {}",
+          i);
+      dest_metal_rt->SetNeedsInitialClear(dest_needed_initial_clear);
+      render_pass_descriptor_dirty_ = true;
+      continue;
+    }
 
     if (!transfers_for_shaders.empty() && disable_transfer_shaders) {
       static uint32_t transfer_shader_skip_log_count = 0;
