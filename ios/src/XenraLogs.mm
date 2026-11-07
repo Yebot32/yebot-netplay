@@ -19,6 +19,7 @@
 
 #import "XenraScreens.h"
 #import "XenraSettings.h"
+#import "XenraXemu.h"
 #include "ios_emu.h"
 #include "xenia/base/memory.h"
 
