@@ -537,7 +537,9 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length,
     return 0;
   }
 
-  memory()->LookupHeap(base_address_)->Reset();
+  // Drop the image left by an attempt with a different key. Only release our
+  // own region: other modules may already live in this heap.
+  ReleaseImage();
 
   aes_decrypt_buffer(
       key, reinterpret_cast<const uint8_t*>(xex_security_info()->aes_key), 16,
@@ -571,20 +573,31 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length,
   return 3;
 }
 
+bool XexModule::AllocImage(uint32_t size) {
+  image_allocated_ =
+      memory()
+          ->LookupHeap(base_address_)
+          ->AllocFixed(
+              base_address_, size, 4096,
+              xe::kMemoryAllocationReserve | xe::kMemoryAllocationCommit,
+              xe::kMemoryProtectRead | xe::kMemoryProtectWrite);
+  return image_allocated_;
+}
+
+void XexModule::ReleaseImage() {
+  if (image_allocated_) {
+    memory()->LookupHeap(base_address_)->Release(base_address_);
+    image_allocated_ = false;
+  }
+}
+
 int XexModule::ReadImageUncompressed(const void* xex_addr, size_t xex_length) {
   // Allocate in-place the XEX memory.
   const uint32_t exe_length =
       static_cast<uint32_t>(xex_length - xex_header()->header_size);
 
   uint32_t uncompressed_size = exe_length;
-  bool alloc_result =
-      memory()
-          ->LookupHeap(base_address_)
-          ->AllocFixed(
-              base_address_, uncompressed_size, 4096,
-              xe::kMemoryAllocationReserve | xe::kMemoryAllocationCommit,
-              xe::kMemoryProtectRead | xe::kMemoryProtectWrite);
-  if (!alloc_result) {
+  if (!AllocImage(uncompressed_size)) {
     XELOGE("Unable to allocate XEX memory at {:08X}-{:08X}.", base_address_,
            uncompressed_size);
     return 2;
@@ -627,6 +640,17 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
   uint32_t uncompressed_size = 0;
 
   auto* file_info = opt_file_format_info();
+  // The block list comes from the file and must lie inside the header that was
+  // read, or both loops below read past it.
+  const uintptr_t header_begin = uintptr_t(xex_header_mem_.data());
+  const uintptr_t header_end = header_begin + xex_header_mem_.size();
+  const uintptr_t info_begin = uintptr_t(file_info);
+  if (!file_info || info_begin < header_begin || info_begin > header_end ||
+      header_end - info_begin < 8 || file_info->info_size < 8 ||
+      file_info->info_size > header_end - info_begin) {
+    XELOGE("XEX: the basic compression block list is outside the header");
+    return 1;
+  }
   auto& comp_info = file_info->compression_info.basic;
 
   uint32_t block_count = (file_info->info_size - 8) / 8;
@@ -647,11 +671,7 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
   }
 
   // Allocate in-place the XEX memory.
-  bool alloc_result = heap->AllocFixed(
-      base_address_, total_size, 4096,
-      xe::kMemoryAllocationReserve | xe::kMemoryAllocationCommit,
-      xe::kMemoryProtectRead | xe::kMemoryProtectWrite);
-  if (!alloc_result) {
+  if (!AllocImage(total_size)) {
     XELOGE("Unable to allocate XEX memory at {:08X}-{:08X}.", base_address_,
            uncompressed_size);
     return 1;
@@ -802,15 +822,7 @@ int XexModule::ReadImageCompressed(const void* xex_addr, size_t xex_length) {
     uint32_t uncompressed_size = image_size();
 
     // Allocate in-place the XEX memory.
-    bool alloc_result =
-        memory()
-            ->LookupHeap(base_address_)
-            ->AllocFixed(
-                base_address_, uncompressed_size, 4096,
-                xe::kMemoryAllocationReserve | xe::kMemoryAllocationCommit,
-                xe::kMemoryProtectRead | xe::kMemoryProtectWrite);
-
-    if (alloc_result) {
+    if (AllocImage(uncompressed_size)) {
       uint8_t* buffer = memory()->TranslateVirtual(base_address_);
       std::memset(buffer, 0, uncompressed_size);
 
@@ -983,6 +995,7 @@ bool XexModule::Load(const std::string_view name, const std::string_view path,
       result_code = ReadImage(xex_addr, xex_length, xe_xex1_retail_key);
       if (result_code) {
         XELOGE("XEX load failed with code {}", result_code);
+        ReleaseImage();
         return false;
       }
     }
