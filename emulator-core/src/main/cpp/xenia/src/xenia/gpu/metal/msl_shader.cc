@@ -57,7 +57,7 @@ constexpr uint32_t kMslSourceCacheMaxBytes = 16 * 1024 * 1024;
 // Bump when SPIRV-Cross -> MSL resource remapping or codegen-affecting options
 // change so stale on-disk MSL source can't be reused with incompatible runtime
 // bindings.
-constexpr uint32_t kMslSourceCacheSchemaVersion = 5;
+constexpr uint32_t kMslSourceCacheSchemaVersion = 6;
 
 std::mutex g_msl_source_cache_mutex;
 std::filesystem::path g_msl_source_cache_directory;
@@ -692,6 +692,17 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   // below and return false so the draw can be skipped gracefully instead
   // of crashing the process.
   spirv_cross::CompilerMSL compiler(spirv_words, spirv_word_count);
+
+  // The translator's specialization constants (the texture sign class and the
+  // exponent adjust, added for Vulkan) become [[function_constant]]s in MSL, and
+  // Metal refuses to build a pipeline from a function that has any unless it was
+  // made with constant values, which this backend never does: on iOS that is an
+  // abort in pipeline validation, seen in GTA IV. Their defaults are the general
+  // runtime paths, so bake those in as plain constants.
+  for (const spirv_cross::SpecializationConstant& constant :
+       compiler.get_specialization_constants()) {
+    compiler.unset_decoration(constant.id, spv::DecorationSpecId);
+  }
 
   // Configure MSL options.
   auto opts = compiler.get_msl_options();
