@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <initializer_list>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
 #include <signal.h>
 #include <sys/sysctl.h>
 #include <sys/ucontext.h>
@@ -318,6 +319,18 @@ static NSString* Summary(void) {
                      free_bytes.doubleValue / 1073741824.0];
   [text appendFormat:@"JIT: get-task-allow=%d cs_debugged=%d script_attached=%d\n",
                      jit.get_task_allow, jit.cs_debugged, XenraXemuNeedsSettle()];
+  // The memory iOS lets Xenra use before it is killed. GetMoreRam's "Increased
+  // Memory Limit" raises it, but only once Xenra is re-signed with a profile that
+  // carries it, so this line is the way to see whether that happened.
+  task_vm_info_data_t vm = {};
+  mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm),
+                &vm_count) == KERN_SUCCESS) {
+    const double gb = 1073741824.0;
+    [text appendFormat:@"Memory: limit %.2f GB (in use %.2f, left %.2f)\n",
+                       (vm.phys_footprint + vm.limit_bytes_remaining) / gb,
+                       vm.phys_footprint / gb, vm.limit_bytes_remaining / gb];
+  }
   int lse = 0;
   size_t lse_size = sizeof(lse);
   sysctlbyname("hw.optional.armv8_1_atomics", &lse, &lse_size, nullptr, 0);
