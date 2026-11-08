@@ -44,6 +44,7 @@ int xe_ios_status(void) { return 0; }
 const char* xe_ios_status_detail(void) { return ""; }
 void xe_ios_set_cvar(const char*, const char*) {}
 void xe_ios_shutdown(void) {}
+void xe_ios_exit_to_library(void) {}
 void xe_ios_flush_log(void) {}
 
 @interface XenraSettingsController (Tour)

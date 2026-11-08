@@ -62,6 +62,9 @@ void xe_ios_set_cvar(const char* name, const char* value);
 
 // Shuts the emulator down and releases the window. Call on the main thread.
 void xe_ios_shutdown(void);
+// Stop the one title this launch can run and keep the UIKit app alive for the
+// library. Unlike xe_ios_shutdown, this keeps g_context/g_window.
+void xe_ios_exit_to_library(void);
 
 // 1 stops the guest, 0 carries on. For the game menu.
 void xe_ios_set_paused(int paused);

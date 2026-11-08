@@ -152,4 +152,25 @@ void XenraTourStart(UIWindow* window);
       stringWithFormat:@"memory warning: footprint %.2f GB", footprint_gb]);
 }
 
+// A game pinned to the Xenra icon's Home Screen quick actions. The game screen
+// runs its normal JIT gate; if StikDebug has to relaunch, the pending-game
+// cookie carries it across as for any other launch.
+- (void)application:(UIApplication*)application
+    performActionForShortcutItem:(UIApplicationShortcutItem*)shortcutItem
+               completionHandler:(void (^)(BOOL))completionHandler {
+  NSString* path = shortcutItem.userInfo[@"path"];
+  NSString* name = shortcutItem.userInfo[@"name"];
+  UIViewController* root = self.window.rootViewController;
+  if (!path.length || !name.length || ![XenraSettings setupComplete] ||
+      XenraCoreExited() ||
+      ![root isKindOfClass:[UINavigationController class]]) {
+    completionHandler(NO);
+    return;
+  }
+  XenraGameController* game = [[XenraGameController alloc] initWithPath:path
+                                                                   name:name];
+  [(UINavigationController*)root pushViewController:game animated:YES];
+  completionHandler(YES);
+}
+
 @end

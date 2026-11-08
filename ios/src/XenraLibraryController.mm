@@ -1664,6 +1664,11 @@ static BOOL g_installing;
                                     [weak launch:game];
                                   }]];
   [items addObject:[XenraBladeItem
+                       title:XS(@"Add to App Shortcuts")
+                      action:^{
+                        [weak addAppShortcut:game];
+                      }]];
+  [items addObject:[XenraBladeItem
                        title:XS(@"Per-Game Settings")
                       action:^{
                         XenraSettingsController* perGame =
@@ -1694,6 +1699,35 @@ static BOOL g_installing;
   remove.destructive = YES;
   [items addObject:remove];
   [XenraBladeSheet showIn:self.view title:game.name message:nil items:items];
+}
+
+// iOS cannot pin a per-game Home Screen icon. The closest it allows is a Home
+// Screen quick action on the Xenra icon, which is what Android's "Add to Home
+// Screen" maps to here.
+- (void)addAppShortcut:(XenraGameEntry*)game {
+  if (!game.path.length) return;
+  NSMutableArray<UIApplicationShortcutItem*>* items =
+      [UIApplication.sharedApplication.shortcutItems mutableCopy]
+          ?: [NSMutableArray array];
+  [items filterUsingPredicate:[NSPredicate
+      predicateWithBlock:^BOOL(UIApplicationShortcutItem* item,
+                               NSDictionary* bindings) {
+        return ![game.path isEqualToString:item.userInfo[@"path"]];
+      }]];
+  UIApplicationShortcutItem* shortcut = [[UIApplicationShortcutItem alloc]
+      initWithType:@"com.xenra.playGame"
+   localizedTitle:game.name
+localizedSubtitle:nil
+             icon:[UIApplicationShortcutIcon
+                      iconWithType:UIApplicationShortcutIconTypePlay]
+         userInfo:@{@"path" : game.path, @"name" : game.name ?: @""}];
+  [items insertObject:shortcut atIndex:0];
+  while (items.count > 4) {
+    [items removeLastObject];
+  }
+  UIApplication.sharedApplication.shortcutItems = items;
+  XenraToast(self.view,
+             XS(@"Added to App Shortcuts. Long-press the Xenra icon."));
 }
 
 - (void)confirmDelete:(XenraGameEntry*)game {

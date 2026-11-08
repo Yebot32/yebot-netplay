@@ -642,6 +642,30 @@ void xe_ios_shutdown(void) {
   g_input_driver = nullptr;
 }
 
+void xe_ios_exit_to_library(void) {
+  if (!g_app) {
+    return;
+  }
+  if (g_app->emu_) {
+    g_context->CallInUIThreadSynchronous([]() {
+      if (g_app) {
+        g_app->ShutdownPresenterPaintingFromUIThread();
+      }
+    });
+  }
+  g_app->StopEmuThread();
+  if (g_app->emu_) {
+    g_app->emu_->TerminateTitle();
+    g_app->emu_->Shutdown();
+  }
+  // Keep g_app, g_context, g_window and the imgui drawer: the library and the
+  // settings screens are UIKit and must outlive the title. A second boot is
+  // still refused by XenraCoreExited/the one-boot guard.
+  g_input_driver = nullptr;
+  g_status.store(0, std::memory_order_relaxed);
+  g_status_detail = "exited";
+}
+
 void xe_ios_set_paused(int paused) {
   if (!g_app || !g_app->emu_) return;
   if (paused) {

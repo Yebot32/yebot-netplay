@@ -32,6 +32,11 @@ static const Quirk kQuirks[] = {
      "FMV slice desync with inlined restores"},
     {0x4D5307D1, "spirv_multiply_zero_test_on_bits", true,
      "ir3 cannot compile fmadz"},
+    // Halo 3's menu font sampled a lower mip through the explicit-gradient 2D
+    // fetch, so the glyphs rendered as yellow blocks. The host's implicit LOD
+    // is the same image and samples the intended level.
+    {0x4D5307E6, "spirv_texture_implicit_lod", true,
+     "menu font sampled a lower mip (blocky glyphs)"},
     {0x494707D4, "vulkan_in_pass_resolve", true, "in-pass resolves tuned here"},
     {0x49470804, "vulkan_in_pass_resolve", true, "in-pass resolves tuned here"},
     {0x494707D4, "network_enabled", false, "hangs on a blocking recvfrom"},

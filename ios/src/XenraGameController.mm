@@ -703,7 +703,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                    });
     return;
   }
-  xe_ios_shutdown();
+  xe_ios_exit_to_library();
   [self.navigationController popViewControllerAnimated:YES];
   XenraAmbientStart();
 }
