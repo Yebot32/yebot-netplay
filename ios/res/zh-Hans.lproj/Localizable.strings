@@ -371,30 +371,51 @@
 
 "System Link address" = "System Link address";
 
-"System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@" = "System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@";
 
-"No profile" = "No profile";
 
-"Create Profile" = "Create Profile";
 
-"Enter a gamertag (1-15 characters, starting with a letter)." = "Enter a gamertag (1-15 characters, starting with a letter).";
 
-"Create" = "Create";
 
-"Profile ready: %@" = "Profile ready: %@";
 
-"That gamertag cannot be used." = "That gamertag cannot be used.";
 
-"Change Gamertag" = "Change Gamertag";
 
-"Check Network" = "Check Network";
 
-"Network check" = "Network check";
 
-"Checking the network…" = "Checking the network…";
 
-"Network Settings" = "Network Settings";
 
 "Add to App Shortcuts" = "Add to App Shortcuts";
 
 "Added to App Shortcuts. Long-press the Xenra icon." = "Added to App Shortcuts. Long-press the Xenra icon.";
+
+/* XenraNetplayController */
+"1. Choose your gamertag" = "1. 选择你的玩家代号";
+"1–15 characters. Must start with a letter, and can contain letters, numbers and single spaces." = "1–15 个字符。必须以字母开头，可包含字母、数字和单个空格。";
+"2. Create your gamer profile" = "2. 创建你的玩家档案";
+"A gamer profile is set up and signed in, so games that demand one will start normally, and your saves and achievements have somewhere to go." = "玩家档案已创建并登录，需要档案的游戏会正常启动，你的存档和成就也有了存放之处。";
+"A gateway answered, but it refused to open a port. UPnP may be restricted in your router's settings." = "网关有响应，但拒绝打开端口。路由器的 UPnP 设置可能受到限制。";
+"Change gamertag" = "更改玩家代号";
+"Check my network" = "检查我的网络";
+"Checking…" = "检查中…";
+"Choose your gamertag" = "选择玩家代号";
+"Done" = "完成";
+"Gamertag set to %@" = "玩家代号已设为 %@";
+"Gamertag: %@" = "玩家代号：%@";
+"NETPLAY" = "联机";
+"Netplay is a community-run way for consoles to find each other. It is not Xbox Live, and it is worth knowing what it does not cover.\n\nNot Xbox Live. No friends list, no gamertag search, no messages, no marketplace, and no Xbox Live achievements. Microsoft's service is not involved at any point.\n\nOnly games that had system link. If a game only ever did multiplayer through Xbox Live, it stays offline. Titles that supported LAN or system-link play are the ones that can work, and that is a short list.\n\nWi-Fi only. Mobile data will not work for hosting. Carriers put you behind a shared address, so nobody can reach your console from outside.\n\nExpect rough edges. Disconnects, lag and games that simply refuse are all normal." = "联机是社区维护的、让主机互相找到对方的方式。它不是 Xbox Live，值得事先了解它不涵盖什么。\n\n不是 Xbox Live。没有好友列表、玩家代号搜索、消息、商店和 Xbox Live 成就。Microsoft 的服务完全不参与。\n\n仅限支持 System Link 的游戏。如果一款游戏只通过 Xbox Live 提供多人模式，它仍然离线。支持局域网或 System Link 的游戏才可能工作，而且数量很少。\n\n仅限 Wi-Fi。移动数据无法用于主持。运营商把你放在共享地址后面，外部无法访问你的主机。\n\n请预期粗糙之处。断线、延迟和直接拒绝连接的游戏都很正常。";
+"Netplay: where it has got to" = "联机：目前进展";
+"No UPnP gateway answered. Either UPnP is switched off in your router, or you are on mobile data. Hosting would need UPnP turned on, or the port forwarded by hand." = "没有 UPnP 网关响应。要么路由器的 UPnP 已关闭，要么你正在使用移动数据。主持需要开启 UPnP 或手动转发端口。";
+"Open game library" = "打开游戏库";
+"Profile ready" = "档案已就绪";
+"System Link is LAN-only for now. This screen is where internet netplay will be set up once matches can connect." = "System Link 目前仅在局域网可用。等比赛可以连接后，此页面将用于设置互联网联机。";
+"System Link over a local network is working. Put both consoles on the same Wi-Fi, then host or join from the game's own System Link menu — the connection stays on your network and never needs Xbox Live.\n\nStill being built: playing over the internet through a session server. The 360 core's session functions are stubs and its sign-in check reports disconnected, so that half is not ready yet." = "局域网内的 System Link 已经可用。让两台主机连接同一个 Wi-Fi，然后在游戏自带的 System Link 菜单中主持或加入——连接只在你的网络内，完全不需要 Xbox Live。\n\n仍在开发中：通过会话服务器在互联网上游戏。360 核心的会话函数仍是占位实现，其登录检查报告为断开状态，所以这部分尚未就绪。";
+"That name will not be accepted: 1–15 characters, start with a letter, letters and numbers with single spaces." = "该名称不会被接受：1–15 个字符，以字母开头，字母和数字及单个空格。";
+"The name games will show for you. 1–15 characters, starts with a letter, letters and numbers only.\n\nPick it before you create the profile — the 360 core can create a profile but cannot rename one, so changing this later will not touch a profile that already exists." = "游戏将显示的你的名称。1–15 个字符，以字母开头，仅限字母和数字。\n\n请在创建档案前选好——360 核心可以创建档案但无法重命名，所以之后更改不会影响已存在的档案。";
+"The netplay session server could not be reached. It may be down, or your connection may be blocking it." = "无法联系联机会话服务器。它可能已停机，或你的连接正在阻止它。";
+"The netplay session server is reachable from this device." = "此设备可以访问联机会话服务器。";
+"What netplay will not be" = "联机不会是什么";
+"Xbox 360" = "Xbox 360";
+"Xbox 360 games expect somebody to be signed in. Setting up a gamer profile is what unlocks saves, achievements and the menus most games hide behind a sign-in prompt — Angry Birds Trilogy will not go past its title screen without one.\n\nNetplay is a separate thing. System Link over your own Wi-Fi works today; its current state is at the bottom of this page." = "Xbox 360 游戏期望有人已登录。设置玩家档案才能解锁存档、成就，以及许多游戏藏在登录提示后面的菜单——没有档案，Angry Birds Trilogy 无法通过标题画面。\n\n联机是另一回事。通过你自己的 Wi-Fi 使用 System Link 目前已经可用；当前状态在本页底部。";
+"Xenra creates the profile and signs it into slot 0 automatically the first time you launch a 360 game. There is nothing to fill in — just start any game once and come back." = "首次启动 360 游戏时，Xenra 会自动创建档案并登录到槽位 0。无需填写任何内容——只需启动任意游戏一次再回来。";
+"Your network can host. UPnP works and your connection can be reached from outside (%@). Nothing here is stopping netplay." = "你的网络可以主持。UPnP 工作正常，外部可以访问你的连接（%@）。这里没有任何东西阻碍联机。";
+"Your profile and netplay" = "你的档案与联机";
+"Your router is fine, but your internet connection cannot be reached from outside. That is your provider sharing one address between many customers, not a setting you can change. Hosting will not work on this connection; joining someone else may." = "你的路由器没有问题，但你的互联网连接无法从外部访问。这是运营商在众多客户之间共享一个地址，不是你能够更改的设置。此连接无法主持；加入别人的主机或许可以。";

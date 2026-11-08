@@ -985,8 +985,10 @@ static void LanguageTour(NSString* code) {
   Pause();
   both(@"360-dashboard");
   Tap(XS(@"Netplay"));
+  Pause();
+  Pause();
   shot(@"360-online");
-  Tap(XS(@"OK"));
+  Pop();
   Pause();
   Tap(XS(@"Game Library"));
   shot(@"360-library");

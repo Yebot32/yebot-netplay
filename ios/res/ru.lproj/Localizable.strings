@@ -371,30 +371,51 @@
 
 "System Link address" = "System Link address";
 
-"System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@" = "System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@";
 
-"No profile" = "No profile";
 
-"Create Profile" = "Create Profile";
 
-"Enter a gamertag (1-15 characters, starting with a letter)." = "Enter a gamertag (1-15 characters, starting with a letter).";
 
-"Create" = "Create";
 
-"Profile ready: %@" = "Profile ready: %@";
 
-"That gamertag cannot be used." = "That gamertag cannot be used.";
 
-"Change Gamertag" = "Change Gamertag";
 
-"Check Network" = "Check Network";
 
-"Network check" = "Network check";
 
-"Checking the network…" = "Checking the network…";
 
-"Network Settings" = "Network Settings";
 
 "Add to App Shortcuts" = "Add to App Shortcuts";
 
 "Added to App Shortcuts. Long-press the Xenra icon." = "Added to App Shortcuts. Long-press the Xenra icon.";
+
+/* XenraNetplayController */
+"1. Choose your gamertag" = "1. Выберите геймертег";
+"1–15 characters. Must start with a letter, and can contain letters, numbers and single spaces." = "От 1 до 15 символов. Должен начинаться с буквы и может содержать буквы, цифры и одиночные пробелы.";
+"2. Create your gamer profile" = "2. Создайте профиль игрока";
+"A gamer profile is set up and signed in, so games that demand one will start normally, and your saves and achievements have somewhere to go." = "Профиль игрока создан и выполнен вход, поэтому игры, которым он нужен, запустятся нормально, а сохранения и достижения будут где храниться.";
+"A gateway answered, but it refused to open a port. UPnP may be restricted in your router's settings." = "Шлюз ответил, но отказался открыть порт. Возможно, UPnP ограничен в настройках роутера.";
+"Change gamertag" = "Сменить геймертег";
+"Check my network" = "Проверить сеть";
+"Checking…" = "Проверка…";
+"Choose your gamertag" = "Выберите геймертег";
+"Done" = "Готово";
+"Gamertag set to %@" = "Геймертег изменён на %@";
+"Gamertag: %@" = "Геймертег: %@";
+"NETPLAY" = "СЕТЕВАЯ ИГРА";
+"Netplay is a community-run way for consoles to find each other. It is not Xbox Live, and it is worth knowing what it does not cover.\n\nNot Xbox Live. No friends list, no gamertag search, no messages, no marketplace, and no Xbox Live achievements. Microsoft's service is not involved at any point.\n\nOnly games that had system link. If a game only ever did multiplayer through Xbox Live, it stays offline. Titles that supported LAN or system-link play are the ones that can work, and that is a short list.\n\nWi-Fi only. Mobile data will not work for hosting. Carriers put you behind a shared address, so nobody can reach your console from outside.\n\nExpect rough edges. Disconnects, lag and games that simply refuse are all normal." = "Сетевая игра — это способ, которым сообщество позволяет консолям находить друг друга. Это не Xbox Live, и стоит знать, чего она не покрывает.\n\nНе Xbox Live. Нет списка друзей, поиска геймертегов, сообщений, магазина и достижений Xbox Live. Служба Microsoft не участвует ни на каком этапе.\n\nТолько игры с System Link. Если игра предлагала многопользовательский режим только через Xbox Live, она останется офлайн. Работать могут игры с поддержкой LAN или System Link, и этот список короткий.\n\nТолько Wi-Fi. Мобильные данные не подойдут для хостинга. Операторы помещают вас за общий адрес, поэтому никто не сможет подключиться к вашей консоли извне.\n\nОжидайте шероховатостей. Отключения, задержки и игры, которые просто отказываются, — это нормально.";
+"Netplay: where it has got to" = "Сетевая игра: текущее состояние";
+"No UPnP gateway answered. Either UPnP is switched off in your router, or you are on mobile data. Hosting would need UPnP turned on, or the port forwarded by hand." = "Ни один UPnP-шлюз не ответил. Либо UPnP отключён в роутере, либо вы в мобильной сети. Для хостинга нужно включить UPnP или перенаправить порт вручную.";
+"Open game library" = "Открыть библиотеку игр";
+"Profile ready" = "Профиль готов";
+"System Link is LAN-only for now. This screen is where internet netplay will be set up once matches can connect." = "System Link пока работает только в локальной сети. Эта страница станет местом настройки сетевой игры через интернет, когда матчи смогут подключаться.";
+"System Link over a local network is working. Put both consoles on the same Wi-Fi, then host or join from the game's own System Link menu — the connection stays on your network and never needs Xbox Live.\n\nStill being built: playing over the internet through a session server. The 360 core's session functions are stubs and its sign-in check reports disconnected, so that half is not ready yet." = "System Link по локальной сети работает. Подключите обе консоли к одной Wi-Fi и создайте или присоединитесь к игре через меню System Link самой игры — соединение остаётся в вашей сети и никогда не требует Xbox Live.\n\nЕщё в разработке: игра через интернет с помощью сервера сессий. Функции сессий ядра 360 — заглушки, а проверка входа сообщает об отключении, поэтому эта половина пока не готова.";
+"That name will not be accepted: 1–15 characters, start with a letter, letters and numbers with single spaces." = "Это имя не будет принято: от 1 до 15 символов, начинаться с буквы, буквы и цифры с одиночными пробелами.";
+"The name games will show for you. 1–15 characters, starts with a letter, letters and numbers only.\n\nPick it before you create the profile — the 360 core can create a profile but cannot rename one, so changing this later will not touch a profile that already exists." = "Имя, которое игры будут показывать для вас. От 1 до 15 символов, начинается с буквы, только буквы и цифры.\n\nВыберите его до создания профиля — ядро 360 умеет создавать профиль, но не переименовывать его, поэтому изменение позже не затронет уже существующий профиль.";
+"The netplay session server could not be reached. It may be down, or your connection may be blocking it." = "Не удалось связаться с сервером сессий сетевой игры. Возможно, он недоступен, или подключение блокируется.";
+"The netplay session server is reachable from this device." = "Сервер сессий сетевой игры доступен с этого устройства.";
+"What netplay will not be" = "Чем сетевая игра не будет";
+"Xbox 360" = "Xbox 360";
+"Xbox 360 games expect somebody to be signed in. Setting up a gamer profile is what unlocks saves, achievements and the menus most games hide behind a sign-in prompt — Angry Birds Trilogy will not go past its title screen without one.\n\nNetplay is a separate thing. System Link over your own Wi-Fi works today; its current state is at the bottom of this page." = "Игры Xbox 360 ожидают, что кто-то выполнил вход. Создание профиля игрока открывает сохранения, достижения и меню, которые многие игры прячут за запросом входа — Angry Birds Trilogy не пройдёт дальше экрана заголовка без него.\n\nСетевая игра — это отдельная вещь. System Link по вашей Wi-Fi работает уже сейчас; текущее состояние — внизу этой страницы.";
+"Xenra creates the profile and signs it into slot 0 automatically the first time you launch a 360 game. There is nothing to fill in — just start any game once and come back." = "Xenra создаёт профиль и автоматически входит в слот 0 при первом запуске игры для 360. Заполнять ничего не нужно — просто запустите любую игру один раз и вернитесь.";
+"Your network can host. UPnP works and your connection can be reached from outside (%@). Nothing here is stopping netplay." = "Ваша сеть может быть хостом. UPnP работает, и ваше подключение доступно извне (%@). Здесь ничто не мешает сетевой игре.";
+"Your profile and netplay" = "Ваш профиль и сетевая игра";
+"Your router is fine, but your internet connection cannot be reached from outside. That is your provider sharing one address between many customers, not a setting you can change. Hosting will not work on this connection; joining someone else may." = "Ваш роутер в порядке, но ваше интернет-подключение недоступно извне. Это провайдер делит один адрес между многими клиентами, а не настройка, которую можно изменить. Хостинг на этом подключении не будет работать; присоединение к кому-то другому, возможно, сработает.";

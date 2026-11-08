@@ -13,16 +13,11 @@
 
 // The first standalone profile's gamertag, or nil when there is none.
 NSString* XenraNetplayProfileSummary(NSString* content_root);
-// The same profile's XUID as 16 uppercase hex digits, or nil.
-NSString* XenraNetplayProfileXuid(NSString* content_root);
 // Sign the first profile in, creating one with |gamertag| when there is none.
 // Returns the XUID, or nil if the gamertag is invalid or creation failed.
 NSString* XenraNetplayEnsureProfile(NSString* content_root, NSString* gamertag);
-// Create another profile and sign it in. Returns its XUID, or nil.
-NSString* XenraNetplayCreateProfile(NSString* content_root, NSString* gamertag);
-// Rename the profile with |xuid|. Returns YES on success.
-BOOL XenraNetplayRenameProfile(NSString* content_root, NSString* xuid,
-                               NSString* gamertag);
+// The core's own 1-15 character, starts-with-a-letter rule.
+BOOL XenraNetplayGamertagValid(NSString* gamertag);
 
 // "en0 (192.168.1.20, NAT)", or nil when no usable adapter exists.
 NSString* XenraNetplayAdapterSummary(void);
@@ -33,3 +28,8 @@ NSString* XenraNetplayUPnPLanAddress(void);
 NSString* XenraNetplayUPnPExternalAddress(void);
 // Map then immediately unmap a UDP port, proving the gateway accepts us.
 BOOL XenraNetplayUPnPTestMapping(int port);
+
+// Reaches the community session broker over HTTPS and reports the status. Any
+// HTTP status counts as reachable - the server answering is what is tested, not
+// which routes it exposes today. The completion runs on the main queue.
+void XenraNetplayCheckServer(void (^done)(BOOL reachable, NSInteger status));

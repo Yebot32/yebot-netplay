@@ -1,8 +1,12 @@
 #import "XenraTouchPad.h"
 
+#import <objc/runtime.h>
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
+
+#import "XenraTheme.h"
 
 namespace {
 
@@ -37,7 +41,10 @@ struct Stick {
   CGPoint center;
   CGFloat radius;
   CGPoint knob;  // -1..1
-  UITouch* __unsafe_unretained touch;
+  // UIKit recycles UITouch objects, so holding the pointer past the end of a
+  // gesture can silently start naming a different finger. A per-touch id that
+  // is attached to the object itself cannot alias.
+  long long touchId;  // 0: free
   CALayer* base;
   CALayer* knobLayer;
   UIImage* baseIdle;
@@ -60,6 +67,12 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
   Stick left_, right_;
   CGSize laidOutFor_;
   int lastBits_;
+  long long nextTouchId_;
+  // The touches that were live on the last event, with their ids. Compared by
+  // pointer only; never messaged.
+  UITouch* __unsafe_unretained liveTouches_[16];
+  long long liveIds_[16];
+  int liveCount_;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -70,6 +83,10 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
     self.opaque = NO;
     _scaleFactor = 1;
     _hapticsEnabled = YES;
+    nextTouchId_ = 1;
+    liveCount_ = 0;
+    left_.touchId = 0;
+    right_.touchId = 0;
   }
   return self;
 }
@@ -144,8 +161,13 @@ UIColor* Rgb(int r, int g, int b, CGFloat a = 1) {
   }
 
   const CGFloat stickRadius = unit * 0.14;
-  left_ = {CGPointMake(xLeftStick, yCluster), stickRadius, CGPointZero, nil};
-  right_ = {CGPointMake(xRightStick, yCluster), stickRadius, CGPointZero, nil};
+  // A rebuild (rotation, scale change) must not drop a stick a thumb is
+  // already holding: the finger only sends moved events after that, and
+  // without its id it would never be re-claimed until lifted.
+  const long long leftId = left_.touchId, rightId = right_.touchId;
+  const CGPoint leftKnob = left_.knob, rightKnob = right_.knob;
+  left_ = {CGPointMake(xLeftStick, yCluster), stickRadius, leftKnob, leftId};
+  right_ = {CGPointMake(xRightStick, yCluster), stickRadius, rightKnob, rightId};
 
   const CGFloat dpadSpacing = unit * 0.098, dpadSize = unit * 0.105;
   box(kUp, "", xDpad, yCluster - dpadSpacing, dpadSize, dpadSize,
@@ -193,7 +215,7 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
   return layer;
 }
 
-- (void)drawArrow:(int)bit in:(CGRect)rect {
+- (void)drawArrow:(int)bit in:(CGRect)rect color:(UIColor*)color {
   const CGFloat s = rect.size.width * 0.24;
   const CGPoint c = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
   UIBezierPath* p = [UIBezierPath bezierPath];
@@ -209,7 +231,7 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
     [p addLineToPoint:CGPointMake(c.x - d * s * 0.7, c.y + s)];
   }
   [p closePath];
-  [Rgb(225, 215, 190, 0.8) setFill];
+  [color setFill];
   [p fill];
 }
 
@@ -222,13 +244,21 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
         c.shape == Shape::kPill ? c.height / 2 : c.height * 0.24;
     path = [UIBezierPath bezierPathWithRoundedRect:box cornerRadius:corner];
   }
-  [Rgb(18, 16, 10, pressed ? 0.85 : 0.59) setFill];
+  // Android fills a held control with its accent. The old pair of images only
+  // shifted a near-black fill from 59% to 85% opacity, which over a game reads
+  // as no response at all.
+  UIColor* accent = c.ring ?: XenraAccent();
+  [(pressed ? [accent colorWithAlphaComponent:0.92] : Rgb(18, 16, 10, 0.65))
+      setFill];
   [path fill];
-  [(c.ring ?: Rgb(95, 211, 95, pressed ? 1 : 0.7)) setStroke];
-  path.lineWidth = 1.5;
+  [[accent colorWithAlphaComponent:pressed ? 1 : 0.8] setStroke];
+  const CGFloat unit = c.shape == Shape::kCircle ? c.radius : c.height * 0.5;
+  path.lineWidth = MAX(2, unit * (pressed ? 0.10 : 0.05));
   [path stroke];
   if (c.bit & (kUp | kDown | kLeft | kRight)) {
-    [self drawArrow:c.bit in:box];
+    [self drawArrow:c.bit
+                 in:box
+              color:pressed ? Rgb(18, 16, 10, 0.95) : Rgb(225, 215, 190, 0.8)];
     return;
   }
   NSString* text = @(c.label);
@@ -238,7 +268,8 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
   NSDictionary* attrs = @{
     NSFontAttributeName : [UIFont systemFontOfSize:size
                                             weight:UIFontWeightMedium],
-    NSForegroundColorAttributeName : Rgb(255, 248, 232),
+    NSForegroundColorAttributeName :
+        pressed ? Rgb(18, 16, 10, 0.95) : Rgb(255, 248, 232),
   };
   const CGSize t = [text sizeWithAttributes:attrs];
   [text drawAtPoint:CGPointMake(CGRectGetMidX(box) - t.width / 2,
@@ -254,7 +285,8 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
       UIBezierPath* path = [UIBezierPath bezierPathWithOvalInRect:ring];
       [Rgb(18, 16, 10, active ? 0.8 : 0.59) setFill];
       [path fill];
-      [(active ? Rgb(95, 211, 95, 0.92) : Rgb(255, 248, 232, 0.47)) setStroke];
+      [(active ? [XenraAccent() colorWithAlphaComponent:0.92]
+              : Rgb(255, 248, 232, 0.47)) setStroke];
       path.lineWidth = r * 0.035;
       [path stroke];
     });
@@ -262,7 +294,7 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
   const CGFloat knobR = r * 0.34;
   auto knob = [&](bool active) {
     return Picture(CGSizeMake(knobR * 2, knobR * 2), ^{
-      [Rgb(225, 215, 190, active ? 0.9 : 0.6) setFill];
+      [(active ? XenraAccent() : Rgb(225, 215, 190, 0.6)) setFill];
       [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, knobR * 2,
                                                          knobR * 2)] fill];
     });
@@ -306,10 +338,14 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
                        c.up, scale);
     [self.layer addSublayer:c.layer];
   }
+  // A rebuild can happen while a thumb is down (rotation, scale change); paint
+  // that state straight away instead of leaving the knob centred until the
+  // next touch event.
+  [self showState];
 }
 
 - (void)showStick:(Stick&)stick {
-  const bool active = stick.touch != nil;
+  const bool active = stick.touchId != 0;
   stick.base.contents =
       (id)(active ? stick.baseActive : stick.baseIdle).CGImage;
   stick.knobLayer.contents =
@@ -328,6 +364,10 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
     if (c.pressed == c.shown) continue;
     c.shown = c.pressed;
     c.layer.contents = (id)(c.pressed ? c.down : c.up).CGImage;
+    // Android shrinks a held button to 91%. The fill swap alone is easy to
+    // miss under a thumb, which is what "it does not darken" was.
+    const CGFloat scale = c.pressed ? 0.91 : 1;
+    c.layer.transform = CATransform3DMakeScale(scale, scale, 1);
   }
   [CATransaction commit];
 }
@@ -354,25 +394,57 @@ static void MoveStick(Stick& s, CGPoint p) {
 }
 
 - (void)evaluateTouches:(NSSet<UITouch*>*)all ended:(NSSet<UITouch*>*)ended {
-  for (UITouch* t in ended) {
-    if (left_.touch == t) {
-      left_.touch = nil;
-      left_.knob = CGPointZero;
-    }
-    if (right_.touch == t) {
-      right_.touch = nil;
-      right_.knob = CGPointZero;
-    }
-  }
-  int bits = 0;
+  // The pad used to remember the UITouch object itself. UIKit recycles those
+  // objects, and a touch can also end without touchesEnded or touchesCancelled
+  // ever arriving (the app going to the background is the usual one), so the
+  // stored pointer could name a dead object - or, once recycled, a different
+  // finger. The stick then stayed lit with its knob frozen and ignored the
+  // thumb until the view was rebuilt: the "sticks stop holding after a while"
+  // report. An id assigned to each touch while it is live cannot alias, and a
+  // stick whose finger is missing from this event is released here, so a
+  // dropped callback costs one frame instead of the rest of the session.
+  UITouch* __unsafe_unretained liveTouches[16];
+  long long liveIds[16];
+  int liveCount = 0;
   for (UITouch* t in all) {
-    if ([ended containsObject:t]) continue;
+    if ([ended containsObject:t] || liveCount == 16) continue;
+    long long ident = 0;
+    for (int i = 0; i < liveCount_; i++) {
+      if (liveTouches_[i] == t) {
+        ident = liveIds_[i];
+        break;
+      }
+    }
+    if (!ident) ident = nextTouchId_++;
+    liveTouches[liveCount] = t;
+    liveIds[liveCount] = ident;
+    ++liveCount;
+  }
+  const auto isLive = [&](long long ident) {
+    for (int i = 0; i < liveCount; i++) {
+      if (liveIds[i] == ident) return true;
+    }
+    return false;
+  };
+  if (left_.touchId && !isLive(left_.touchId)) {
+    left_.touchId = 0;
+    left_.knob = CGPointZero;
+  }
+  if (right_.touchId && !isLive(right_.touchId)) {
+    right_.touchId = 0;
+    right_.knob = CGPointZero;
+  }
+
+  int bits = 0;
+  for (int i = 0; i < liveCount; i++) {
+    UITouch* t = liveTouches[i];
+    const long long ident = liveIds[i];
     const CGPoint p = [t locationInView:self];
-    if (left_.touch == t) {
+    if (left_.touchId == ident) {
       MoveStick(left_, p);
       continue;
     }
-    if (right_.touch == t) {
+    if (right_.touchId == ident) {
       MoveStick(right_, p);
       continue;
     }
@@ -385,18 +457,23 @@ static void MoveStick(Stick& s, CGPoint p) {
     }
     if (hit) continue;
     if (t.phase == UITouchPhaseBegan) {
-      if (!left_.touch &&
+      if (!left_.touchId &&
           std::hypot(p.x - left_.center.x, p.y - left_.center.y) <=
               left_.radius * 1.3) {
-        left_.touch = t;
+        left_.touchId = ident;
         MoveStick(left_, p);
-      } else if (!right_.touch &&
+      } else if (!right_.touchId &&
                  std::hypot(p.x - right_.center.x, p.y - right_.center.y) <=
                      right_.radius * 1.3) {
-        right_.touch = t;
+        right_.touchId = ident;
         MoveStick(right_, p);
       }
     }
+  }
+  liveCount_ = liveCount;
+  for (int i = 0; i < liveCount; i++) {
+    liveTouches_[i] = liveTouches[i];
+    liveIds_[i] = liveIds[i];
   }
   for (Control& c : controls_) c.pressed = (bits & c.bit) != 0;
 

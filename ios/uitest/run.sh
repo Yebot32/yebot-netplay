@@ -19,7 +19,7 @@ cc() {  # source, extra flags
   clang++ -x objective-c++ $FLAGS $2 -c "$1" -o "build-ui/obj/$(basename "$1").o" || exit 1
 }
 for f in Ambient AppDelegate BladeView ContentInstall Covers DashboardController PadNav UiSounds \
-         GameController GameScanner JitProbe Language Netplay Sampler LibraryController Logs Motion Settings SettingsController \
+         GameController GameScanner JitProbe Language Netplay NetplayController Sampler LibraryController Logs Motion Settings SettingsController \
          SetupController TouchPad UI Xemu; do
   cc "ios/src/Xenra$f.mm" -fobjc-arc &
 done
@@ -35,13 +35,13 @@ clang++ -target $TARGET -isysroot $SDK build-ui/obj/*.o -o "$APP/Xenra" \
   -framework UniformTypeIdentifiers -framework Metal -framework CoreGraphics \
   -framework ImageIO || exit 1
 
-sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.4.5/; s/${MACOSX_BUNDLE_BUNDLE_VERSION}/33/' \
-    -e 's/${MACOSX_BUNDLE_EXECUTABLE_NAME}/Xenra/; s/${MACOSX_BUNDLE_GUI_IDENTIFIER}/Ali.Xanite.ui/' \
+sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.5.0/; s/${MACOSX_BUNDLE_BUNDLE_VERSION}/38/' \
+    -e 's/${MACOSX_BUNDLE_EXECUTABLE_NAME}/Xenra/; s/${MACOSX_BUNDLE_GUI_IDENTIFIER}/Mohammed.Xanite.ui/' \
     -e 's/${MACOSX_BUNDLE_BUNDLE_NAME}/Xenra/; s/${EXECUTABLE_NAME}/Xenra/' \
-    -e 's/$(EXECUTABLE_NAME)/Xenra/; s/$(PRODUCT_BUNDLE_IDENTIFIER)/Ali.Xanite.ui/' \
+    -e 's/$(EXECUTABLE_NAME)/Xenra/; s/$(PRODUCT_BUNDLE_IDENTIFIER)/Mohammed.Xanite.ui/' \
     ios/Info.plist > "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable Xenra' "$APP/Info.plist"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier Ali.Xanite.ui' "$APP/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier Mohammed.Xanite.ui' "$APP/Info.plist"
 cp ios/res/*.png ios/res/X1_Covers.txt ios/res/X360_Titles.txt ios/res/XboxOG_Titles.txt "$APP/"
 cp -R ios/res/*.lproj "$APP/"
 ls -d "$APP"/*.lproj | sed 's/.*\///' | tr '\n' ' '; echo
@@ -61,14 +61,14 @@ xcrun simctl boot "$DEVICE"; xcrun simctl bootstatus "$DEVICE" -b
 xcrun simctl install "$DEVICE" "$APP" || exit 1
 xcrun simctl io "$DEVICE" recordVideo --codec=h264 "$OUT/tour.mp4" &
 VIDEO=$!
-xcrun simctl launch "$DEVICE" Ali.Xanite.ui
+xcrun simctl launch "$DEVICE" Mohammed.Xanite.ui
 # The launch screen itself, which only the system can photograph. A simulator is
 # in light mode, the case that used to come up white.
 for i in 1 2 3 4; do
   xcrun simctl io "$DEVICE" screenshot "$OUT/000-launch-$i.png" >/dev/null 2>&1
 done
 sleep 3
-DATA=$(xcrun simctl get_app_container "$DEVICE" Ali.Xanite.ui data)
+DATA=$(xcrun simctl get_app_container "$DEVICE" Mohammed.Xanite.ui data)
 TOUR="$DATA/Documents/tour"
 # The app photographs itself; see XenraTour.mm for why.
 for i in $(seq 1 1500); do
@@ -85,9 +85,9 @@ if [ -e "$TOUR/done" ]; then
     CODE=${RUN%%:*}
     MODE=$CODE
     [ "$RUN" = it:check ] && MODE=check
-    xcrun simctl terminate "$DEVICE" Ali.Xanite.ui 2>/dev/null
+    xcrun simctl terminate "$DEVICE" Mohammed.Xanite.ui 2>/dev/null
     rm -f "$TOUR/done"
-    xcrun simctl launch "$DEVICE" Ali.Xanite.ui -AppleLanguages "($CODE)" -XenraTourLanguage "$MODE"
+    xcrun simctl launch "$DEVICE" Mohammed.Xanite.ui -AppleLanguages "($CODE)" -XenraTourLanguage "$MODE"
     for i in $(seq 1 240); do
       [ -e "$TOUR/done" ] && break
       sleep 1

@@ -371,30 +371,51 @@
 
 "System Link address" = "System Link address";
 
-"System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@" = "System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@";
 
-"No profile" = "No profile";
 
-"Create Profile" = "Create Profile";
 
-"Enter a gamertag (1-15 characters, starting with a letter)." = "Enter a gamertag (1-15 characters, starting with a letter).";
 
-"Create" = "Create";
 
-"Profile ready: %@" = "Profile ready: %@";
 
-"That gamertag cannot be used." = "That gamertag cannot be used.";
 
-"Change Gamertag" = "Change Gamertag";
 
-"Check Network" = "Check Network";
 
-"Network check" = "Network check";
 
-"Checking the network…" = "Checking the network…";
 
-"Network Settings" = "Network Settings";
 
 "Add to App Shortcuts" = "Add to App Shortcuts";
 
 "Added to App Shortcuts. Long-press the Xenra icon." = "Added to App Shortcuts. Long-press the Xenra icon.";
+
+/* XenraNetplayController */
+"1. Choose your gamertag" = "1. اختر اسم اللاعب";
+"1–15 characters. Must start with a letter, and can contain letters, numbers and single spaces." = "من 1 إلى 15 حرفًا. يجب أن يبدأ بحرف، ويمكن أن يحتوي على حروف وأرقام ومسافات مفردة.";
+"2. Create your gamer profile" = "2. أنشئ ملف اللاعب";
+"A gamer profile is set up and signed in, so games that demand one will start normally, and your saves and achievements have somewhere to go." = "تم إنشاء ملف لاعب وتسجيل الدخول به، لذا ستبدأ الألعاب التي تتطلبه بشكل طبيعي، وستجد حفظاتك وإنجازاتك مكانًا تُخزَّن فيه.";
+"A gateway answered, but it refused to open a port. UPnP may be restricted in your router's settings." = "استجاب البوابة، لكنها رفضت فتح منفذ. قد يكون UPnP مقيّدًا في إعدادات الراوتر.";
+"Change gamertag" = "تغيير اسم اللاعب";
+"Check my network" = "تحقق من شبكتي";
+"Checking…" = "جارٍ التحقق…";
+"Choose your gamertag" = "اختر اسم اللاعب";
+"Done" = "تم";
+"Gamertag set to %@" = "تم تعيين اسم اللاعب إلى %@";
+"Gamertag: %@" = "اسم اللاعب: %@";
+"NETPLAY" = "اللعب الشبكي";
+"Netplay is a community-run way for consoles to find each other. It is not Xbox Live, and it is worth knowing what it does not cover.\n\nNot Xbox Live. No friends list, no gamertag search, no messages, no marketplace, and no Xbox Live achievements. Microsoft's service is not involved at any point.\n\nOnly games that had system link. If a game only ever did multiplayer through Xbox Live, it stays offline. Titles that supported LAN or system-link play are the ones that can work, and that is a short list.\n\nWi-Fi only. Mobile data will not work for hosting. Carriers put you behind a shared address, so nobody can reach your console from outside.\n\nExpect rough edges. Disconnects, lag and games that simply refuse are all normal." = "اللعب الشبكي طريقة يديرها المجتمع لتجد الأجهزة بعضها. إنه ليس Xbox Live، ومن المفيد معرفة ما لا يغطيه.\n\nليس Xbox Live. لا قائمة أصدقاء، ولا بحث عن أسماء اللاعبين، ولا رسائل، ولا متجر، ولا إنجازات Xbox Live. خدمة Microsoft غير مشاركة في أي مرحلة.\n\nفقط الألعاب التي دعمت System Link. إذا كانت اللعبة لا تدعم اللعب الجماعي إلا عبر Xbox Live، فستبقى دون اتصال. الألعاب التي دعمت اللعب عبر الشبكة المحلية أو System Link هي التي يمكن أن تعمل، وهي قائمة قصيرة.\n\nWi-Fi فقط. بيانات الهاتف لن تعمل للاستضافة. يضعك المشغّل خلف عنوان مشترك، فلا يمكن لأحد الوصول إلى جهازك من الخارج.\n\nتوقع خشونة. الانقطاعات والتأخير والألعاب التي ترفض الاتصال أمور طبيعية.";
+"Netplay: where it has got to" = "اللعب الشبكي: أين وصل";
+"No UPnP gateway answered. Either UPnP is switched off in your router, or you are on mobile data. Hosting would need UPnP turned on, or the port forwarded by hand." = "لم تستجب أي بوابة UPnP. إما أن UPnP مغلق في الراوتر، أو أنك تستخدم بيانات الهاتف. يتطلب الاستضافة تشغيل UPnP أو تمرير المنفذ يدويًا.";
+"Open game library" = "افتح مكتبة الألعاب";
+"Profile ready" = "الملف جاهز";
+"System Link is LAN-only for now. This screen is where internet netplay will be set up once matches can connect." = "System Link يعمل على الشبكة المحلية فقط حاليًا. هذه الشاشة ستكون مكان إعداد اللعب عبر الإنترنت عندما تصبح المباريات قابلة للاتصال.";
+"System Link over a local network is working. Put both consoles on the same Wi-Fi, then host or join from the game's own System Link menu — the connection stays on your network and never needs Xbox Live.\n\nStill being built: playing over the internet through a session server. The 360 core's session functions are stubs and its sign-in check reports disconnected, so that half is not ready yet." = "System Link عبر الشبكة المحلية يعمل. اجعل الجهازين على نفس شبكة Wi-Fi، ثم استضف أو انضم من قائمة System Link داخل اللعبة — يبقى الاتصال على شبكتك ولا يحتاج Xbox Live أبدًا.\n\nلا يزال قيد التطوير: اللعب عبر الإنترنت من خلال خادم جلسات. دوال الجلسات في نواة 360 ما تزال صورية وفحص تسجيل الدخول يُبلّغ عن حالة قطع الاتصال، لذا هذا الجزء غير جاهز بعد.";
+"That name will not be accepted: 1–15 characters, start with a letter, letters and numbers with single spaces." = "لن يُقبل هذا الاسم: من 1 إلى 15 حرفًا، يبدأ بحرف، حروف وأرقام مع مسافات مفردة.";
+"The name games will show for you. 1–15 characters, starts with a letter, letters and numbers only.\n\nPick it before you create the profile — the 360 core can create a profile but cannot rename one, so changing this later will not touch a profile that already exists." = "الاسم الذي ستظهر به في الألعاب. من 1 إلى 15 حرفًا، يبدأ بحرف، حروف وأرقام فقط.\n\nاختره قبل إنشاء الملف — تستطيع نواة 360 إنشاء ملف لكن لا تستطيع تغيير اسمه، لذا لن يؤثر التغيير لاحقًا على ملف موجود بالفعل.";
+"The netplay session server could not be reached. It may be down, or your connection may be blocking it." = "تعذّر الوصول إلى خادم جلسات اللعب الشبكي. قد يكون متوقفًا، أو قد تحجب اتصالك.";
+"The netplay session server is reachable from this device." = "خادم جلسات اللعب الشبكي متاح من هذا الجهاز.";
+"What netplay will not be" = "ما لن يكون عليه اللعب الشبكي";
+"Xbox 360" = "Xbox 360";
+"Xbox 360 games expect somebody to be signed in. Setting up a gamer profile is what unlocks saves, achievements and the menus most games hide behind a sign-in prompt — Angry Birds Trilogy will not go past its title screen without one.\n\nNetplay is a separate thing. System Link over your own Wi-Fi works today; its current state is at the bottom of this page." = "تتوقع ألعاب Xbox 360 وجود لاعب مسجّل الدخول. إعداد ملف لاعب هو ما يفتح الحفظ والإنجازات والقوائم التي تخفيها معظم الألعاب خلف طلب تسجيل الدخول — لن تتجاوز Angry Birds Trilogy شاشة العنوان بدون ملف.\n\nاللعب الشبكي أمر منفصل. System Link عبر شبكة Wi-Fi الخاصة بك يعمل اليوم؛ وحالته الحالية في أسفل هذه الصفحة.";
+"Xenra creates the profile and signs it into slot 0 automatically the first time you launch a 360 game. There is nothing to fill in — just start any game once and come back." = "تنشئ Xenra الملف وتسجّله في الفتحة 0 تلقائيًا في أول مرة تشغّل فيها لعبة 360. لا يوجد ما تملؤه — فقط ابدأ أي لعبة مرة واحدة ثم عد.";
+"Your network can host. UPnP works and your connection can be reached from outside (%@). Nothing here is stopping netplay." = "يمكن لشبكتك الاستضافة. UPnP يعمل ويمكن الوصول إلى اتصالك من الخارج (%@). لا شيء هنا يمنع اللعب الشبكي.";
+"Your profile and netplay" = "ملفك واللعب الشبكي";
+"Your router is fine, but your internet connection cannot be reached from outside. That is your provider sharing one address between many customers, not a setting you can change. Hosting will not work on this connection; joining someone else may." = "الراوتر سليم، لكن لا يمكن الوصول إلى اتصالك بالإنترنت من الخارج. هذا مزوّد الخدمة يشارك عنوانًا واحدًا بين عملاء كثيرين، وليس إعدادًا يمكنك تغييره. لن تعمل الاستضافة على هذا الاتصال؛ قد يعمل الانضمام إلى شخص آخر.";

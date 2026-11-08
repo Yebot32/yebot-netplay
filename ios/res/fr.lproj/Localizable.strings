@@ -371,30 +371,51 @@
 
 "System Link address" = "System Link address";
 
-"System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@" = "System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@";
 
-"No profile" = "No profile";
 
-"Create Profile" = "Create Profile";
 
-"Enter a gamertag (1-15 characters, starting with a letter)." = "Enter a gamertag (1-15 characters, starting with a letter).";
 
-"Create" = "Create";
 
-"Profile ready: %@" = "Profile ready: %@";
 
-"That gamertag cannot be used." = "That gamertag cannot be used.";
 
-"Change Gamertag" = "Change Gamertag";
 
-"Check Network" = "Check Network";
 
-"Network check" = "Network check";
 
-"Checking the network…" = "Checking the network…";
 
-"Network Settings" = "Network Settings";
 
 "Add to App Shortcuts" = "Add to App Shortcuts";
 
 "Added to App Shortcuts. Long-press the Xenra icon." = "Added to App Shortcuts. Long-press the Xenra icon.";
+
+/* XenraNetplayController */
+"1. Choose your gamertag" = "1. Choisissez votre gamertag";
+"1–15 characters. Must start with a letter, and can contain letters, numbers and single spaces." = "1 à 15 caractères. Doit commencer par une lettre et peut contenir des lettres, des chiffres et des espaces simples.";
+"2. Create your gamer profile" = "2. Créez votre profil de joueur";
+"A gamer profile is set up and signed in, so games that demand one will start normally, and your saves and achievements have somewhere to go." = "Un profil de joueur est créé et connecté, donc les jeux qui en exigent un démarreront normalement, et vos sauvegardes et succès ont un endroit où aller.";
+"A gateway answered, but it refused to open a port. UPnP may be restricted in your router's settings." = "Une passerelle a répondu, mais a refusé d'ouvrir un port. UPnP est peut-être restreint dans les réglages du routeur.";
+"Change gamertag" = "Changer de gamertag";
+"Check my network" = "Vérifier mon réseau";
+"Checking…" = "Vérification…";
+"Choose your gamertag" = "Choisissez votre gamertag";
+"Done" = "Terminé";
+"Gamertag set to %@" = "Gamertag défini sur %@";
+"Gamertag: %@" = "Gamertag : %@";
+"NETPLAY" = "NETPLAY";
+"Netplay is a community-run way for consoles to find each other. It is not Xbox Live, and it is worth knowing what it does not cover.\n\nNot Xbox Live. No friends list, no gamertag search, no messages, no marketplace, and no Xbox Live achievements. Microsoft's service is not involved at any point.\n\nOnly games that had system link. If a game only ever did multiplayer through Xbox Live, it stays offline. Titles that supported LAN or system-link play are the ones that can work, and that is a short list.\n\nWi-Fi only. Mobile data will not work for hosting. Carriers put you behind a shared address, so nobody can reach your console from outside.\n\nExpect rough edges. Disconnects, lag and games that simply refuse are all normal." = "Netplay est un moyen géré par la communauté pour que les consoles se trouvent. Ce n'est pas Xbox Live, et il vaut la peine de savoir ce qu'il ne couvre pas.\n\nPas Xbox Live. Pas de liste d'amis, pas de recherche de gamertag, pas de messages, pas de boutique et pas de succès Xbox Live. Le service de Microsoft n'intervient à aucun moment.\n\nUniquement les jeux avec System Link. Si un jeu ne proposait le multijoueur que via Xbox Live, il reste hors ligne. Les titres compatibles LAN ou System Link sont ceux qui peuvent fonctionner, et la liste est courte.\n\nWi-Fi uniquement. Les données mobiles ne fonctionneront pas pour héberger. Les opérateurs vous placent derrière une adresse partagée, donc personne ne peut atteindre votre console depuis l'extérieur.\n\nAttendez-vous à des aspérités. Déconnexions, latence et jeux qui refusent tout simplement sont normaux.";
+"Netplay: where it has got to" = "Netplay : où en est la situation";
+"No UPnP gateway answered. Either UPnP is switched off in your router, or you are on mobile data. Hosting would need UPnP turned on, or the port forwarded by hand." = "Aucune passerelle UPnP n'a répondu. Soit UPnP est désactivé dans le routeur, soit vous êtes en données mobiles. Pour héberger, il faudrait activer UPnP ou rediriger le port à la main.";
+"Open game library" = "Ouvrir la bibliothèque de jeux";
+"Profile ready" = "Profil prêt";
+"System Link is LAN-only for now. This screen is where internet netplay will be set up once matches can connect." = "System Link ne fonctionne que sur le réseau local pour l'instant. Cet écran sera l'endroit où configurer le netplay par internet quand les parties pourront se connecter.";
+"System Link over a local network is working. Put both consoles on the same Wi-Fi, then host or join from the game's own System Link menu — the connection stays on your network and never needs Xbox Live.\n\nStill being built: playing over the internet through a session server. The 360 core's session functions are stubs and its sign-in check reports disconnected, so that half is not ready yet." = "System Link sur un réseau local fonctionne. Placez les deux consoles sur le même Wi-Fi, puis hébergez ou rejoignez depuis le menu System Link du jeu — la connexion reste sur votre réseau et n'a jamais besoin de Xbox Live.\n\nEncore en développement : jouer par internet via un serveur de sessions. Les fonctions de session du cœur 360 sont des stubs et sa vérification de connexion signale « déconnecté », donc cette moitié n'est pas encore prête.";
+"That name will not be accepted: 1–15 characters, start with a letter, letters and numbers with single spaces." = "Ce nom ne sera pas accepté : 1 à 15 caractères, commencer par une lettre, lettres et chiffres avec des espaces simples.";
+"The name games will show for you. 1–15 characters, starts with a letter, letters and numbers only.\n\nPick it before you create the profile — the 360 core can create a profile but cannot rename one, so changing this later will not touch a profile that already exists." = "Le nom que les jeux afficheront pour vous. 1 à 15 caractères, commence par une lettre, lettres et chiffres uniquement.\n\nChoisissez-le avant de créer le profil — le cœur 360 peut créer un profil mais pas le renommer, donc le modifier plus tard ne touchera pas un profil qui existe déjà.";
+"The netplay session server could not be reached. It may be down, or your connection may be blocking it." = "Le serveur de sessions netplay est injoignable. Il est peut-être hors service, ou votre connexion le bloque.";
+"The netplay session server is reachable from this device." = "Le serveur de sessions netplay est joignable depuis cet appareil.";
+"What netplay will not be" = "Ce que netplay ne sera pas";
+"Xbox 360" = "Xbox 360";
+"Xbox 360 games expect somebody to be signed in. Setting up a gamer profile is what unlocks saves, achievements and the menus most games hide behind a sign-in prompt — Angry Birds Trilogy will not go past its title screen without one.\n\nNetplay is a separate thing. System Link over your own Wi-Fi works today; its current state is at the bottom of this page." = "Les jeux Xbox 360 attendent que quelqu'un soit connecté. Créer un profil de joueur est ce qui débloque les sauvegardes, les succès et les menus que beaucoup de jeux cachent derrière une demande de connexion — Angry Birds Trilogy ne dépassera pas son écran titre sans profil.\n\nNetplay est autre chose. System Link sur votre propre Wi-Fi fonctionne aujourd'hui ; son état actuel est en bas de cette page.";
+"Xenra creates the profile and signs it into slot 0 automatically the first time you launch a 360 game. There is nothing to fill in — just start any game once and come back." = "Xenra crée le profil et le connecte à l'emplacement 0 automatiquement au premier lancement d'un jeu 360. Il n'y a rien à remplir — lancez simplement un jeu une fois et revenez.";
+"Your network can host. UPnP works and your connection can be reached from outside (%@). Nothing here is stopping netplay." = "Votre réseau peut héberger. UPnP fonctionne et votre connexion est joignable depuis l'extérieur (%@). Rien ici n'empêche netplay.";
+"Your profile and netplay" = "Votre profil et netplay";
+"Your router is fine, but your internet connection cannot be reached from outside. That is your provider sharing one address between many customers, not a setting you can change. Hosting will not work on this connection; joining someone else may." = "Votre routeur est correct, mais votre connexion internet n'est pas joignable depuis l'extérieur. C'est votre fournisseur qui partage une adresse entre de nombreux clients, pas un réglage que vous pouvez changer. L'hébergement ne fonctionnera pas sur cette connexion ; rejoindre quelqu'un d'autre peut-être.";

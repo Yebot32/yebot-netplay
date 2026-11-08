@@ -37,6 +37,7 @@ set(_xe_ios_arc_sources
   "${_xe_ios_dir}/src/XenraPadNav.mm"
   "${_xe_ios_dir}/src/XenraUiSounds.mm"
   "${_xe_ios_dir}/src/XenraLibraryController.mm"
+  "${_xe_ios_dir}/src/XenraNetplayController.mm"
   "${_xe_ios_dir}/src/XenraSettings.mm"
   "${_xe_ios_dir}/src/XenraSettingsController.mm"
   "${_xe_ios_dir}/src/XenraSetupController.mm"
@@ -191,7 +192,7 @@ set_target_properties(xenra-ios PROPERTIES
 set_target_properties(xenra-ios PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${_xe_ios_dir}/Info.plist"
   MACOSX_BUNDLE_SHORT_VERSION_STRING "0.5.0"
-  MACOSX_BUNDLE_BUNDLE_VERSION "37"
+  MACOSX_BUNDLE_BUNDLE_VERSION "38"
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "Mohammed.Xanite.ios"
   # A device build only. The simulator has no JIT story worth testing and no
   # real GPU, which are the two things this app exists to measure.

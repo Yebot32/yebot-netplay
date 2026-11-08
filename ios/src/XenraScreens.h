@@ -29,6 +29,10 @@ typedef NS_ENUM(NSInteger, XenraDashboardEntry) {
 @interface XenraLibraryController : UIViewController
 @end
 
+// XboxLive360Activity: the 360 profile onboarding and netplay state screen.
+@interface XenraNetplayController : UIViewController
+@end
+
 @interface XenraSettingsController : UIViewController
 // Non-nil: Android's PerGameSettingsActivity for that game.
 @property(nonatomic, copy) NSString* game;

@@ -7,35 +7,34 @@
 // empty results.
 
 NSString* XenraNetplayProfileSummary(NSString* content_root) { return nil; }
-NSString* XenraNetplayProfileXuid(NSString* content_root) { return nil; }
 NSString* XenraNetplayEnsureProfile(NSString* content_root, NSString* gamertag) {
   return nil;
 }
-NSString* XenraNetplayCreateProfile(NSString* content_root, NSString* gamertag) {
-  return nil;
-}
-BOOL XenraNetplayRenameProfile(NSString* content_root, NSString* xuid,
-                               NSString* gamertag) {
-  return NO;
-}
+BOOL XenraNetplayGamertagValid(NSString* gamertag) { return NO; }
 NSString* XenraNetplayAdapterSummary(void) { return nil; }
 int XenraNetplayUPnPDiscover(int timeout_ms) { return 0; }
 NSString* XenraNetplayUPnPStatus(void) { return nil; }
 NSString* XenraNetplayUPnPLanAddress(void) { return nil; }
 NSString* XenraNetplayUPnPExternalAddress(void) { return nil; }
 BOOL XenraNetplayUPnPTestMapping(int port) { return NO; }
+void XenraNetplayCheckServer(void (^done)(BOOL reachable, NSInteger status)) {
+  if (!done) return;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    done(NO, 0);
+  });
+}
 
 #else
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <string>
 
 #include "ios_emu.h"
 #include "xenia/kernel/upnp.h"
 #include "xenia/kernel/util/network_adapter_manager.h"
+#include "xenia/kernel/xam/profile_manager.h"
 #include "xenia/kernel/xam/profile_standalone.h"
 
 namespace {
@@ -86,12 +85,6 @@ NSString* XenraNetplayProfileSummary(NSString* content_root) {
   return profiles.empty() ? nil : NsString(profiles.front().gamertag);
 }
 
-NSString* XenraNetplayProfileXuid(NSString* content_root) {
-  const auto profiles =
-      xe::kernel::xam::ListStandaloneProfiles(PathFrom(content_root));
-  return profiles.empty() ? nil : NsString(XuidText(profiles.front().xuid));
-}
-
 NSString* XenraNetplayEnsureProfile(NSString* content_root,
                                     NSString* gamertag) {
   const auto root = PathFrom(content_root);
@@ -108,24 +101,9 @@ NSString* XenraNetplayEnsureProfile(NSString* content_root,
   return NsString(xuid);
 }
 
-NSString* XenraNetplayCreateProfile(NSString* content_root,
-                                    NSString* gamertag) {
-  const std::string xuid = xe::kernel::xam::CreateStandaloneProfile(
-      PathFrom(content_root), gamertag.UTF8String ?: "", kProfileLanguage,
-      kProfileCountry);
-  SignIn(xuid);
-  return NsString(xuid);
-}
-
-BOOL XenraNetplayRenameProfile(NSString* content_root, NSString* xuid,
-                               NSString* gamertag) {
-  if (!xuid.length || !gamertag.length) {
-    return NO;
-  }
-  const uint64_t value = std::strtoull(xuid.UTF8String, nullptr, 16);
-  return xe::kernel::xam::RenameStandaloneProfile(
-             PathFrom(content_root), value, gamertag.UTF8String,
-             kProfileLanguage, kProfileCountry) == 0;
+BOOL XenraNetplayGamertagValid(NSString* gamertag) {
+  return xe::kernel::xam::ProfileManager::IsGamertagValid(
+      gamertag.UTF8String ?: "");
 }
 
 NSString* XenraNetplayAdapterSummary(void) {
@@ -175,6 +153,29 @@ BOOL XenraNetplayUPnPTestMapping(int port) {
   }
   Upnp().DeletePortMapping(value, true);
   return YES;
+}
+
+void XenraNetplayCheckServer(void (^done)(BOOL reachable, NSInteger status)) {
+  if (!done) {
+    return;
+  }
+  static NSString* const kSessionServer =
+      @"https://xenia-netplay-2a0298c0e3f4.herokuapp.com/";
+  NSMutableURLRequest* request = [NSMutableURLRequest
+      requestWithURL:[NSURL URLWithString:kSessionServer]];
+  request.timeoutInterval = 8;
+  [[NSURLSession.sharedSession
+      dataTaskWithRequest:request
+        completionHandler:^(NSData* data, NSURLResponse* response,
+                            NSError* error) {
+          const NSInteger code =
+              [response isKindOfClass:NSHTTPURLResponse.class]
+                  ? ((NSHTTPURLResponse*)response).statusCode
+                  : 0;
+          dispatch_async(dispatch_get_main_queue(), ^{
+            done(error == nil && code > 0, code);
+          });
+        }] resume];
 }
 
 #endif  // XENRA_UITEST

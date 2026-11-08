@@ -371,30 +371,51 @@
 
 "System Link address" = "System Link address";
 
-"System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@" = "System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@";
 
-"No profile" = "No profile";
 
-"Create Profile" = "Create Profile";
 
-"Enter a gamertag (1-15 characters, starting with a letter)." = "Enter a gamertag (1-15 characters, starting with a letter).";
 
-"Create" = "Create";
 
-"Profile ready: %@" = "Profile ready: %@";
 
-"That gamertag cannot be used." = "That gamertag cannot be used.";
 
-"Change Gamertag" = "Change Gamertag";
 
-"Check Network" = "Check Network";
 
-"Network check" = "Network check";
 
-"Checking the network…" = "Checking the network…";
 
-"Network Settings" = "Network Settings";
 
 "Add to App Shortcuts" = "Add to App Shortcuts";
 
 "Added to App Shortcuts. Long-press the Xenra icon." = "Added to App Shortcuts. Long-press the Xenra icon.";
+
+/* XenraNetplayController */
+"1. Choose your gamertag" = "1. ゲーマータグを選ぶ";
+"1–15 characters. Must start with a letter, and can contain letters, numbers and single spaces." = "1〜15文字。英字で始まり、英字・数字・1つの空白を含められます。";
+"2. Create your gamer profile" = "2. ゲーマープロフィールを作成";
+"A gamer profile is set up and signed in, so games that demand one will start normally, and your saves and achievements have somewhere to go." = "ゲーマープロフィールが作成され、サインインされています。プロフィールを必要とするゲームは正常に起動し、セーブデータと実績の保存先ができます。";
+"A gateway answered, but it refused to open a port. UPnP may be restricted in your router's settings." = "ゲートウェイは応答しましたが、ポートを開くことを拒否しました。ルーターの設定で UPnP が制限されている可能性があります。";
+"Change gamertag" = "ゲーマータグを変更";
+"Check my network" = "ネットワークを確認";
+"Checking…" = "確認中…";
+"Choose your gamertag" = "ゲーマータグを選択";
+"Done" = "完了";
+"Gamertag set to %@" = "ゲーマータグを %@ に設定しました";
+"Gamertag: %@" = "ゲーマータグ: %@";
+"NETPLAY" = "ネットプレイ";
+"Netplay is a community-run way for consoles to find each other. It is not Xbox Live, and it is worth knowing what it does not cover.\n\nNot Xbox Live. No friends list, no gamertag search, no messages, no marketplace, and no Xbox Live achievements. Microsoft's service is not involved at any point.\n\nOnly games that had system link. If a game only ever did multiplayer through Xbox Live, it stays offline. Titles that supported LAN or system-link play are the ones that can work, and that is a short list.\n\nWi-Fi only. Mobile data will not work for hosting. Carriers put you behind a shared address, so nobody can reach your console from outside.\n\nExpect rough edges. Disconnects, lag and games that simply refuse are all normal." = "ネットプレイは、コミュニティ運営によって本体同士を見つけるための仕組みです。Xbox Live ではなく、対応していない範囲を知っておく価値があります。\n\nXbox Live ではありません。フレンドリスト、ゲーマータグ検索、メッセージ、マーケットプレイス、Xbox Live 実績はありません。Microsoft のサービスは一切関与しません。\n\nSystem Link があるゲームのみ。Xbox Live でしかマルチプレイを提供していなかったゲームはオフラインのままです。LAN または System Link に対応したタイトルが動作対象で、その数は限られています。\n\nWi-Fi のみ。モバイルデータではホストできません。通信事業者は共有アドレスの背後に置くため、外部から本体に到達できません。\n\n粗さを想定してください。切断、遅延、接続を拒否するゲームはすべて普通のことです。";
+"Netplay: where it has got to" = "ネットプレイの現状";
+"No UPnP gateway answered. Either UPnP is switched off in your router, or you are on mobile data. Hosting would need UPnP turned on, or the port forwarded by hand." = "UPnP ゲートウェイが応答しませんでした。ルーターで UPnP が無効か、モバイルデータを使用しています。ホストするには UPnP を有効にするか、ポートを手動で転送する必要があります。";
+"Open game library" = "ゲームライブラリを開く";
+"Profile ready" = "プロフィール準備完了";
+"System Link is LAN-only for now. This screen is where internet netplay will be set up once matches can connect." = "System Link は今のところ LAN のみです。この画面は、試合が接続できるようになったときにインターネット経由のネットプレイを設定する場所になります。";
+"System Link over a local network is working. Put both consoles on the same Wi-Fi, then host or join from the game's own System Link menu — the connection stays on your network and never needs Xbox Live.\n\nStill being built: playing over the internet through a session server. The 360 core's session functions are stubs and its sign-in check reports disconnected, so that half is not ready yet." = "ローカルネットワーク経由の System Link は動作しています。両方の本体を同じ Wi-Fi に接続し、ゲーム内の System Link メニューからホストまたは参加してください。接続はあなたのネットワーク内に留まり、Xbox Live は不要です。\n\nまだ開発中: セッションサーバーを介したインターネット経由のプレイ。360 コアのセッション関数はスタブで、サインイン確認は切断と報告するため、この部分はまだ準備できていません。";
+"That name will not be accepted: 1–15 characters, start with a letter, letters and numbers with single spaces." = "この名前は受け付けられません: 1〜15文字、英字で始まり、英字と数字と1つの空白のみ。";
+"The name games will show for you. 1–15 characters, starts with a letter, letters and numbers only.\n\nPick it before you create the profile — the 360 core can create a profile but cannot rename one, so changing this later will not touch a profile that already exists." = "ゲームに表示される名前です。1〜15文字、英字で始まり、英字と数字のみ。\n\nプロフィールを作成する前に選んでください。360 コアはプロフィールを作成できますが名前は変更できないため、後から変更しても既存のプロフィールには反映されません。";
+"The netplay session server could not be reached. It may be down, or your connection may be blocking it." = "ネットプレイのセッションサーバーに到達できませんでした。サーバーが停止しているか、接続がブロックされている可能性があります。";
+"The netplay session server is reachable from this device." = "ネットプレイのセッションサーバーにこのデバイスから到達できます。";
+"What netplay will not be" = "ネットプレイが提供しないもの";
+"Xbox 360" = "Xbox 360";
+"Xbox 360 games expect somebody to be signed in. Setting up a gamer profile is what unlocks saves, achievements and the menus most games hide behind a sign-in prompt — Angry Birds Trilogy will not go past its title screen without one.\n\nNetplay is a separate thing. System Link over your own Wi-Fi works today; its current state is at the bottom of this page." = "Xbox 360 のゲームは誰かがサインインしていることを前提とします。ゲーマープロフィールを設定すると、セーブ、実績、そして多くのゲームがサインイン要求の背後に隠しているメニューが使えるようになります。Angry Birds Trilogy はプロフィールがないとタイトル画面から先へ進めません。\n\nネットプレイは別の話です。自分の Wi-Fi 経由の System Link は現在動作しています。現状はこのページの下部にあります。";
+"Xenra creates the profile and signs it into slot 0 automatically the first time you launch a 360 game. There is nothing to fill in — just start any game once and come back." = "Xenra は 360 ゲームを初めて起動したときにプロフィールを作成し、スロット 0 に自動でサインインします。入力するものはありません。ゲームを一度起動して戻ってくるだけです。";
+"Your network can host. UPnP works and your connection can be reached from outside (%@). Nothing here is stopping netplay." = "あなたのネットワークはホストできます。UPnP が動作し、外部から接続に到達できます (%@)。ここにネットプレイを妨げるものはありません。";
+"Your profile and netplay" = "プロフィールとネットプレイ";
+"Your router is fine, but your internet connection cannot be reached from outside. That is your provider sharing one address between many customers, not a setting you can change. Hosting will not work on this connection; joining someone else may." = "ルーターは問題ありませんが、インターネット接続に外部から到達できません。これはプロバイダーが1つのアドレスを多くの顧客で共有しているためで、変更できる設定ではありません。この接続ではホストできませんが、他の人への参加はできる場合があります。";

@@ -404,8 +404,14 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(
                        NSDocumentDirectory, NSUserDomainMask, YES)
                        .firstObject;
+  // The name chosen on the Netplay screen. A profile is created with it on the
+  // first launch and cannot be renamed afterwards, so this is only read when
+  // there is nothing to reuse.
+  NSString* gamertag =
+      [NSUserDefaults.standardUserDefaults stringForKey:@"xenra.gamertag"];
+  if (!XenraNetplayGamertagValid(gamertag)) gamertag = @"Xenra";
   NSString* xuid = XenraNetplayEnsureProfile(
-      [docs stringByAppendingPathComponent:@"content"], @"Xenra");
+      [docs stringByAppendingPathComponent:@"content"], gamertag);
   XenraLog([NSString stringWithFormat:@"360 profile: %@",
                                       xuid.length ? xuid : @"none"]);
   // The 360 core's own detection goes by chip and calls this one TXM-free. The script
