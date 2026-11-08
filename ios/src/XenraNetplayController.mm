@@ -360,8 +360,10 @@ static UIView* Hairline(void) {
   card.padding = 16;
 
   UILabel* heading = TextLabel(title, 15, UIFontWeightBold, XenraAccentText());
+  [heading setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                           forAxis:UILayoutConstraintAxisHorizontal];
   UIView* spacer = [[UIView alloc] init];
-  [spacer setContentHuggingPriority:UILayoutPriorityDefaultLow
+  [spacer setContentHuggingPriority:1
                             forAxis:UILayoutConstraintAxisHorizontal];
   NSMutableArray<UIView*>* header =
       [NSMutableArray arrayWithObjects:heading, spacer, nil];

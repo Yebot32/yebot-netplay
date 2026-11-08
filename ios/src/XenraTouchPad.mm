@@ -6,8 +6,6 @@
 #include <cmath>
 #include <vector>
 
-#import "XenraTheme.h"
-
 namespace {
 
 // XInput button bits, as X_INPUT_GAMEPAD_* in xenia/hid/input.h.
@@ -244,10 +242,11 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
         c.shape == Shape::kPill ? c.height / 2 : c.height * 0.24;
     path = [UIBezierPath bezierPathWithRoundedRect:box cornerRadius:corner];
   }
-  // Android fills a held control with its accent. The old pair of images only
+  // Android fills a held control with its colour. The old pair of images only
   // shifted a near-black fill from 59% to 85% opacity, which over a game reads
-  // as no response at all.
-  UIColor* accent = c.ring ?: XenraAccent();
+  // as no response at all. The pad green is the controller's own, not the UI
+  // skin's: the 360 accent ramp would read olive over a game.
+  UIColor* accent = c.ring ?: Rgb(95, 211, 95);
   [(pressed ? [accent colorWithAlphaComponent:0.92] : Rgb(18, 16, 10, 0.65))
       setFill];
   [path fill];
@@ -285,8 +284,8 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
       UIBezierPath* path = [UIBezierPath bezierPathWithOvalInRect:ring];
       [Rgb(18, 16, 10, active ? 0.8 : 0.59) setFill];
       [path fill];
-      [(active ? [XenraAccent() colorWithAlphaComponent:0.92]
-              : Rgb(255, 248, 232, 0.47)) setStroke];
+      [(active ? Rgb(95, 211, 95, 0.92) : Rgb(255, 248, 232, 0.47))
+          setStroke];
       path.lineWidth = r * 0.035;
       [path stroke];
     });
@@ -294,7 +293,7 @@ static CALayer* PadLayer(CGRect frame, UIImage* image, CGFloat scale) {
   const CGFloat knobR = r * 0.34;
   auto knob = [&](bool active) {
     return Picture(CGSizeMake(knobR * 2, knobR * 2), ^{
-      [(active ? XenraAccent() : Rgb(225, 215, 190, 0.6)) setFill];
+      [(active ? Rgb(95, 211, 95) : Rgb(225, 215, 190, 0.6)) setFill];
       [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, knobR * 2,
                                                          knobR * 2)] fill];
     });
