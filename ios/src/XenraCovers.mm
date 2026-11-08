@@ -697,28 +697,28 @@ NSArray<NSString*>* XenraCoverURLsForGame(XenraGameEntry* game) {
 
 void XenraCoversSelfTest(void (^check)(NSString* name, BOOL ok)) {
   // The title databases, on synthetic text first.
-  const match::TitleDb small(
+  const match::TitleDb sample(
       "# comment\n"
       "4D5309C9\tForza Horizon\t4D538A67 4d538a68\n"
       "4D530AA4\tForza Horizon 2\r\n"
       "545408A7\tGrand Theft Auto V\t\n"
       "nothex\tBroken Line\n"
       "41560001\t\t\n");
-  check(@"titles: lines parse, comments and junk do not", small.size() == 4);
+  check(@"titles: lines parse, comments and junk do not", sample.size() == 4);
   check(@"titles: a listed id is its own art",
-        small.ArtId(0x4D530AA4) == 0x4D530AA4);
+        sample.ArtId(0x4D530AA4) == 0x4D530AA4);
   check(@"titles: another release id finds the game, either case",
-        small.ArtId(0x4D538A67) == 0x4D5309C9 &&
-            small.ArtId(0x4D538A68) == 0x4D5309C9);
+        sample.ArtId(0x4D538A67) == 0x4D5309C9 &&
+            sample.ArtId(0x4D538A68) == 0x4D5309C9);
   check(@"titles: unknown and zero ids find nothing",
-        small.ArtId(0x12345678) == 0 && small.ArtId(0) == 0);
+        sample.ArtId(0x12345678) == 0 && sample.ArtId(0) == 0);
   check(@"titles: a tagged file name finds its game",
-        small.ArtIdForName("Forza Horizon (USA) (En,Fr,De)") == 0x4D5309C9);
+        sample.ArtIdForName("Forza Horizon (USA) (En,Fr,De)") == 0x4D5309C9);
   check(@"titles: an unnumbered title is not its sequel",
-        small.ArtIdForName("Forza Horizon") == 0x4D5309C9 &&
-            small.ArtIdForName("Forza Horizon 2 (Europe)") == 0x4D530AA4);
+        sample.ArtIdForName("Forza Horizon") == 0x4D5309C9 &&
+            sample.ArtIdForName("Forza Horizon 2 (Europe)") == 0x4D530AA4);
   check(@"titles: a roman numeral is a number",
-        small.ArtIdForName("Grand Theft Auto IV (USA)") == 0);
+        sample.ArtIdForName("Grand Theft Auto IV (USA)") == 0);
   check(@"titles: hex ids parse strictly",
         match::ParseHexId("4d5309c9") == 0x4D5309C9 &&
             match::ParseHexId("4D5309C") == 0 && match::ParseHexId("4D5309CZ") == 0);
