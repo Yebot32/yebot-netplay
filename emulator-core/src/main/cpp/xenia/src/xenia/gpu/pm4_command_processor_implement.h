@@ -959,6 +959,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   bool matched = false;
   // Sleep before the next re-check with wait_reg_mem_backoff.
   uint64_t backoff_us = 50;
+  uint32_t polls = 0;
   // Time spent with the condition unmet, for the GpuFrame stats.
   uint64_t unmet_begin_ns = 0;
   // debug.xendroid.wrm_log: the value seen on the first check.
@@ -1052,6 +1053,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
           // Short-circuited exit.
           return false;
         }
+      }
+      // Short polls, and long ones without guest_display_refresh_cap, would
+      // otherwise spin. After a brief spin, sleep between checks so the
+      // performance core is free for the thread that will satisfy the wait.
+      if (++polls > 64 &&
+          (wait < 0x100 || !cvars::guest_display_refresh_cap)) {
+        xe::threading::Sleep(std::chrono::microseconds(100));
       }
     }
   } while (!matched);

@@ -2,6 +2,7 @@
 #import "XenraStrings.h"
 
 #include <cstdio>
+#include <mach/mach.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
@@ -136,6 +137,19 @@ void XenraTourStart(UIWindow* window);
   });
 #endif
   return YES;
+}
+
+- (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
+  task_vm_info_data_t vm = {};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  double footprint_gb = 0.0;
+  if (task_info(mach_task_self(), TASK_VM_INFO,
+                reinterpret_cast<task_info_t>(&vm),
+                &count) == KERN_SUCCESS) {
+    footprint_gb = vm.phys_footprint / 1073741824.0;
+  }
+  XenraLog([NSString
+      stringWithFormat:@"memory warning: footprint %.2f GB", footprint_gb]);
 }
 
 @end

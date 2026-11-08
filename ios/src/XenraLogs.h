@@ -9,6 +9,13 @@
 
 #import <UIKit/UIKit.h>
 
+// NSUserDefaults key with the number of consecutive boots that never reached a
+// running frame. Reported in the Share Logs header for crash-loop diagnosis.
+extern NSString* const XenraBootAttemptsKey;
+
+// "nominal" / "fair" / "serious" / "critical", for the log and the report.
+NSString* XenraThermalStateName(NSProcessInfoThermalState state);
+
 // First thing at launch, before the core: shelves the last runs' logs and
 // installs the crash handlers. The core's fault handler chains to these, so
 // they have to be in place before it is.

@@ -452,6 +452,25 @@ class MetalCommandProcessor : public CommandProcessor {
   std::mutex spirv_uniforms_mutex_;
   dispatch_semaphore_t spirv_uniforms_available_semaphore_ = nullptr;
   bool spirv_uniforms_pool_initialized_ = false;
+  // Per-second Metal perf line: command-buffer GPU time (from completion
+  // handlers, shared so they never touch this object), uniform waits and
+  // inline translation time (command-processor thread only).
+  struct MetalGpuTimeCounters {
+    std::atomic<uint64_t> time_ns{0};
+    std::atomic<uint32_t> command_buffer_count{0};
+  };
+  std::shared_ptr<MetalGpuTimeCounters> perf_gpu_times_ =
+      std::make_shared<MetalGpuTimeCounters>();
+  uint64_t perf_interval_begin_ns_ = 0;
+  uint64_t perf_uniform_wait_ns_ = 0;
+  uint64_t perf_uniform_wait_count_ = 0;
+  uint64_t perf_inline_translation_ns_ = 0;
+  uint64_t perf_inline_translation_count_ = 0;
+  uint32_t perf_encoder_count_ = 0;
+  uint32_t perf_draw_count_ = 0;
+  uint32_t perf_ring_rollover_count_ = 0;
+  void LogMetalPerf();
+  void TrackCommandBufferGpuTime(MTL::CommandBuffer* command_buffer);
   std::vector<std::shared_ptr<SpirvArgumentBufferPage>> spirv_argbuf_pool_;
   std::vector<std::shared_ptr<SpirvArgumentBufferPage>>
       command_buffer_spirv_argbuf_pages_;

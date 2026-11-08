@@ -370,6 +370,18 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
 
 - (void)boot {
   [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingGameKey];
+  NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+  const NSInteger attempts = [defaults integerForKey:XenraBootAttemptsKey] + 1;
+  [defaults setInteger:attempts forKey:XenraBootAttemptsKey];
+  [defaults synchronize];
+  XenraLog([NSString stringWithFormat:@"boot attempt %ld", (long)attempts]);
+  // Surviving ten seconds means this was not a boot crash loop; clear the
+  // count. A crash before this leaves it for the next launch and the report.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC),
+                 dispatch_get_main_queue(), ^{
+                   [NSUserDefaults.standardUserDefaults
+                       removeObjectForKey:XenraBootAttemptsKey];
+                 });
   cancel_.hidden = YES;
   pad_.hidden = !padWanted_;
   if (og_) {
@@ -444,6 +456,16 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
                  dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                    if (!weak) return;
+                   static NSProcessInfoThermalState last_thermal =
+                       NSProcessInfoThermalStateNominal;
+                   const NSProcessInfoThermalState thermal =
+                       NSProcessInfo.processInfo.thermalState;
+                   if (thermal != last_thermal) {
+                     last_thermal = thermal;
+                     XenraLog([NSString
+                         stringWithFormat:@"thermal: %@",
+                                          XenraThermalStateName(thermal)]);
+                   }
                    XenraSamplerLoad();
                    // Every other time, a profile of the emulated CPU as well.
                    static int round;

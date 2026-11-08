@@ -28,6 +28,22 @@
 #define XENRA_BUILD_ID "unknown"
 #endif
 
+NSString* const XenraBootAttemptsKey = @"xenra.bootAttempts";
+
+NSString* XenraThermalStateName(NSProcessInfoThermalState state) {
+  switch (state) {
+    case NSProcessInfoThermalStateNominal:
+      return @"nominal";
+    case NSProcessInfoThermalStateFair:
+      return @"fair";
+    case NSProcessInfoThermalStateSerious:
+      return @"serious";
+    case NSProcessInfoThermalStateCritical:
+      return @"critical";
+  }
+  return @"unknown";
+}
+
 // Runs of each log kept. A crash is usually followed by a launch or two
 // before anyone thinks of sharing, and those must not push it out.
 static const int kKeptRuns = 3;
@@ -331,6 +347,12 @@ static NSString* Summary(void) {
                        (vm.phys_footprint + vm.limit_bytes_remaining) / gb,
                        vm.phys_footprint / gb, vm.limit_bytes_remaining / gb];
   }
+  [text appendFormat:@"Thermal: %@\n",
+                     XenraThermalStateName(
+                         NSProcessInfo.processInfo.thermalState)];
+  [text appendFormat:@"Boot attempts: %ld\n",
+                     (long)[NSUserDefaults.standardUserDefaults
+                         integerForKey:XenraBootAttemptsKey]];
   int lse = 0;
   size_t lse_size = sizeof(lse);
   sysctlbyname("hw.optional.armv8_1_atomics", &lse, &lse_size, nullptr, 0);

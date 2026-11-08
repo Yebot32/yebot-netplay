@@ -12,6 +12,9 @@
 #include "xenia/gpu/metal/msl_bindings.h"
 
 #include <dispatch/dispatch.h>
+#if XE_PLATFORM_IOS
+#include <pthread.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -830,6 +833,11 @@ MTL::RenderPipelineState* MetalCommandProcessor::CreateMslPipelineState(
 }
 
 void MetalCommandProcessor::MslShaderCompileThread(size_t thread_index) {
+#if XE_PLATFORM_IOS
+  // Background work at utility QoS: these compete with the guest JIT and the
+  // command processor, which need the performance cores.
+  pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
   while (true) {
     MslShaderCompileRequest shader_request;
     MslPipelineCompileRequest pipeline_request;
@@ -1493,6 +1501,7 @@ void MetalCommandProcessor::PrepareForWait() {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
     ScheduleSpirvArgumentBufferRelease(current_command_buffer_);
+    TrackCommandBufferGpuTime(current_command_buffer_);
     current_command_buffer_->commit();
     if (wait_shared_event_) {
       wait_shared_event_->waitUntilSignaledValue(
@@ -1573,6 +1582,7 @@ void MetalCommandProcessor::ShutdownContext() {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
     ScheduleSpirvArgumentBufferRelease(current_command_buffer_);
+    TrackCommandBufferGpuTime(current_command_buffer_);
     current_command_buffer_->commit();
     if (wait_shared_event_) {
       wait_shared_event_->waitUntilSignaledValue(
@@ -1729,10 +1739,80 @@ void MetalCommandProcessor::InitializeShaderStorage(
   }
 }
 
+static uint64_t MetalPerfNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+void MetalCommandProcessor::TrackCommandBufferGpuTime(
+    MTL::CommandBuffer* command_buffer) {
+  if (!command_buffer) {
+    return;
+  }
+  // The handler captures the counters, not this, so it stays safe if the
+  // command processor is torn down while the GPU is still finishing.
+  auto counters = perf_gpu_times_;
+  command_buffer->addCompletedHandler([counters](MTL::CommandBuffer* completed) {
+    counters->command_buffer_count.fetch_add(1, std::memory_order_relaxed);
+    const CFTimeInterval begin = completed->GPUStartTime();
+    const CFTimeInterval end = completed->GPUEndTime();
+    if (end > begin) {
+      counters->time_ns.fetch_add(uint64_t((end - begin) * 1e9),
+                                  std::memory_order_relaxed);
+    }
+  });
+}
+
+void MetalCommandProcessor::LogMetalPerf() {
+  const uint64_t now_ns = MetalPerfNowNs();
+  if (!perf_interval_begin_ns_) {
+    perf_interval_begin_ns_ = now_ns;
+    return;
+  }
+  const double seconds = double(now_ns - perf_interval_begin_ns_) / 1e9;
+  if (seconds < 1.0) {
+    return;
+  }
+  perf_interval_begin_ns_ = now_ns;
+  const uint64_t gpu_time_ns =
+      perf_gpu_times_->time_ns.exchange(0, std::memory_order_relaxed);
+  const uint32_t gpu_command_buffers =
+      perf_gpu_times_->command_buffer_count.exchange(0,
+                                                     std::memory_order_relaxed);
+  size_t pool_size = 0;
+  size_t available_size = 0;
+  {
+    std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+    pool_size = spirv_uniforms_pool_.size();
+    available_size = spirv_uniforms_available_.size();
+  }
+  XELOGI(
+      "Metal perf: {:.1f}s | GPU {:.1f}ms over {} cb ({:.2f}ms/cb) | "
+      "encoders {} draws {} | uniform wait {:.2f}ms x{} in_use {}/{} ring {} "
+      "rollovers {} | inline translation {:.2f}ms x{}",
+      seconds, double(gpu_time_ns) / 1e6, gpu_command_buffers,
+      gpu_command_buffers ? double(gpu_time_ns) / 1e6 / gpu_command_buffers
+                          : 0.0,
+      perf_encoder_count_, perf_draw_count_, double(perf_uniform_wait_ns_) / 1e6,
+      perf_uniform_wait_count_, pool_size - available_size, pool_size,
+      draw_ring_count_, perf_ring_rollover_count_,
+      double(perf_inline_translation_ns_) / 1e6,
+      perf_inline_translation_count_);
+  perf_uniform_wait_ns_ = 0;
+  perf_uniform_wait_count_ = 0;
+  perf_inline_translation_ns_ = 0;
+  perf_inline_translation_count_ = 0;
+  perf_encoder_count_ = 0;
+  perf_draw_count_ = 0;
+  perf_ring_rollover_count_ = 0;
+}
+
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
   spirv_translation_ms_this_frame_ = 0.0;
+  LogMetalPerf();
   ProcessCompletedSubmissions();
   saw_swap_ = true;
   last_swap_ptr_ = frontbuffer_ptr;
@@ -1748,6 +1828,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
     ScheduleSpirvArgumentBufferRelease(current_command_buffer_);
+    TrackCommandBufferGpuTime(current_command_buffer_);
     current_command_buffer_->commit();
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
@@ -2197,10 +2278,13 @@ bool MetalCommandProcessor::IssueDrawMsl(
     const auto begin = std::chrono::steady_clock::now();
     const bool translated =
         spirv_shader_translator_->TranslateAnalyzedShader(*translation);
-    spirv_translation_ms_this_frame_ +=
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - begin)
-            .count();
+    const uint64_t elapsed_ns =
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - begin)
+                     .count());
+    spirv_translation_ms_this_frame_ += double(elapsed_ns) / 1e6;
+    perf_inline_translation_ns_ += elapsed_ns;
+    ++perf_inline_translation_count_;
     return translated;
   };
   auto* vertex_translation = static_cast<MslShader::MslTranslation*>(
@@ -3500,6 +3584,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
     if (primitive_processing_result.index_buffer_type ==
         PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
       // Non-indexed draw.
+      ++perf_draw_count_;
       current_render_encoder_->drawPrimitives(
           mtl_primitive, NS::UInteger(0),
           NS::UInteger(primitive_processing_result.host_draw_vertex_count));
@@ -3554,6 +3639,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
         return false;
       }
       UseRenderEncoderResource(index_buffer, MTL::ResourceUsageRead);
+      ++perf_draw_count_;
       current_render_encoder_->drawIndexedPrimitives(
           mtl_primitive, NS::UInteger(draw_index_count), index_type,
           index_buffer, NS::UInteger(index_offset));
@@ -4006,6 +4092,7 @@ void MetalCommandProcessor::BeginCommandBuffer() {
       return;
     }
     current_render_encoder_->retain();
+    ++perf_encoder_count_;
     current_render_encoder_->setLabel(
         NS::String::string("XeniaRenderEncoder", NS::UTF8StringEncoding));
     ff_blend_factor_valid_ = false;
@@ -4055,12 +4142,13 @@ bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
   // Keep a slightly larger initial pool on iOS to reduce early-frame pressure.
 #if XE_PLATFORM_IOS
   constexpr size_t kUniformsBuffersInFlightInitial = 6;
-  // iOS commonly needs extra headroom to avoid command-buffer churn when
-  // submissions retire later than the CPU draw cadence.
-  constexpr size_t kUniformsBuffersInFlightMax = 24;
+  // 24 was pinned at the cap for a whole GTA IV session with thousands of
+  // waits. 64 buffers is ~25 MB and is an experiment measured by the
+  // per-second "Metal perf" line; revert if latency or memory worsens.
+  constexpr size_t kUniformsBuffersInFlightMax = 64;
 #else
   constexpr size_t kUniformsBuffersInFlightInitial = 4;
-  constexpr size_t kUniformsBuffersInFlightMax = 12;
+  constexpr size_t kUniformsBuffersInFlightMax = 32;
 #endif
 
   if (!spirv_uniforms_pool_initialized_) {
@@ -4225,8 +4313,11 @@ bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
       } else {
         ++suppressed_wait_logs;
       }
+      const uint64_t wait_begin_ns = MetalPerfNowNs();
       dispatch_semaphore_wait(spirv_uniforms_available_semaphore_,
                               DISPATCH_TIME_FOREVER);
+      perf_uniform_wait_ns_ += MetalPerfNowNs() - wait_begin_ns;
+      ++perf_uniform_wait_count_;
     }
   }
 
@@ -4341,6 +4432,7 @@ bool MetalCommandProcessor::EnsureSpirvUniformBufferCapacity() {
     XELOGW(
         "SPIRV-Cross: uniforms ring exhausted; rotating Metal command buffer");
   }
+  ++perf_ring_rollover_count_;
 
   EndCommandBuffer();
   BeginCommandBuffer();
@@ -4517,6 +4609,7 @@ void MetalCommandProcessor::EndCommandBuffer() {
       ScheduleSpirvUniformBufferRelease(current_command_buffer_);
     }
     ScheduleSpirvArgumentBufferRelease(current_command_buffer_);
+    TrackCommandBufferGpuTime(current_command_buffer_);
     current_command_buffer_->commit();
     current_command_buffer_->release();
     current_command_buffer_ = nullptr;
