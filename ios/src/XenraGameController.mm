@@ -463,7 +463,8 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   __weak XenraGameController* weak = self;
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
                  dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                   if (!weak || weak->exited_) return;
+                   XenraGameController* strong = weak;
+                   if (!strong || strong->exited_) return;
                    static NSProcessInfoThermalState last_thermal =
                        NSProcessInfoThermalStateNominal;
                    const NSProcessInfoThermalState thermal =
