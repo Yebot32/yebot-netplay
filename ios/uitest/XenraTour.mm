@@ -821,8 +821,15 @@ static void ConsoleTour(NSString* console, NSString* online) {
 
   Tap(online);
   Both([NSString stringWithFormat:@"%@-online", console]);
-  Tap(@"OK");
-  Pause();
+  if ([online isEqualToString:@"Netplay"]) {
+    // The 360 blade opens a screen now, not a notice sheet. Go back to the
+    // dashboard so the library steps below run where they expect to.
+    Pop();
+    Pause();
+  } else {
+    Tap(@"OK");
+    Pause();
+  }
 
   LongSheetTour(console);
   GalleryTour(console);
