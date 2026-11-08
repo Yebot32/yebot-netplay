@@ -358,3 +358,11 @@
 "How much memory iOS gives Xenra, and how to raise it." = "Wie viel Speicher iOS Xenra gibt und wie du ihn erhöhst.";
 "Open GetMoreRam" = "GetMoreRam öffnen";
 "iOS lets Xenra use %.1f GB. Xbox 360 games need as much as they can get.\n\nTo raise it: run GetMoreRam, sign in with the Apple ID you use in Sideloadly, turn on Increased Memory Limit for Xenra, then install Xenra again with Sideloadly. Xenra already asks for the extra memory; iOS gives it once your Apple ID allows it." = "iOS erlaubt Xenra %.1f GB. Xbox-360-Spiele brauchen so viel wie möglich.\n\nSo erhöhst du es: Starte GetMoreRam, melde dich mit der Apple-ID an, die du in Sideloadly nutzt, aktiviere „Increased Memory Limit“ für Xenra und installiere Xenra dann erneut mit Sideloadly. Xenra fordert den zusätzlichen Speicher bereits an; iOS gewährt ihn, sobald deine Apple-ID es erlaubt.";
+
+"Play" = "Spielen";
+
+"Exit Game" = "Spiel beenden";
+
+"Reopen Xenra" = "Xenra neu öffnen";
+
+"iOS can only start one game per launch. Quit and reopen Xenra to play another game." = "iOS kann pro Start nur ein Spiel ausführen. Beende und öffne Xenra neu, um ein anderes Spiel zu spielen.";

@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <initializer_list>
 
+#import "XenraAmbient.h"
 #import "XenraLogs.h"
 #import "XenraMetalView.h"
 #import "XenraPadNav.h"
@@ -23,6 +24,11 @@
 // Radial, and rescaled, so a stick still reaches full travel and starts from nothing
 // just past the edge of the zone.
 static NSString* const kPendingGameKey = @"xenra.pendingGame";
+
+// One core per launch: after Exit Game the process stays alive for the library
+// and settings, but a second boot would land on a torn-down core.
+static BOOL g_core_exited = NO;
+BOOL XenraCoreExited(void) { return g_core_exited; }
 // Long enough to finish in StikDebug, short enough that a later launch of the app
 // does not start a game out of nowhere.
 static const NSTimeInterval kPendingGameLife = 600;
@@ -109,6 +115,8 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   UIButton* cancel_;
   NSTimer* menuTimer_;
   NSTimer* jitTimer_;
+  // Set by Exit Game; stops the background sampler loop.
+  BOOL exited_;
   // The latest state from each source; the guest sees them merged.
   int padButtons_;
   short padAxes_[4];
@@ -455,7 +463,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   __weak XenraGameController* weak = self;
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
                  dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                   if (!weak) return;
+                   if (!weak || weak.exited_) return;
                    static NSProcessInfoThermalState last_thermal =
                        NSProcessInfoThermalStateNominal;
                    const NSProcessInfoThermalState thermal =
@@ -637,8 +645,13 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                                          action:^{
                                            XenraXemuReset();
                                          }];
-  // One title per process, so leaving a game ends the app; the same is true
-  // of Quit, and Android's Exit to Game Library has no iOS counterpart yet.
+  // One core per process: Exit Game tears it down and returns to the library,
+  // and a later launch explains that the app has to be reopened. Quit App is
+  // still the way to end the process.
+  XenraBladeItem* exitGame = [XenraBladeItem title:XS(@"Exit Game")
+                                            action:^{
+                                              [weak exitToLibrary];
+                                            }];
   XenraBladeItem* quit = [XenraBladeItem title:XS(@"Quit App")
                                         action:^{
                                           [weak quit];
@@ -647,9 +660,40 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   [XenraBladeSheet showIn:self.view
                     title:XS(@"Game Menu")
                   message:nil
-                    items:og_ ? @[ resume, touch, reset, share, quit ]
-                              : @[ resume, touch, share, quit ]];
+                    items:og_ ? @[ resume, touch, reset, share, exitGame, quit ]
+                              : @[ resume, touch, share, exitGame, quit ]];
   XenraPadNavScreenChanged();
+}
+
+- (void)exitToLibrary {
+  if (exited_) return;
+  exited_ = YES;
+  g_core_exited = YES;
+  XenraLogsEndSession();
+  [link_ invalidate];
+  link_ = nil;
+  [sdlTimer_ invalidate];
+  sdlTimer_ = nil;
+  [menuTimer_ invalidate];
+  menuTimer_ = nil;
+  [jitTimer_ invalidate];
+  jitTimer_ = nil;
+  [UIApplication.sharedApplication setIdleTimerDisabled:NO];
+  [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingGameKey];
+  if (og_) {
+    // xemu's shutdown has no join; give it the same three seconds Quit App
+    // gives it, then leave the game screen.
+    XenraXemuShutdown();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+                     [self.navigationController popViewControllerAnimated:YES];
+                     XenraAmbientStart();
+                   });
+    return;
+  }
+  xe_ios_shutdown();
+  [self.navigationController popViewControllerAnimated:YES];
+  XenraAmbientStart();
 }
 
 - (void)quit {

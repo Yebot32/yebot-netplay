@@ -1590,6 +1590,14 @@ static BOOL g_installing;
 }
 
 - (void)launch:(XenraGameEntry*)game {
+  if (XenraCoreExited()) {
+    [XenraBladeSheet showIn:self.view
+                      title:XS(@"Reopen Xenra")
+                    message:XS(@"iOS can only start one game per launch. Quit and "
+                               "reopen Xenra to play another game.")
+                      items:@[ [XenraBladeItem title:XS(@"OK") action:nil] ]];
+    return;
+  }
   [self.navigationController
       pushViewController:[[XenraGameController alloc] initWithPath:game.path
                                                               name:game.name]
@@ -1651,6 +1659,10 @@ static BOOL g_installing;
 - (void)showActions:(XenraGameEntry*)game {
   __weak XenraLibraryController* weak = self;
   NSMutableArray<XenraBladeItem*>* items = [NSMutableArray array];
+  [items addObject:[XenraBladeItem title:XS(@"Play")
+                                  action:^{
+                                    [weak launch:game];
+                                  }]];
   [items addObject:[XenraBladeItem
                        title:XS(@"Per-Game Settings")
                       action:^{
@@ -1671,6 +1683,10 @@ static BOOL g_installing;
                                       [weak removeCoverFor:game];
                                     }]];
   }
+  [items addObject:[XenraBladeItem title:XS(@"About Xenra")
+                                  action:^{
+                                    XenraShowAbout(weak.view);
+                                  }]];
   XenraBladeItem* remove = [XenraBladeItem title:XS(@"Delete Game")
                                           action:^{
                                             [weak confirmDelete:game];

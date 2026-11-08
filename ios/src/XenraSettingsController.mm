@@ -337,6 +337,10 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
 void XenraShowAbout(UIView* host) {
   NSString* version =
       NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"";
+  NSString* build =
+      NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"";
+  NSString* version_with_build =
+      [NSString stringWithFormat:@"%@ (%@)", version, build];
   NSMutableArray* items = [NSMutableArray array];
   NSArray* links = @[
     @[ @"Discord", @"https://discord.gg/U5kytJ4dub" ],
@@ -344,6 +348,7 @@ void XenraShowAbout(UIView* host) {
     @[ @"GitHub", @"https://github.com/dev-Ali2008/xanite-original-android/tree/main" ],
     @[ @"YouTube", @"https://youtube.com/@emulator_xaniteog?si=v1ai9Gay2IsmII4w" ],
     @[ XS(@"Patreon (Donate)"), @"https://www.patreon.com/cw/Xanite/membership" ],
+    @[ @"PayPal", @"https://www.paypal.com/paypalme/Yebot32" ],
   ];
   __weak UIView* weak = host;
   for (NSArray* link in links) {
@@ -367,7 +372,7 @@ void XenraShowAbout(UIView* host) {
                                         XS(@"Version %@\n\nDeveloper and owner: yebot32\n"
                                          "Founder and previous owner: Ali Alsaadi\n\n"
                                          "Join the community:"),
-                                        version]
+                                        version_with_build]
                     items:items];
 }
 

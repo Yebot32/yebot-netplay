@@ -203,12 +203,19 @@ static XenraSettingSection* TouchSection(void) {
 }
 
 static XenraSettingSection* AppSection(void) {
+  NSString* version =
+      NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"";
+  NSString* build =
+      NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"";
   return Section(XS(@"App"), @[
     Action(@"cache.clear", XS(@"Clear shader cache"),
            XS(@"Games compile their shaders again on next launch.")),
     Action(@"setup.rerun", XS(@"Setup Wizard"), nil),
     Action(@"privacy", XS(@"Privacy policy"), nil),
-    Action(@"about", XS(@"About Xenra"), nil),
+    // The version is the row's detail so it is visible without opening the
+    // sheet; the sheet carries the credits and every community link.
+    Action(@"about", XS(@"About Xenra"),
+           [NSString stringWithFormat:@"Version %@ (%@)", version, build]),
   ]);
 }
 
@@ -491,6 +498,7 @@ static NSArray* Tabs360(void) {
     ]),
     Tab(XS(@"Input"), @[ TouchSection() ]),
     Tab(XS(@"Maintenance"), @[
+      AppSection(),
       Section(XS(@"Maintenance"), @[ ShowFpsRow(), ShareLogsRow() ]),
       Section(XS(@"Logging"), @[
         Cvar(@"log_level",
@@ -499,7 +507,6 @@ static NSArray* Tabs360(void) {
                      @[ @"0", @"1", @"2", @"3" ], @"2")),
         Cvar(@"flush_log", Toggle(@"x360.flush_log", XS(@"Flush log"), nil, YES)),
       ]),
-      AppSection(),
     ]),
   ];
 }
@@ -623,13 +630,13 @@ static NSArray* TabsOG(void) {
       ]),
     ]),
     Tab(XS(@"Maintenance"), @[
+      AppSection(),
       Section(XS(@"Maintenance"), @[
         ShowFpsRow(),
         Toggle(@"core.trace_detail", XS(@"Detailed core logs"),
                XS(@"For diagnosing boot problems. Slows the game a little."), NO),
         ShareLogsRow(),
       ]),
-      AppSection(),
     ]),
   ];
 }

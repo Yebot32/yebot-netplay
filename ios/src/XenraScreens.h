@@ -61,3 +61,7 @@ void XenraApplyOrientation(UIViewController* controller);
 void XenraShowPrivacyPolicy(UIView* host);
 // dialog_blade_about: the version, who made it, and the community links.
 void XenraShowAbout(UIView* host);
+// True once Exit Game has stopped the one core this launch can start. The
+// library refuses another launch with an explanation instead of booting into a
+// null core.
+BOOL XenraCoreExited(void);
