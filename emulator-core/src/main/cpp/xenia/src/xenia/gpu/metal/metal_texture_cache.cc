@@ -3248,6 +3248,33 @@ std::unique_ptr<TextureCache::Texture> MetalTextureCache::CreateTexture(
     return nullptr;
   }
 
+  // Diagnostic for the Halo 3 font: alpha-only and 8bpp textures are the ones
+  // a glyph atlas can use, and the menu text currently renders as solid blocks.
+  // Once per distinct texture, at info level, so a device log names the format
+  // and size without a second build. Remove when the font is correct.
+  if (key.format == xenos::TextureFormat::k_8 ||
+      key.format == xenos::TextureFormat::k_8_A ||
+      key.format == xenos::TextureFormat::k_8_B ||
+      key.format == xenos::TextureFormat::k_DXT3A ||
+      key.format == xenos::TextureFormat::k_DXT5A) {
+    static std::mutex font_log_mutex;
+    static std::unordered_set<uint64_t> font_logged;
+    const uint64_t font_key =
+        (uint64_t(uint32_t(key.format)) << 56) |
+        (uint64_t(uint32_t(key.dimension)) << 52) |
+        (uint64_t(key.tiled) << 51) |
+        (uint64_t(key.GetWidth() & 0x1FFF) << 38) |
+        (uint64_t(key.GetHeight() & 0x1FFF) << 25) |
+        uint64_t(key.base_page & 0x1FFFFFF);
+    std::lock_guard<std::mutex> lock(font_log_mutex);
+    if (font_logged.insert(font_key).second) {
+      XELOGI("MetalTexture: {} {}x{} dim={} tiled={} base=0x{:08X} pitch={}",
+             FormatInfo::GetName(key.format), key.GetWidth(), key.GetHeight(),
+             uint32_t(key.dimension), key.tiled, key.base_page << 12,
+             key.pitch << 5);
+    }
+  }
+
   MTL::TextureSwizzleChannels metal_swizzle =
       ToMetalTextureSwizzle(xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA);
 

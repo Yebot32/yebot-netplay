@@ -63,6 +63,9 @@
 DEFINE_string(apu, "nop", "Audio system. Use: [nop]", "APU");
 DEFINE_string(gpu, "metal", "Graphics system. Use: [metal, null]", "GPU");
 DECLARE_path(log_file);
+// Reported after the per-game config is applied, so a log tells whether a
+// game quirk reached the shader translator.
+DECLARE_bool(spirv_texture_implicit_lod);
 
 DEFINE_bool(apu_aaudio_log_stats, false, "Log AAudio stats (Android only)",
             "APU");
@@ -470,7 +473,8 @@ class IosEmuApp {
     // global config only - the Halo 3 font quirk never applied at all.
     const uint32_t game_title_id =
         config::LoadGameConfigForFile(launch_path_);
-    XELOGI("iOS: game config loaded for title {:08X}", game_title_id);
+    XELOGI("iOS: game config loaded for title {:08X}, implicit_lod={}",
+           game_title_id, cvars::spirv_texture_implicit_lod);
     if (XFAILED(result = emu_->SetupSubsystems())) {
       g_status.store(-2, std::memory_order_relaxed);
       g_status_detail = "subsystem setup failed";
