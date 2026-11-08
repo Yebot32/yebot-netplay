@@ -145,7 +145,8 @@ thread_t FindThread(const char* wanted) {
 }  // namespace
 
 void XenraSamplerProfile(double seconds) {
-  // xemu names it so with -name debug-threads=on; single-threaded TCG.
+  // xemu names it so with -name debug-threads=on; single-threaded TCG. The 360
+  // core has no such thread, so there it is the busiest one.
   const thread_t target = FindThread("ALL CPUs/TCG");
   if (!target) return;
   constexpr int kMax = 8192;
@@ -185,6 +186,7 @@ void XenraSamplerProfile(double seconds) {
 
   // Resolved after sampling: dladdr is not safe while the thread is stopped.
   NSMutableDictionary<NSString*, NSNumber*>* counts = [NSMutableDictionary dictionary];
+  NSMutableDictionary<NSNumber*, NSNumber*>* raw = [NSMutableDictionary dictionary];
   for (int i = 0; i < taken; i++) {
     Dl_info info;
     NSString* key;
@@ -206,6 +208,14 @@ void XenraSamplerProfile(double seconds) {
     } else {
       key = @"(generated code)";
     }
+    // dladdr only knows exported names, so inside the app binary (where the 360
+    // core is linked) it would name the wrong function. Keep the raw offset; the
+    // build's symbols.txt artifact turns it into a name.
+    if (dladdr(reinterpret_cast<void*>(pcs[i]), &info) && info.dli_fname &&
+        strstr(info.dli_fname, "/xenra-ios") && !strstr(info.dli_fname, ".dylib")) {
+      const uint64_t offset = pcs[i] - uint64_t(info.dli_fbase);
+      raw[@(offset)] = @(raw[@(offset)].intValue + 1);
+    }
     counts[key] = @(counts[key].intValue + 1);
   }
   NSArray<NSString*>* order = [counts keysSortedByValueUsingComparator:^(id a, id b) {
@@ -216,6 +226,17 @@ void XenraSamplerProfile(double seconds) {
   for (NSUInteger i = 0; i < order.count && i < 30; i++) {
     [text appendFormat:@"  %5.1f%% %@\n", counts[order[i]].intValue * 100.0 / taken,
                        order[i]];
+  }
+  if (raw.count) {
+    // Offsets from the app binary's Mach-O header; add 0x100000000 for nm.
+    [text appendString:@"  app offsets (hex:count):"];
+    NSArray<NSNumber*>* hot = [raw keysSortedByValueUsingComparator:^(id a, id b) {
+      return [b compare:a];
+    }];
+    for (NSUInteger i = 0; i < hot.count && i < 400; i++) {
+      [text appendFormat:@" %llx:%@", hot[i].unsignedLongLongValue, raw[hot[i]]];
+    }
+    [text appendString:@"\n"];
   }
   XenraLog(text);
 }

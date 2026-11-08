@@ -393,6 +393,7 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
     return;
   }
   booted_ = YES;
+  [self watchLoad];
   link_ = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick)];
   link_.preferredFramesPerSecond = 60;
   [link_ addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -494,6 +495,10 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   xe_ios_pump();
   if (++hudTicks_ % 60 == 0 && xe_ios_fps() > 0) {
     hud_.text = [NSString stringWithFormat:@"%.0f FPS", xe_ios_fps()];
+    // Into the log as well, every 5 s, the way the original Xbox core's line is.
+    if (hudTicks_ % 300 == 0) {
+      XenraLog([NSString stringWithFormat:@"360 FPS %.1f", xe_ios_fps()]);
+    }
   }
   [self pollController];
   const int state = xe_ios_status();

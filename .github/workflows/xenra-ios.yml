@@ -385,6 +385,19 @@ jobs:
         path: ${{ steps.package.outputs.ipa }}
         if-no-files-found: error
 
+    # The app's symbol table, for turning the profiler's raw offsets into names:
+    # on the device dladdr only knows exported symbols.
+    - name: Symbol map
+      run: |
+        APP=$(find build-ios -maxdepth 5 -name 'xenra-ios.app' -type d | head -n 1)
+        nm -n "$APP/xenra-ios" | xcrun swift-demangle --simplified > symbols.txt || nm -n "$APP/xenra-ios" > symbols.txt
+        wc -l symbols.txt
+    - uses: actions/upload-artifact@v4
+      with:
+        name: xenra-ios-symbols-${{ steps.git.outputs.hash }}
+        path: symbols.txt
+        retention-days: 90
+
     ##################################################################
     # Sign (OPTIONAL)
     ##################################################################
