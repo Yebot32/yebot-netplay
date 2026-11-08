@@ -4142,13 +4142,13 @@ bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
   // Keep a slightly larger initial pool on iOS to reduce early-frame pressure.
 #if XE_PLATFORM_IOS
   constexpr size_t kUniformsBuffersInFlightInitial = 6;
-  // 24 was pinned at the cap for a whole GTA IV session with thousands of
-  // waits. 64 buffers is ~25 MB and is an experiment measured by the
-  // per-second "Metal perf" line; revert if latency or memory worsens.
-  constexpr size_t kUniformsBuffersInFlightMax = 64;
+  // 24 is the measured-good cap. 64 was tried on 2026-11-08: it removed the
+  // GPU back-pressure that kept the limiter at 30, the limiter climbed to 60,
+  // and heavy scenes collapsed to 11-20 fps with the GPU still ~25% busy.
+  constexpr size_t kUniformsBuffersInFlightMax = 24;
 #else
   constexpr size_t kUniformsBuffersInFlightInitial = 4;
-  constexpr size_t kUniformsBuffersInFlightMax = 32;
+  constexpr size_t kUniformsBuffersInFlightMax = 12;
 #endif
 
   if (!spirv_uniforms_pool_initialized_) {
