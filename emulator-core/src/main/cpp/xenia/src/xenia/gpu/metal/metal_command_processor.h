@@ -311,6 +311,9 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // SPIRV-Cross (MSL) path - shader translator and cache.
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
+  // Guest shader translation done on the command processor in this frame,
+  // spread so a burst of first-seen shaders cannot spike one frame.
+  double spirv_translation_ms_this_frame_ = 0.0;
   std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
   // Includes user clip planes and tessellation constants.
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};

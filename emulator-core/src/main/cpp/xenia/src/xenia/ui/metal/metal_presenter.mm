@@ -17,6 +17,7 @@
 #include "third_party/metal-cpp/Metal/Metal.hpp"
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/frame_stats.h"
 #include "xenia/base/logging.h"
 #include "xenia/gpu/shaders/bytecode/metal/apply_gamma_pwl_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/apply_gamma_table_cs.h"
@@ -663,6 +664,10 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
 
   [command_buffer presentDrawable:drawable];
   [command_buffer commit];
+  // The HUD and the 5-second "360 FPS" line read this; before, only the
+  // Vulkan presenter recorded presents, so on iOS it stayed 0 and never
+  // logged.
+  xe::RecordHostPresent(false);
 
   return PaintResult::kPresented;
 }

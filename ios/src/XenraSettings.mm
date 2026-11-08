@@ -850,6 +850,10 @@ static NSMutableArray<NSURL*>* g_held;
       }
     }
   }
+  // One "GpuFrame:" line a second with exec/draw/swap/stall, so the next log
+  // says whether a slow frame was the guest CPU, the command processor or a
+  // wait for the GPU.
+  xe_ios_set_cvar("log_gpu_frame_time_breakdown", "true");
   XenraLog([NSString stringWithFormat:@"cvars away from default: %@",
                                       changed.count
                                           ? [changed componentsJoinedByString:@" "]

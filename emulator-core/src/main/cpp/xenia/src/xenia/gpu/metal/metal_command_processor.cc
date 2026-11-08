@@ -1732,6 +1732,7 @@ void MetalCommandProcessor::InitializeShaderStorage(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  spirv_translation_ms_this_frame_ = 0.0;
   ProcessCompletedSubmissions();
   saw_swap_ = true;
   last_swap_ptr_ = frontbuffer_ptr;
@@ -2170,12 +2171,47 @@ bool MetalCommandProcessor::IssueDrawMsl(
 #else
       false;
 #endif
+  auto log_pending_compile = [&](MslShader::MslTranslation* translation,
+                                 const char* stage_tag) {
+    static auto last_pending_log = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_pending_log < std::chrono::seconds(1)) {
+      return;
+    }
+    last_pending_log = now;
+    XELOGI(
+        "SPIRV-Cross: Skipping draw - {} compile pending "
+        "(shader={:016X}, mod={:016X})",
+        stage_tag, translation->shader().ucode_data_hash(),
+        translation->modification());
+  };
+  // Translating a first-seen shader happens here, on the command processor.
+  // A burst of them measured as a 135 ms frame, so only a small amount is
+  // done per frame and a draw needing more waits for the next one.
+  constexpr double kSpirvTranslationBudgetMsPerFrame = 5.0;
+  auto translation_budget_spent = [&]() {
+    return spirv_translation_ms_this_frame_ >=
+           kSpirvTranslationBudgetMsPerFrame;
+  };
+  auto translate_inline = [&](MslShader::MslTranslation* translation) {
+    const auto begin = std::chrono::steady_clock::now();
+    const bool translated =
+        spirv_shader_translator_->TranslateAnalyzedShader(*translation);
+    spirv_translation_ms_this_frame_ +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - begin)
+            .count();
+    return translated;
+  };
   auto* vertex_translation = static_cast<MslShader::MslTranslation*>(
       msl_vertex_shader->GetOrCreateTranslation(
           vertex_shader_modification.value));
   if (!vertex_translation->is_translated()) {
-    if (!spirv_shader_translator_->TranslateAnalyzedShader(
-            *vertex_translation)) {
+    if (translation_budget_spent()) {
+      log_pending_compile(vertex_translation, "vertex translation");
+      return true;
+    }
+    if (!translate_inline(vertex_translation)) {
       XELOGE("SPIRV-Cross: Failed to translate vertex shader to SPIR-V");
       return false;
     }
@@ -2202,20 +2238,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
     return MslShaderCompileStatus::kReady;
   };
-  auto log_pending_compile = [&](MslShader::MslTranslation* translation,
-                                 const char* stage_tag) {
-    static auto last_pending_log = std::chrono::steady_clock::time_point{};
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_pending_log < std::chrono::seconds(1)) {
-      return;
-    }
-    last_pending_log = now;
-    XELOGI(
-        "SPIRV-Cross: Skipping draw - {} shader compile pending "
-        "(shader={:016X}, mod={:016X})",
-        stage_tag, translation->shader().ucode_data_hash(),
-        translation->modification());
-  };
   MslShaderCompileStatus vertex_compile_status =
       ensure_msl_translation_ready(vertex_translation, 1);
   if (vertex_compile_status == MslShaderCompileStatus::kPending) {
@@ -2233,8 +2255,11 @@ bool MetalCommandProcessor::IssueDrawMsl(
         msl_pixel_shader->GetOrCreateTranslation(
             pixel_shader_modification.value));
     if (!pixel_translation->is_translated()) {
-      if (!spirv_shader_translator_->TranslateAnalyzedShader(
-              *pixel_translation)) {
+      if (translation_budget_spent()) {
+        log_pending_compile(pixel_translation, "pixel translation");
+        return true;
+      }
+      if (!translate_inline(pixel_translation)) {
         XELOGE("SPIRV-Cross: Failed to translate pixel shader to SPIR-V");
         return false;
       }
