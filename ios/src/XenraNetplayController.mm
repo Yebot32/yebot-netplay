@@ -100,8 +100,8 @@ static UIView* Hairline(void) {
   UIImageConfiguration* glyph = [UIImageSymbolConfiguration
       configurationWithPointSize:18
                           weight:UIImageSymbolWeightSemibold];
-  [back setImage:[UIImage systemImageNamed:@"chevron.left"
-                         withConfiguration:glyph]
+  [back setImage:XenraDirectional([UIImage systemImageNamed:@"chevron.left"
+                                           withConfiguration:glyph])
         forState:UIControlStateNormal];
   back.tintColor = XenraAccentText();
   back.accessibilityLabel = XS(@"Back");
@@ -143,16 +143,16 @@ static UIView* Hairline(void) {
     [header.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
     [header.topAnchor constraintEqualToAnchor:safe.topAnchor],
     [header.heightAnchor constraintEqualToConstant:56],
-    [back.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:16],
+    [back.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
     [back.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
     [back.widthAnchor constraintEqualToConstant:40],
     [back.heightAnchor constraintEqualToConstant:40],
     [words.leadingAnchor constraintEqualToAnchor:back.trailingAnchor constant:8],
-    [words.trailingAnchor constraintLessThanOrEqualToAnchor:header.trailingAnchor
+    [words.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor
                                                    constant:-16],
     [words.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-    [rule.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-    [rule.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+    [rule.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:16],
+    [rule.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
     [rule.topAnchor constraintEqualToAnchor:header.bottomAnchor],
   ]];
   headerBottom_ = rule.bottomAnchor;
@@ -217,9 +217,10 @@ static UIView* Hairline(void) {
   [content addArrangedSubview:[self buildOnlineCard]];
 
   UILayoutGuide* area = scroll.contentLayoutGuide;
+  UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
   [NSLayoutConstraint activateConstraints:@[
-    [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-    [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    [scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+    [scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
     [scroll.topAnchor constraintEqualToAnchor:headerBottom_],
     [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     [content.leadingAnchor constraintEqualToAnchor:area.leadingAnchor constant:20],
