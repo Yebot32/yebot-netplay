@@ -366,3 +366,31 @@
 "Reopen Xenra" = "Reabrir Xenra";
 
 "iOS can only start one game per launch. Quit and reopen Xenra to play another game." = "iOS solo puede iniciar un juego por ejecución. Cierra y vuelve a abrir Xenra para jugar a otro juego.";
+
+"System Link transport" = "System Link transport";
+
+"System Link address" = "System Link address";
+
+"System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@" = "System Link is on. Both devices must be on the same Wi-Fi. Host or join from the game's System Link menu.\n\nProfile: %@";
+
+"No profile" = "No profile";
+
+"Create Profile" = "Create Profile";
+
+"Enter a gamertag (1-15 characters, starting with a letter)." = "Enter a gamertag (1-15 characters, starting with a letter).";
+
+"Create" = "Create";
+
+"Profile ready: %@" = "Profile ready: %@";
+
+"That gamertag cannot be used." = "That gamertag cannot be used.";
+
+"Change Gamertag" = "Change Gamertag";
+
+"Check Network" = "Check Network";
+
+"Network check" = "Network check";
+
+"Checking the network…" = "Checking the network…";
+
+"Network Settings" = "Network Settings";

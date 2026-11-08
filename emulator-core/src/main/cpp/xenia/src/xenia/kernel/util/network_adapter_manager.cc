@@ -18,6 +18,7 @@
 #include <cstring>
 
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 
 namespace xe {
 namespace kernel {
@@ -125,6 +126,21 @@ int NetworkAdapterManager::ScoreAdapter(const AdapterInfo& adapter) {
       adapter.name.rfind("ppp", 0) == 0) {
     score -= 20;
   }
+
+#if XE_PLATFORM_IOS || XE_PLATFORM_MAC
+  // Apple names the Wi-Fi/primary interface en0. awdl0 and llw0 are
+  // AirDrop/Wi-Fi Direct links, utun is a VPN and pdp_ip is cellular; none of
+  // them is the network the other console is on. Without this, en0 and awdl0
+  // both score the base and whichever getifaddrs lists first wins.
+  if (adapter.name.rfind("en0", 0) == 0) {
+    score += 100;
+  } else if (adapter.name.rfind("awdl", 0) == 0 ||
+             adapter.name.rfind("llw", 0) == 0 ||
+             adapter.name.rfind("utun", 0) == 0 ||
+             adapter.name.rfind("pdp_ip", 0) == 0) {
+    score -= 50;
+  }
+#endif
 
   return score;
 }

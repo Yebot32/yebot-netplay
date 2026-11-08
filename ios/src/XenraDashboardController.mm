@@ -10,6 +10,7 @@
 #import "XenraBladeView.h"
 #import "XenraLogs.h"
 #import "XenraMotion.h"
+#import "XenraNetplay.h"
 #import "XenraSettings.h"
 #import "XenraTheme.h"
 #import "XenraUI.h"
@@ -92,7 +93,12 @@ void XenraApplyOrientation(UIViewController* controller) {
                                        }];
   onlineBlade_ = [[XenraBladeButton alloc] initWithTitle:@""
                                                   action:^{
-                                                    [weak showOnlineNotice];
+                                                    if ([XenraSettings console] ==
+                                                        XenraConsole360) {
+                                                      [weak showNetplay];
+                                                    } else {
+                                                      [weak showOnlineNotice];
+                                                    }
                                                   }];
   XenraBladeButton* settings =
       [[XenraBladeButton alloc] initWithTitle:XS(@"Settings")
@@ -323,6 +329,155 @@ void XenraApplyOrientation(UIViewController* controller) {
                   message:XS(@"Online play isn't available on iPad and iPhone yet. "
                           "Everything else works without it.")
                     items:@[]];
+}
+
+// --- Xbox 360 System Link ----------------------------------------------------
+
+- (NSString*)contentRoot {
+  NSString* docs = NSSearchPathForDirectoriesInDomains(
+                       NSDocumentDirectory, NSUserDomainMask, YES)
+                       .firstObject;
+  return [docs stringByAppendingPathComponent:@"content"];
+}
+
+- (void)showNetplay {
+#ifdef XENRA_UITEST
+  // The simulator tour has no core to create a profile with; keep the notice
+  // and its single OK action so the tour's existing dismissal still works.
+  [self showOnlineNotice];
+#else
+  NSString* content = [self contentRoot];
+  NSString* profile = XenraNetplayProfileSummary(content);
+  __weak XenraDashboardController* weak = self;
+  NSMutableArray<XenraBladeItem*>* items = [NSMutableArray array];
+  if (profile.length) {
+    [items addObject:[XenraBladeItem title:XS(@"Change Gamertag")
+                                    action:^{
+                                      [weak changeGamertag:content];
+                                    }]];
+  } else {
+    [items addObject:[XenraBladeItem title:XS(@"Create Profile")
+                                    action:^{
+                                      [weak createProfile:content];
+                                    }]];
+  }
+  [items addObject:[XenraBladeItem title:XS(@"Check Network")
+                                  action:^{
+                                    [weak checkNetwork];
+                                  }]];
+  [items addObject:[XenraBladeItem
+                       title:XS(@"Game Library")
+                      action:^{
+                        [weak.navigationController
+                            pushViewController:[[XenraLibraryController alloc] init]
+                                  animated:YES];
+                      }]];
+  [items addObject:[XenraBladeItem
+                       title:XS(@"Network Settings")
+                      action:^{
+                        [weak.navigationController
+                            pushViewController:[[XenraSettingsController alloc] init]
+                                  animated:YES];
+                      }]];
+  NSString* message = [NSString
+      stringWithFormat:XS(@"System Link is on. Both devices must be on the same "
+                          "Wi-Fi. Host or join from the game's System Link menu."
+                          "\n\nProfile: %@"),
+                       profile.length ? profile : XS(@"No profile")];
+  [XenraBladeSheet showIn:self.view
+                    title:XS(@"Netplay")
+                  message:message
+                    items:items];
+#endif
+}
+
+- (void)createProfile:(NSString*)content {
+  [self promptGamertagWithTitle:XS(@"Create Profile")
+                        initial:@"Xenra"
+                       existing:nil
+                        content:content];
+}
+
+- (void)changeGamertag:(NSString*)content {
+  [self promptGamertagWithTitle:XS(@"Change Gamertag")
+                        initial:XenraNetplayProfileSummary(content) ?: @""
+                       existing:XenraNetplayProfileXuid(content)
+                        content:content];
+}
+
+- (void)promptGamertagWithTitle:(NSString*)title
+                        initial:(NSString*)initial
+                       existing:(NSString*)existingXuid
+                        content:(NSString*)content {
+  __weak XenraDashboardController* weak = self;
+  UIAlertController* alert = [UIAlertController
+      alertControllerWithTitle:title
+                       message:XS(@"Enter a gamertag (1-15 characters, starting "
+                                 "with a letter).")
+                preferredStyle:UIAlertControllerStyleAlert];
+  [alert addTextFieldWithConfigurationHandler:^(UITextField* field) {
+    field.text = initial;
+    field.autocapitalizationType = UITextAutocapitalizationTypeWords;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+  }];
+  [alert addAction:[UIAlertAction actionWithTitle:XS(@"Cancel")
+                                            style:UIAlertActionStyleCancel
+                                          handler:nil]];
+  [alert addAction:[UIAlertAction
+                       actionWithTitle:XS(@"Create")
+                                 style:UIAlertActionStyleDefault
+                               handler:^(UIAlertAction* action) {
+                                 NSString* tag =
+                                     alert.textFields.firstObject.text ?: @"";
+                                 NSString* result = nil;
+                                 if (existingXuid.length) {
+                                   result = XenraNetplayRenameProfile(
+                                                content, existingXuid, tag)
+                                                ? XenraNetplayProfileXuid(content)
+                                                : nil;
+                                 } else {
+                                   result =
+                                       XenraNetplayCreateProfile(content, tag);
+                                 }
+                                 if (result.length) {
+                                   XenraToast(weak.view,
+                                              [NSString stringWithFormat:
+                                                  XS(@"Profile ready: %@"),
+                                                  tag]);
+                                   [weak showNetplay];
+                                 } else {
+                                   XenraToast(
+                                       weak.view,
+                                       XS(@"That gamertag cannot be used."));
+                                 }
+                               }]];
+  [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)checkNetwork {
+  __weak XenraDashboardController* weak = self;
+  XenraToast(self.view, XS(@"Checking the network…"));
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    NSString* adapter = XenraNetplayAdapterSummary();
+    XenraNetplayUPnPDiscover(2000);
+    NSString* status = XenraNetplayUPnPStatus();
+    NSString* lan = XenraNetplayUPnPLanAddress();
+    NSString* external = XenraNetplayUPnPExternalAddress();
+    BOOL mapped = XenraNetplayUPnPTestMapping(3074);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSString* message =
+          [NSString stringWithFormat:@"%@\n\nUPnP: %@\nLAN: %@\nExternal: %@\n"
+                                     @"UDP 3074: %@",
+                                     adapter ?: @"no adapter", status ?: @"-",
+                                     lan.length ? lan : @"-",
+                                     external.length ? external : @"-",
+                                     mapped ? @"mapped" : @"not mapped"];
+      [XenraBladeSheet showIn:weak.view
+                        title:XS(@"Network check")
+                      message:message
+                        items:@[]];
+    });
+  });
 }
 
 // The root screen has nowhere further back to go, so say what the ways out are.

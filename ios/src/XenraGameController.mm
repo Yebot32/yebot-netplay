@@ -12,6 +12,7 @@
 #import "XenraAmbient.h"
 #import "XenraLogs.h"
 #import "XenraMetalView.h"
+#import "XenraNetplay.h"
 #import "XenraPadNav.h"
 #import "XenraSampler.h"
 #import "XenraSettings.h"
@@ -397,6 +398,16 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
     return;
   }
   [XenraSettings applyForGame:name_];
+  // A 360 title expects slot 0 to be signed in. Reuse the existing standalone
+  // profile, or create the default one on a fresh install, before the kernel
+  // reads logged_profile_slot_0_xuid at boot.
+  NSString* docs = NSSearchPathForDirectoriesInDomains(
+                       NSDocumentDirectory, NSUserDomainMask, YES)
+                       .firstObject;
+  NSString* xuid = XenraNetplayEnsureProfile(
+      [docs stringByAppendingPathComponent:@"content"], @"Xenra");
+  XenraLog([NSString stringWithFormat:@"360 profile: %@",
+                                      xuid.length ? xuid : @"none"]);
   // The 360 core's own detection goes by chip and calls this one TXM-free. The script
   // being attached is the better evidence: it is waiting for the core's prepare.
   if (XenraXemuNeedsSettle()) setenv("HAS_TXM", "1", 1);

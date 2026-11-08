@@ -110,6 +110,8 @@
 	<!-- The StikDebug handoff (stikdebug://enable-jit?...) is opened from the
 	     JIT screen. canOpenURL: requires the scheme declared here or iOS
 	     answers NO without ever asking StikDebug. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Xenra uses the local network for Xbox 360 System Link multiplayer.</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>stikjit</string>

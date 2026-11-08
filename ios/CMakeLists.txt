@@ -64,6 +64,8 @@ add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/XenraLanguage.h"
   "${_xe_ios_dir}/src/XenraLogs.h"
   "${_xe_ios_dir}/src/XenraMotion.h"
+  "${_xe_ios_dir}/src/XenraNetplay.h"
+  "${_xe_ios_dir}/src/XenraNetplay.mm"
   "${_xe_ios_dir}/src/XenraScreens.h"
   "${_xe_ios_dir}/src/XenraSettings.h"
   "${_xe_ios_dir}/src/XenraStrings.h"
