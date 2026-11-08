@@ -469,7 +469,7 @@ class IosEmuApp {
     // created, as xenia_main does. Without this iOS ran every title with the
     // global config only - the Halo 3 font quirk never applied at all.
     const uint32_t game_title_id =
-        xe::config::LoadGameConfigForFile(launch_path_);
+        config::LoadGameConfigForFile(launch_path_);
     XELOGI("iOS: game config loaded for title {:08X}", game_title_id);
     if (XFAILED(result = emu_->SetupSubsystems())) {
       g_status.store(-2, std::memory_order_relaxed);
