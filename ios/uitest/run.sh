@@ -42,7 +42,7 @@ sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.4.5/; s/${MACOSX_BUNDLE_BUNDLE
     ios/Info.plist > "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable Xenra' "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier Ali.Xanite.ui' "$APP/Info.plist"
-cp ios/res/*.png ios/res/X1_Covers.txt "$APP/"
+cp ios/res/*.png ios/res/X1_Covers.txt ios/res/X360_Titles.txt ios/res/XboxOG_Titles.txt "$APP/"
 cp -R ios/res/*.lproj "$APP/"
 ls -d "$APP"/*.lproj | sed 's/.*\///' | tr '\n' ' '; echo
 [ "$(ls "$APP"/*.lproj/Localizable.strings | wc -l)" -eq 8 ] || { echo "languages missing from the bundle"; exit 1; }

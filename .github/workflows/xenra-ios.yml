@@ -327,7 +327,7 @@ jobs:
           echo "::error::Expected 8 languages in the bundle, found $LANGS"
           exit 1
         fi
-        for FILE in X1_Covers.txt xenra_x.png setup_logo_x.png; do
+        for FILE in X1_Covers.txt X360_Titles.txt XboxOG_Titles.txt xenra_x.png setup_logo_x.png; do
           [ -f "$PAYLOAD_APP/$FILE" ] || { echo "::error::$FILE missing"; exit 1; }
         done
 

@@ -955,6 +955,21 @@ Bytes Xex(uint32_t title_id) {
   return b;
 }
 
+// A retail-shaped header: the execution info is not the first optional header,
+// and sits past the table.
+Bytes XexSecond(uint32_t title_id) {
+  Bytes b(0x200);
+  b.Text(0, "XEX2");
+  b.Be32(0x8, 0x200);
+  b.Be32(0x14, 2);
+  b.Be32(0x18, 0x000002FF);
+  b.Be32(0x1C, 0x80);
+  b.Be32(0x20, 0x00040006);
+  b.Be32(0x24, 0x100);
+  b.Be32(0x100 + 0xC, title_id);
+  return b;
+}
+
 Bytes Xbe(uint32_t title_id, const char* title) {
   Bytes b(0x500);
   b.Text(0, "XBEH");
@@ -1200,6 +1215,63 @@ void XenraScannerSelfTest(void) {
   check(@"an entry survives the disk cache",
         [plist isEqual:god] && [plist.subtitle isEqualToString:god.subtitle] &&
             [plist.titleId isEqualToString:god.titleId]);
+
+  // Box art addresses, from what the scanner read.
+  NSString* art = [base stringByAppendingPathComponent:@"art"];
+  NSString* (^inArt)(NSString*) = ^(NSString* p) {
+    return [art stringByAppendingPathComponent:p];
+  };
+  PutDisc(inArt(@"360/Grand Theft Auto IV (USA) (En,Fr,De,Es,It).iso"),
+          0x0FD90000, "default.xex", XexSecond(0x545407F2));
+  PutDisc(inArt(@"360/Forza Horizon (USA).iso"), 0x02080000, "default.xex",
+          XexSecond(0x4D538A67));
+  Put(inArt(@"360/Forza Horizon 2 (Europe).zar"), Bytes(16));
+  Put(inArt(@"360/Zzqx Qwvb Nonesuch.zar"), Bytes(16));
+  PutDisc(inArt(@"og/halo.iso"), 0, "default.xbe",
+          Xbe(0x4D530057, "Halo"));
+  Put(inArt(@"og/Forza Motorsport (World) (En,Ja,Fr,De).xiso.iso"), Bytes(16));
+  Put(inArt(@"og/Simpsons, The - Hit & Run (Europe).cci"), Bytes(16));
+  NSArray<XenraGameEntry*>* art360 =
+      ScanFolders(@[ inArt(@"360") ], XenraConsole360, token,
+                  [NSMutableDictionary dictionary], [NSMutableArray array]);
+  NSArray<XenraGameEntry*>* artOg =
+      ScanFolders(@[ inArt(@"og") ], XenraConsoleOG, token,
+                  [NSMutableDictionary dictionary], [NSMutableArray array]);
+  NSString* (^firstUrl)(XenraGameEntry*) = ^NSString*(XenraGameEntry* game) {
+    NSArray<NSString*>* urls = game ? XenraCoverURLsForGame(game) : @[];
+    XenraLog([NSString stringWithFormat:@"selftest art %@ [%@]: %@", game.name,
+                                        game.titleId ?: @"-",
+                                        [urls componentsJoinedByString:@" "]]);
+    return urls.firstObject ?: @"";
+  };
+  XenraGameEntry* gta = named(art360, @"Grand Theft Auto IV (USA) (En,Fr,De,Es,It)");
+  check(@"art: a 360 ISO at XGD2 gives its id, and x360db art",
+        [gta.titleId isEqualToString:@"545407F2"] &&
+            [firstUrl(gta) hasSuffix:@"/x360db/titles/545407F2/artwork/boxart.jpg"] &&
+            XenraCoverURLsForGame(gta).count == 2);
+  XenraGameEntry* fh = named(art360, @"Forza Horizon (USA)");
+  check(@"art: an XGD3 reissue id finds the game's art",
+        [fh.titleId isEqualToString:@"4D538A67"] &&
+            [firstUrl(fh) hasSuffix:@"/titles/4D5309C9/artwork/boxart.jpg"]);
+  check(@"art: a ZAR finds its art by name",
+        [firstUrl(named(art360, @"Forza Horizon 2 (Europe)"))
+            hasSuffix:@"/titles/4D530AA4/artwork/boxart.jpg"]);
+  check(@"art: a 360 game nobody lists has no address",
+        [firstUrl(named(art360, @"Zzqx Qwvb Nonesuch")) isEqualToString:@""]);
+  XenraGameEntry* halo = named(artOg, @"Halo");
+  check(@"art: an OG release id finds xdb first",
+        [halo.titleId isEqualToString:@"4D530057"] &&
+            [firstUrl(halo) hasSuffix:@"/xdb/d83d221eb2eea51a6d1d8b60cccff70f1056e6a4/"
+                                      @"titles/MS/004/cover_front_thumbnail.jpg"]);
+  XenraGameEntry* forza = named(artOg, @"Forza Motorsport");
+  NSArray<NSString*>* forzaUrls = forza ? XenraCoverURLsForGame(forza) : @[];
+  check(@"art: an unreadable OG image finds X1_Covers, then xdb, by name",
+        forzaUrls.count == 2 &&
+            [forzaUrls[0] hasSuffix:@"X1_Covers/main/Forza%20Motorsport%20%28USA%29.png"] &&
+            [forzaUrls[1] hasSuffix:@"/titles/MS/110/cover_front_thumbnail.jpg"]);
+  check(@"art: a No-Intro style compressed image finds xdb",
+        [XenraCoverURLsForGame(named(artOg, @"Simpsons, The - Hit & Run") ?: forza)
+            .lastObject hasSuffix:@"/titles/VU/021/cover_front_thumbnail.jpg"]);
 
   XenraCoversSelfTest(check);
 

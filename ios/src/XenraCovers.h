@@ -8,13 +8,20 @@
  *   1. The custom cover the user set.
  *   2. Documents/Covers/<title or file stem>.png, .jpg or .jpeg. iOS only: the
  *      folder the Files app can reach.
- *   3. Xbox 360: the icon in the GOD or STFS header. An ISO, ZAR or XEX has none
- *      we can read here, so it stays on the placeholder. The box art repository
- *      is original Xbox only; Android skips it for the 360 too.
- *   4. Original Xbox: box art from the public X1_Covers repository, found by the
- *      same title match as Android (XenraCoverMatch.hpp), downloaded once and
- *      kept. Offline or on any error the cover is simply nil, nothing is shown,
- *      and the same file is not asked for again for a minute.
+ *   3. Box art downloaded before, kept in Application Support, so a cover once
+ *      seen still shows offline.
+ *   4. Box art downloaded now, from the first source that has it:
+ *        Xbox 360       xenia-manager/x360db, by the title id the scanner read
+ *                       (GOD, STFS, ISO, XEX), mapped through X360_Titles.txt
+ *                       so a region or reissue id finds its game; by name when
+ *                       there is no id (ZAR, an unreadable file).
+ *        Original Xbox  xemu-project/xdb by the XBE certificate title id
+ *                       (XboxOG_Titles.txt), then the public X1_Covers
+ *                       repository by Android's title match, then xdb by name.
+ *      Android has only X1_Covers, and nothing for the 360. A source whose every
+ *      address says 404 is not asked again this run; any other failure, such
+ *      as being offline, waits a minute, and the next source is tried.
+ *   5. Xbox 360: the icon in the GOD or STFS header, when no box art comes.
  *
  * Decoding is ImageIO, downsampled to the size asked for, on a background queue.
  * Decoded images live in a memory cache bounded by bytes, which empties on a
@@ -91,6 +98,8 @@ NS_ASSUME_NONNULL_BEGIN
 #ifdef XENRA_UITEST
 // The checks behind XenraScannerSelfTest. check is called once per result.
 void XenraCoversSelfTest(void (^check)(NSString* name, BOOL ok));
+// Every address the cover chain would try for game, best first.
+NSArray<NSString*>* XenraCoverURLsForGame(XenraGameEntry* game);
 #endif
 
 NS_ASSUME_NONNULL_END

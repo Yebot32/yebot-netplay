@@ -46,6 +46,8 @@ set(_xe_ios_arc_sources
 )
 set(_xe_ios_resources
   "${_xe_ios_dir}/res/X1_Covers.txt"
+  "${_xe_ios_dir}/res/X360_Titles.txt"
+  "${_xe_ios_dir}/res/XboxOG_Titles.txt"
   "${_xe_ios_dir}/res/setup_logo_x.png"
   "${_xe_ios_dir}/res/xenra-icon.png"
   "${_xe_ios_dir}/res/xenra_x.png"

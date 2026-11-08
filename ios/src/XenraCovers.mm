@@ -18,11 +18,36 @@
 
 namespace match = xenra::covers;
 
+// One place a cover can come from: the file it is kept in once downloaded, and
+// the addresses to try for it, in order. Immutable once made.
+@interface XenraArtSource : NSObject
+@property(nonatomic, copy) NSString* key;  // names it in downloads_ and misses_
+@property(nonatomic, copy) NSString* kept;
+@property(nonatomic, copy) NSArray<NSURL*>* urls;
+@end
+
+@implementation XenraArtSource
+@end
+
 namespace {
 
 // GameLibraryActivity.coverRepoBaseUrl.
 NSString* const kRepository =
     @"https://raw.githubusercontent.com/izzy2lost/X1_Covers/main/";
+
+// Xbox 360 box art by title id: xenia-manager/x360db, as XeniOS and Xenia Edge
+// use it. Its GitHub Pages site first, then the raw file at the commit
+// X360_Titles.txt was made from, which holds every id listed there.
+NSString* const kX360Pages = @"https://xenia-manager.github.io/x360db/";
+NSString* const kX360Pinned =
+    @"https://raw.githubusercontent.com/xenia-manager/x360db/"
+    @"3a673638ca22bd78a4768f3d7730dceb40e9ec32/";
+
+// Original Xbox covers by title id: xemu-project/xdb, at the commit
+// XboxOG_Titles.txt was made from (XeniOS pins the same one).
+NSString* const kXdbPinned =
+    @"https://raw.githubusercontent.com/xemu-project/xdb/"
+    @"d83d221eb2eea51a6d1d8b60cccff70f1056e6a4/";
 
 // Bounds the decoded images: about 220 full-size tiles.
 constexpr NSUInteger kMemoryLimit = 96 * 1024 * 1024;
@@ -163,11 +188,49 @@ const match::Index& CoverIndex() {
 
 // The repository's file for this game, or nil. The title Android would look up
 // first, then the one the header gave.
-NSString* RepositoryFile(XenraGameEntry* game) {
+NSString* RepositoryFile(XenraGameEntry* game, bool closest) {
   const match::Index& index = CoverIndex();
-  std::string file = index.Lookup(Native(game.fileTitle));
-  if (file.empty()) file = index.Lookup(Native(game.name));
+  std::string file = index.Lookup(Native(game.fileTitle), closest);
+  if (file.empty()) file = index.Lookup(Native(game.name), closest);
   return file.empty() ? nil : FromNative(file);
+}
+
+// Parsed once, on first need, off the main thread.
+const match::TitleDb& LoadTitleDb(NSString* resource) {
+  NSString* path = [NSBundle.mainBundle pathForResource:resource ofType:@"txt"];
+  NSString* text = path ? [NSString stringWithContentsOfFile:path
+                                                    encoding:NSUTF8StringEncoding
+                                                       error:nil]
+                        : nil;
+  if (!text) {
+    XenraLog([NSString
+        stringWithFormat:@"covers: %@.txt is missing from the bundle", resource]);
+  }
+  return *new match::TitleDb(Native(text));
+}
+
+const match::TitleDb& X360Titles() {
+  static const match::TitleDb& db = LoadTitleDb(@"X360_Titles");
+  return db;
+}
+
+const match::TitleDb& OgTitles() {
+  static const match::TitleDb& db = LoadTitleDb(@"XboxOG_Titles");
+  return db;
+}
+
+uint32_t TitleIdOf(XenraGameEntry* game) {
+  return match::ParseHexId(Native(game.titleId));
+}
+
+// By id, else by the shown title, else by the file's.
+uint32_t ArtIdFor(const match::TitleDb& db, XenraGameEntry* game, bool by_id) {
+  uint32_t art = by_id ? db.ArtId(TitleIdOf(game)) : 0;
+  if (!art) art = db.ArtIdForName(Native(game.name));
+  if (!art && ![game.fileTitle isEqualToString:game.name]) {
+    art = db.ArtIdForName(Native(game.fileTitle));
+  }
+  return art;
 }
 
 NSURL* RepositoryURL(NSString* file) {
@@ -179,6 +242,88 @@ NSURL* RepositoryURL(NSString* file) {
                         stringByAppendingString:
                             [file stringByAddingPercentEncodingWithAllowedCharacters:
                                       allowed]]];
+}
+
+NSString* BoxartFile(NSString* name) {
+  return [SupportFolder(@"boxart") stringByAppendingPathComponent:name];
+}
+
+XenraArtSource* Source(NSString* key, NSString* kept, NSArray<NSURL*>* urls) {
+  XenraArtSource* source = [[XenraArtSource alloc] init];
+  source.key = key;
+  source.kept = kept;
+  source.urls = urls;
+  return source;
+}
+
+NSURL* Under(NSString* base, const std::string& path) {
+  return [NSURL URLWithString:[base stringByAppendingString:FromNative(path)]];
+}
+
+// Where this game's cover can come from, best first. Any thread.
+//   Xbox 360: x360db, by title id, else by name.
+//   Original Xbox: xdb by title id; X1_Covers by name, exact or collapsed;
+//   xdb by name; then X1_Covers by Android's fuzzy match, which is the least
+//   sure of the four.
+NSArray<XenraArtSource*>* ResolveSources(XenraGameEntry* game) {
+  NSMutableArray<XenraArtSource*>* sources = [NSMutableArray array];
+  if (game.console == XenraConsole360) {
+    const uint32_t art = ArtIdFor(X360Titles(), game, true);
+    if (art) {
+      const std::string path = match::X360ArtPath(art);
+      NSString* hex = FromNative(match::HexId(art));
+      [sources addObject:Source([@"x360:" stringByAppendingString:hex],
+                                BoxartFile([NSString stringWithFormat:@"x360-%@.jpg", hex]),
+                                @[ Under(kX360Pages, path), Under(kX360Pinned, path) ])];
+    }
+    return sources;
+  }
+
+  const match::TitleDb& og = OgTitles();
+  const auto add_xdb = [&](uint32_t art) {
+    const std::string path = match::OgArtPath(art);
+    if (!art || path.empty()) return;
+    NSString* hex = FromNative(match::HexId(art));
+    NSString* key = [@"xdb:" stringByAppendingString:hex];
+    for (XenraArtSource* source in sources) {
+      if ([source.key isEqualToString:key]) return;
+    }
+    [sources addObject:Source(key,
+                              BoxartFile([NSString stringWithFormat:@"og-%@.jpg", hex]),
+                              @[ Under(kXdbPinned, path) ])];
+  };
+  const auto add_x1 = [&](NSString* file) {
+    if (!file) return;
+    [sources addObject:Source([@"x1:" stringByAppendingString:file],
+                              DownloadedFile(game.fileTitle),
+                              @[ RepositoryURL(file) ])];
+  };
+  add_xdb(og.ArtId(TitleIdOf(game)));
+  NSString* x1 = RepositoryFile(game, false);
+  add_x1(x1);
+  add_xdb(ArtIdFor(og, game, false));
+  if (!x1) add_x1(RepositoryFile(game, true));
+  return sources;
+}
+
+// ResolveSources is a pure function of the entry, and the fuzzy match is not
+// free, so each game resolves once per run.
+NSArray<XenraArtSource*>* ArtSources(XenraGameEntry* game) {
+  static NSMutableDictionary<NSString*, NSArray<XenraArtSource*>*>* known =
+      [NSMutableDictionary dictionary];
+  static NSLock* lock = [[NSLock alloc] init];
+  NSString* key = [NSString stringWithFormat:@"%ld|%@|%@|%@", (long)game.console,
+                                             game.path, game.titleId ?: @"",
+                                             game.name];
+  [lock lock];
+  NSArray<XenraArtSource*>* found = known[key];
+  [lock unlock];
+  if (found) return found;
+  found = ResolveSources(game);
+  [lock lock];
+  known[key] = found;
+  [lock unlock];
+  return found;
 }
 
 }  // namespace
@@ -211,10 +356,13 @@ NSURL* RepositoryURL(NSString* file) {
   NSMutableDictionary<NSString*, NSOperation*>* operations_;
   // Games with nothing to show, until when, by memory key.
   NSMutableDictionary<NSString*, NSDate*>* empty_;
-  // Downloads running, by repository file, and who wants each.
+  // Downloads running, by source key, and who wants each.
   NSMutableDictionary<NSString*, NSMutableArray<dispatch_block_t>*>* downloads_;
-  // Repository files that failed, until when.
-  NSMutableDictionary<NSString*, NSDate*>* retry_;
+  // Sources that failed, until when, by key: distantFuture when every address
+  // said 404, so a miss is asked for once a run; a minute for anything else,
+  // such as being offline. Read on the decode queue too, so under its lock.
+  NSMutableDictionary<NSString*, NSDate*>* misses_;
+  NSLock* missesLock_;
   // Bumped when a title's custom cover changes, so its old sizes stop matching.
   NSMutableDictionary<NSString*, NSNumber*>* generation_;
 }
@@ -245,7 +393,8 @@ NSURL* RepositoryURL(NSString* file) {
     operations_ = [NSMutableDictionary dictionary];
     empty_ = [NSMutableDictionary dictionary];
     downloads_ = [NSMutableDictionary dictionary];
-    retry_ = [NSMutableDictionary dictionary];
+    misses_ = [NSMutableDictionary dictionary];
+    missesLock_ = [[NSLock alloc] init];
     generation_ = [NSMutableDictionary dictionary];
     [NSNotificationCenter.defaultCenter
         addObserver:self
@@ -305,7 +454,25 @@ NSURL* RepositoryURL(NSString* file) {
   return request;
 }
 
-// The cover chain in the header. Runs on the decode queue.
+- (BOOL)isMissing:(NSString*)key {
+  [missesLock_ lock];
+  NSDate* until = misses_[key];
+  const BOOL missing = until && until.timeIntervalSinceNow > 0;
+  [missesLock_ unlock];
+  return missing;
+}
+
+- (void)markMissing:(NSString*)key forSession:(BOOL)forSession {
+  [missesLock_ lock];
+  misses_[key] = forSession ? NSDate.distantFuture
+                            : [NSDate dateWithTimeIntervalSinceNow:kRetryAfter];
+  [missesLock_ unlock];
+}
+
+// The cover chain in the header. Runs on the decode queue. A kept download is
+// used before anything is fetched, so a cover once seen works offline. With
+// nothing kept, the first source not known to be missing is fetched, and this
+// runs again when it lands. The 360 header icon is the last resort.
 - (void)startDecode:(XenraGameEntry*)game
                 key:(NSString*)key
           maxPixels:(CGFloat)maxPixels {
@@ -322,26 +489,33 @@ NSURL* RepositoryURL(NSString* file) {
     } else if ((hand = HandPlacedFile(game))) {
       image = DecodeFile(hand, maxPixels, scale);
     }
-    NSString* remote = nil;
-    if (!image && game.console == XenraConsole360) {
+    XenraArtSource* remote = nil;
+    if (!image) {
+      NSArray<XenraArtSource*>* sources = ArtSources(game);
+      for (XenraArtSource* source in sources) {
+        if (NonEmptyFile(source.kept)) {
+          image = DecodeFile(source.kept, maxPixels, scale);
+          if (image) break;
+        }
+      }
+      if (!image) {
+        for (XenraArtSource* source in sources) {
+          if (!NonEmptyFile(source.kept) && ![self isMissing:source.key]) {
+            remote = source;
+            break;
+          }
+        }
+      }
+    }
+    if (!image && !remote && game.console == XenraConsole360) {
       NSData* icon = [game embeddedIconData];
       if (icon) image = DecodeData(icon, maxPixels, scale);
-    } else if (!image) {
-      NSString* kept = DownloadedFile(game.fileTitle);
-      if (NonEmptyFile(kept)) {
-        image = DecodeFile(kept, maxPixels, scale);
-      } else {
-        remote = RepositoryFile(game);
-      }
     }
     dispatch_async(dispatch_get_main_queue(), ^{
       [self->operations_ removeObjectForKey:key];
       if (!self->waiting_[key]) return;  // everyone left
       if (remote) {
-        [self fetch:remote
-               game:game
-                key:key
-          maxPixels:maxPixels];
+        [self fetch:remote game:game key:key maxPixels:maxPixels];
         return;
       }
       [self finish:key image:image];
@@ -351,37 +525,46 @@ NSURL* RepositoryURL(NSString* file) {
   [decoder_ addOperation:operation];
 }
 
-- (void)fetch:(NSString*)file
+- (void)fetch:(XenraArtSource*)source
          game:(XenraGameEntry*)game
           key:(NSString*)key
     maxPixels:(CGFloat)maxPixels {
-  NSDate* until = retry_[file];
-  if (until && until.timeIntervalSinceNow > 0) {
-    [self finish:key image:nil];
-    return;
-  }
-  [retry_ removeObjectForKey:file];
-
+  // Whatever happens, the chain runs again: it finds the download, or moves on
+  // to the next source, or to the icon.
   __weak XenraCovers* weak = self;
   dispatch_block_t again = ^{
     XenraCovers* covers = weak;
-    if (!covers) return;
-    if (covers->retry_[file]) {
-      [covers finish:key image:nil];
-    } else if (covers->waiting_[key]) {
+    if (covers && covers->waiting_[key]) {
       [covers startDecode:game key:key maxPixels:maxPixels];
     }
   };
-  NSMutableArray<dispatch_block_t>* running = downloads_[file];
+  NSMutableArray<dispatch_block_t>* running = downloads_[source.key];
   if (running) {
     [running addObject:[again copy]];
     return;
   }
-  downloads_[file] = [NSMutableArray arrayWithObject:[again copy]];
+  downloads_[source.key] = [NSMutableArray arrayWithObject:[again copy]];
+  [self download:source index:0 allMissing:YES];
+}
 
-  NSString* target = DownloadedFile(game.fileTitle);
+// Tries source.urls[index] and on, each once.
+- (void)download:(XenraArtSource*)source
+           index:(NSUInteger)index
+      allMissing:(BOOL)allMissing {
+  __weak XenraCovers* weak = self;
+  if (index >= source.urls.count) {
+    [self markMissing:source.key forSession:allMissing];
+    XenraLog([NSString stringWithFormat:@"covers: no %@%@", source.key,
+                                        allMissing ? @" (not listed)" : @""]);
+    NSArray<dispatch_block_t>* waiters = downloads_[source.key];
+    [downloads_ removeObjectForKey:source.key];
+    for (dispatch_block_t waiter in waiters) waiter();
+    return;
+  }
+  NSURL* url = source.urls[index];
+  NSString* target = source.kept;
   NSURLSessionDownloadTask* task = [session_
-      downloadTaskWithURL:RepositoryURL(file)
+      downloadTaskWithURL:url
         completionHandler:^(NSURL* location, NSURLResponse* response,
                             NSError* error) {
           // location goes when this returns, so the move happens here.
@@ -393,23 +576,30 @@ NSURL* RepositoryURL(NSString* file) {
           if (location && !error && status == 200 &&
               IsImageFile(location.path)) {
             NSFileManager* files = NSFileManager.defaultManager;
-            [files removeItemAtPath:target error:nil];
-            ok = [files moveItemAtPath:location.path toPath:target error:nil];
+            NSString* staged = [target stringByAppendingString:@".new"];
+            [files removeItemAtPath:staged error:nil];
+            if ([files moveItemAtPath:location.path toPath:staged error:nil]) {
+              [files removeItemAtPath:target error:nil];
+              ok = [files moveItemAtPath:staged toPath:target error:nil];
+            }
           }
           if (!ok) {
-            XenraLog([NSString stringWithFormat:@"covers: no %@ (%ld, %@)", file,
-                                                (long)status,
-                                                error.localizedDescription]);
+            XenraLog([NSString stringWithFormat:@"covers: %@ gave %ld%@%@",
+                                                url.absoluteString, (long)status,
+                                                error ? @", " : @"",
+                                                error.localizedDescription ?: @""]);
           }
           dispatch_async(dispatch_get_main_queue(), ^{
             XenraCovers* covers = weak;
             if (!covers) return;
             if (!ok) {
-              covers->retry_[file] =
-                  [NSDate dateWithTimeIntervalSinceNow:kRetryAfter];
+              [covers download:source
+                         index:index + 1
+                    allMissing:allMissing && status == 404];
+              return;
             }
-            NSArray<dispatch_block_t>* waiters = covers->downloads_[file];
-            [covers->downloads_ removeObjectForKey:file];
+            NSArray<dispatch_block_t>* waiters = covers->downloads_[source.key];
+            [covers->downloads_ removeObjectForKey:source.key];
             for (dispatch_block_t waiter in waiters) waiter();
           });
         }];
@@ -497,7 +687,64 @@ NSURL* RepositoryURL(NSString* file) {
 
 #ifdef XENRA_UITEST
 
+NSArray<NSString*>* XenraCoverURLsForGame(XenraGameEntry* game) {
+  NSMutableArray<NSString*>* urls = [NSMutableArray array];
+  for (XenraArtSource* source in ResolveSources(game)) {
+    for (NSURL* url in source.urls) [urls addObject:url.absoluteString];
+  }
+  return urls;
+}
+
 void XenraCoversSelfTest(void (^check)(NSString* name, BOOL ok)) {
+  // The title databases, on synthetic text first.
+  const match::TitleDb small(
+      "# comment\n"
+      "4D5309C9\tForza Horizon\t4D538A67 4d538a68\n"
+      "4D530AA4\tForza Horizon 2\r\n"
+      "545408A7\tGrand Theft Auto V\t\n"
+      "nothex\tBroken Line\n"
+      "41560001\t\t\n");
+  check(@"titles: lines parse, comments and junk do not", small.size() == 4);
+  check(@"titles: a listed id is its own art",
+        small.ArtId(0x4D530AA4) == 0x4D530AA4);
+  check(@"titles: another release id finds the game, either case",
+        small.ArtId(0x4D538A67) == 0x4D5309C9 &&
+            small.ArtId(0x4D538A68) == 0x4D5309C9);
+  check(@"titles: unknown and zero ids find nothing",
+        small.ArtId(0x12345678) == 0 && small.ArtId(0) == 0);
+  check(@"titles: a tagged file name finds its game",
+        small.ArtIdForName("Forza Horizon (USA) (En,Fr,De)") == 0x4D5309C9);
+  check(@"titles: an unnumbered title is not its sequel",
+        small.ArtIdForName("Forza Horizon") == 0x4D5309C9 &&
+            small.ArtIdForName("Forza Horizon 2 (Europe)") == 0x4D530AA4);
+  check(@"titles: a roman numeral is a number",
+        small.ArtIdForName("Grand Theft Auto IV (USA)") == 0);
+  check(@"titles: hex ids parse strictly",
+        match::ParseHexId("4d5309c9") == 0x4D5309C9 &&
+            match::ParseHexId("4D5309C") == 0 && match::ParseHexId("4D5309CZ") == 0);
+  check(@"titles: 360 art path",
+        match::X360ArtPath(0x545407F2) == "titles/545407F2/artwork/boxart.jpg");
+  check(@"titles: OG art path is letters, then the number in decimal",
+        match::OgArtPath(0x4D53006E) == "titles/MS/110/cover_front_thumbnail.jpg" &&
+            match::OgArtPath(0x4E4D0001) == "titles/NM/001/cover_front_thumbnail.jpg" &&
+            match::OgArtPath(0x00010001).empty());
+
+  // The bundled ones.
+  const match::TitleDb& x360 = X360Titles();
+  const match::TitleDb& og = OgTitles();
+  check(@"titles: both databases are in the bundle",
+        x360.size() > 5000 && og.size() > 1000);
+  check(@"titles: GTA IV and Forza Horizon have 360 art",
+        x360.ArtId(0x545407F2) == 0x545407F2 &&
+            x360.ArtId(0x4D5309C9) == 0x4D5309C9);
+  check(@"titles: a Forza Horizon reissue id finds the game",
+        x360.ArtId(0x4D538A67) == 0x4D5309C9);
+  check(@"titles: Halo's other release finds the OG cover",
+        og.ArtId(0x4D530057) == 0x4D530004);
+  check(@"titles: an OG name in No-Intro style finds xdb",
+        og.ArtIdForName("Simpsons, The - Hit & Run (USA)") == 0x56550015 &&
+            og.ArtIdForName("Halo - Combat Evolved (USA)") == 0x4D530004);
+
   const match::Index& index = CoverIndex();
   check(@"covers: the index is in the bundle", index.size() > 500);
   const auto found = [&](const char* title, const char* file) {
