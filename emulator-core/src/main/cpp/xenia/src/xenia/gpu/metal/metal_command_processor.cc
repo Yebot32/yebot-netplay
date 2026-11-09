@@ -46,7 +46,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/draw_util.h"
-#include "xenia/gpu/format_info.h"
+#include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
