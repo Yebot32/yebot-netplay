@@ -2950,9 +2950,11 @@ bool MetalCommandProcessor::IssueDrawMsl(
           const auto& binding = texture_bindings[size_t(texture_binding_index)];
           const TextureCache::ActiveTextureInfo info =
               texture_cache_->GetActiveTextureInfo(binding.fetch_constant);
+          const xenos::xe_gpu_texture_fetch_t fetch =
+              register_file_->GetTextureFetch(binding.fetch_constant);
           slots += fmt::format(
               " [slot={} fetch={} dim={} signed={} {} {}x{} tiled={} "
-              "base=0x{:08X} swizzle={:03X} {}]",
+              "base=0x{:08X} swizzle={:03X} raw={:08X},{:08X} {}]",
               slot, binding.fetch_constant, uint32_t(binding.dimension),
               binding.is_signed,
               info.valid ? FormatInfo::GetName(info.format) : "invalid",
@@ -2961,9 +2963,27 @@ bool MetalCommandProcessor::IssueDrawMsl(
               info.valid ? (info.base_page << 12) : 0,
               texture_cache_->GetActiveTextureHostSwizzle(
                   binding.fetch_constant),
+              fetch.dword_0, fetch.dword_1,
               textures[slot] ? "texture" : "null");
         }
         XELOGI("DrawTex shader={:016X}{}", shader->ucode_data_hash(), slots);
+
+        // The Halo 3 text shader is the only one drawing with a single
+        // 512x128 k_8 texture. Its translated MSL shows whether the glyph
+        // mask is inverted, swizzled or sampled at the wrong LOD.
+        if (texture_count >= 1 && texture_count <= 2 &&
+            size_t(texture_binding_indices[0]) < texture_bindings.size()) {
+          const auto& font_binding =
+              texture_bindings[size_t(texture_binding_indices[0])];
+          const TextureCache::ActiveTextureInfo font_info =
+              texture_cache_->GetActiveTextureInfo(
+                  font_binding.fetch_constant);
+          if (font_info.valid && font_info.format == xenos::TextureFormat::k_8 &&
+              font_info.width == 512 && font_info.height == 128) {
+            XELOGI("FontMslBegin\n{}\nFontMslEnd",
+                   translation->msl_source());
+          }
+        }
       }
     }
 

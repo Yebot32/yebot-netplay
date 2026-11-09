@@ -35,7 +35,7 @@ clang++ -target $TARGET -isysroot $SDK build-ui/obj/*.o -o "$APP/Xenra" \
   -framework UniformTypeIdentifiers -framework Metal -framework CoreGraphics \
   -framework ImageIO || exit 1
 
-sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.5.0/; s/${MACOSX_BUNDLE_BUNDLE_VERSION}/41/' \
+sed -e 's/${MACOSX_BUNDLE_SHORT_VERSION_STRING}/0.5.0/; s/${MACOSX_BUNDLE_BUNDLE_VERSION}/42/' \
     -e 's/${MACOSX_BUNDLE_EXECUTABLE_NAME}/Xenra/; s/${MACOSX_BUNDLE_GUI_IDENTIFIER}/Mohammed.Xanite.ui/' \
     -e 's/${MACOSX_BUNDLE_BUNDLE_NAME}/Xenra/; s/${EXECUTABLE_NAME}/Xenra/' \
     -e 's/$(EXECUTABLE_NAME)/Xenra/; s/$(PRODUCT_BUNDLE_IDENTIFIER)/Mohammed.Xanite.ui/' \
