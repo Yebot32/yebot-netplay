@@ -673,6 +673,9 @@ void xe_ios_exit_to_library(void) {
   if (g_app->emu_ && !g_app->emu_->is_paused()) {
     g_app->emu_->Pause();
   }
+  // The game controller deallocates its Metal view; a surface must not be
+  // created from this pointer afterwards.
+  g_game_view = nullptr;
   g_input_driver = nullptr;
   g_status.store(0, std::memory_order_relaxed);
   g_status_detail = "exited";
