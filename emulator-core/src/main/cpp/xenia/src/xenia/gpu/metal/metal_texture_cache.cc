@@ -1627,6 +1627,143 @@ void MetalTextureCache::DumpTextureToFile(MTL::Texture* texture,
   }
 }
 
+void MetalTextureCache::LogTexturePreview(MetalTexture* texture) {
+  if (!texture) {
+    return;
+  }
+  const TextureKey& key = texture->key();
+  switch (key.format) {
+    case xenos::TextureFormat::k_8:
+    case xenos::TextureFormat::k_8_A:
+    case xenos::TextureFormat::k_8_B:
+    case xenos::TextureFormat::k_DXT3A:
+    case xenos::TextureFormat::k_DXT5A:
+      break;
+    default:
+      return;
+  }
+  MTL::Texture* metal_texture = texture->metal_texture();
+  if (!metal_texture ||
+      metal_texture->pixelFormat() != MTL::PixelFormatR8Unorm) {
+    return;
+  }
+  const uint32_t width = uint32_t(metal_texture->width());
+  const uint32_t height = uint32_t(metal_texture->height());
+  if (width < 64 || height < 32) {
+    return;
+  }
+  static std::mutex preview_mutex;
+  static std::unordered_set<uint64_t> previewed;
+  const uint64_t preview_key =
+      (uint64_t(uint32_t(key.format)) << 56) |
+      (uint64_t(uint32_t(key.dimension)) << 52) |
+      (uint64_t(key.tiled) << 51) |
+      (uint64_t(width & 0x1FFF) << 38) | (uint64_t(height & 0x1FFF) << 25) |
+      uint64_t(key.base_page & 0x1FFFFFF);
+  {
+    std::lock_guard<std::mutex> lock(preview_mutex);
+    if (!previewed.insert(preview_key).second) {
+      return;
+    }
+  }
+  metal_texture->retain();
+  std::lock_guard<std::mutex> lock(texture_preview_mutex_);
+  texture_preview_requests_.push_back(
+      {metal_texture, key.format, key.tiled, key.base_page});
+}
+
+void MetalTextureCache::FlushPendingTexturePreviews() {
+  std::vector<TexturePreviewRequest> requests;
+  {
+    std::lock_guard<std::mutex> lock(texture_preview_mutex_);
+    requests.swap(texture_preview_requests_);
+  }
+  if (requests.empty()) {
+    return;
+  }
+  MTL::Device* device = command_processor_->GetMetalDevice();
+  MTL::CommandQueue* queue = command_processor_->GetMetalCommandQueue();
+  if (!device || !queue) {
+    for (const auto& request : requests) {
+      if (request.texture) {
+        request.texture->release();
+      }
+    }
+    return;
+  }
+  for (const auto& request : requests) {
+    MTL::Texture* metal_texture = request.texture;
+    if (!metal_texture) {
+      continue;
+    }
+    const uint32_t width = uint32_t(metal_texture->width());
+    const uint32_t height = uint32_t(metal_texture->height());
+    const size_t bytes_per_row = xe::align(size_t(width), size_t(256));
+    MTL::Buffer* readback = device->newBuffer(
+        bytes_per_row * height, MTL::ResourceStorageModeShared);
+    if (!readback) {
+      metal_texture->release();
+      continue;
+    }
+    {
+      ScopedAutoreleasePool autorelease_pool;
+      MTL::CommandBuffer* command_buffer = queue->commandBuffer();
+      MTL::BlitCommandEncoder* blit =
+          command_buffer ? command_buffer->blitCommandEncoder() : nullptr;
+      if (!blit) {
+        readback->release();
+        metal_texture->release();
+        continue;
+      }
+      blit->copyFromTexture(metal_texture, 0, 0, MTL::Origin::Make(0, 0, 0),
+                            MTL::Size::Make(width, height, 1), readback, 0,
+                            bytes_per_row, 0);
+      blit->endEncoding();
+      command_buffer->commit();
+      command_buffer->waitUntilCompleted();
+    }
+    const uint8_t* source = static_cast<const uint8_t*>(readback->contents());
+    if (!source) {
+      readback->release();
+      metal_texture->release();
+      continue;
+    }
+    // A glyph atlas shows strokes here; an all-white atlas means the glyph
+    // data never reached the host texture, and the text quads stay solid.
+    constexpr uint32_t kColumns = 64;
+    constexpr uint32_t kRows = 32;
+    XELOGI("TexPreview {} {}x{} tiled={} base=0x{:08X}",
+           FormatInfo::GetName(request.format), width, height, request.tiled,
+           request.base_page << 12);
+    for (uint32_t row = 0; row < kRows; ++row) {
+      std::string line;
+      line.reserve(kColumns);
+      const uint32_t y_begin = row * height / kRows;
+      const uint32_t y_end = std::max(y_begin + 1, (row + 1) * height / kRows);
+      for (uint32_t column = 0; column < kColumns; ++column) {
+        const uint32_t x_begin = column * width / kColumns;
+        const uint32_t x_end =
+            std::max(x_begin + 1, (column + 1) * width / kColumns);
+        uint8_t brightest = 0;
+        for (uint32_t y = y_begin; y < std::min(y_end, height); ++y) {
+          const uint8_t* source_row = source + size_t(y) * bytes_per_row;
+          for (uint32_t x = x_begin; x < std::min(x_end, width); ++x) {
+            brightest = std::max(brightest, source_row[x]);
+          }
+        }
+        line.push_back(brightest >= 160   ? '#'
+                       : brightest >= 64  ? '+'
+                       : brightest >= 16  ? '.'
+                                          : ' ');
+      }
+      XELOGI("TexPreview {} {}x{} |{}|", FormatInfo::GetName(request.format),
+             width, height, line.c_str());
+    }
+    readback->release();
+    metal_texture->release();
+  }
+}
+
 bool MetalTextureCache::Initialize() {
   SCOPE_profile_cpu_f("gpu");
   XE_SCOPED_AUTORELEASE_POOL("MetalTextureCache::Initialize");
@@ -2027,6 +2164,7 @@ void MetalTextureCache::ClearScaledResolveBuffers() {
 void MetalTextureCache::CompletedSubmissionUpdated(
     uint64_t completed_submission_index) {
   TextureCache::CompletedSubmissionUpdated(completed_submission_index);
+  FlushPendingTexturePreviews();
   if (scaled_resolve_retired_buffers_.empty()) {
     return;
   }
@@ -3357,6 +3495,7 @@ bool MetalTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   if (texture.key().dimension == xenos::DataDimension::k3D) {
     metal_texture->Invalidate3DAs2DView();
   }
+  LogTexturePreview(metal_texture);
   return true;
 }
 

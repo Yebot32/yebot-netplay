@@ -664,13 +664,15 @@ void xe_ios_exit_to_library(void) {
     });
   }
   g_app->StopEmuThread();
-  if (g_app->emu_) {
-    g_app->emu_->TerminateTitle();
-    g_app->emu_->Shutdown();
+  // Deliberately no TerminateTitle/Shutdown here. KernelState::TerminateTitle
+  // ends with std::quick_exit(EXIT_SUCCESS), so it would end the whole app
+  // instead of returning to the library - the reason Exit Game quit. A second
+  // title cannot be booted in this process anyway (Boot is one-shot and
+  // XenraCoreExited guards the library), so the paused core stays allocated
+  // with its presenter already disconnected and the UIKit screens run on top.
+  if (g_app->emu_ && !g_app->emu_->is_paused()) {
+    g_app->emu_->Pause();
   }
-  // Keep g_app, g_context, g_window and the imgui drawer: the library and the
-  // settings screens are UIKit and must outlive the title. A second boot is
-  // still refused by XenraCoreExited/the one-boot guard.
   g_input_driver = nullptr;
   g_status.store(0, std::memory_order_relaxed);
   g_status_detail = "exited";

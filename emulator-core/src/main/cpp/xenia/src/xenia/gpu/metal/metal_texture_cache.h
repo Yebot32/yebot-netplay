@@ -200,6 +200,19 @@ class MetalTextureCache : public TextureCache {
                                   uint32_t cube_count = 1);
   void DumpTextureToFile(MTL::Texture* texture, const std::string& filename,
                          uint32_t width, uint32_t height);
+  // Temporary font diagnosis: an ASCII preview of an R8 texture in the log.
+  // Queued by LogTexturePreview, read back once the load's submission has
+  // completed, so the data is the uploaded texture and not a mid-draw snapshot.
+  struct TexturePreviewRequest {
+    MTL::Texture* texture;
+    xenos::TextureFormat format;
+    bool tiled;
+    uint32_t base_page;
+  };
+  void LogTexturePreview(MetalTexture* texture);
+  void FlushPendingTexturePreviews();
+  std::vector<TexturePreviewRequest> texture_preview_requests_;
+  std::mutex texture_preview_mutex_;
 
   struct ScaledResolveBuffer {
     MTL::Buffer* buffer = nullptr;
