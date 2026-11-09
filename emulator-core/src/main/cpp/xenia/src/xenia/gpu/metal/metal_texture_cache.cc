@@ -1668,8 +1668,14 @@ void MetalTextureCache::LogTexturePreview(MetalTexture* texture) {
   }
   metal_texture->retain();
   std::lock_guard<std::mutex> lock(texture_preview_mutex_);
-  texture_preview_requests_.push_back(
-      {metal_texture, key.format, key.tiled, key.base_page});
+  // Assign field by field: the key's tiled/base_page are bitfields, which a
+  // braced initializer refuses to narrow into the request struct.
+  TexturePreviewRequest request;
+  request.texture = metal_texture;
+  request.format = key.format;
+  request.tiled = key.tiled != 0;
+  request.base_page = key.base_page;
+  texture_preview_requests_.push_back(request);
 }
 
 void MetalTextureCache::FlushPendingTexturePreviews() {
