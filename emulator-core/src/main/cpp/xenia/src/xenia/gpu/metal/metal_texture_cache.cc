@@ -3626,6 +3626,18 @@ MTL::Texture* MetalTextureCache::MetalTexture::GetOrCreateView(
   MTL::Texture* view = metal_texture_->newTextureView(
       view_format, view_type, level_range, slice_range, swizzle);
   if (!view) {
+    static std::mutex failed_view_mutex;
+    static std::unordered_set<uint64_t> failed_views;
+    const uint64_t failed_view_key =
+        (uint64_t(uint32_t(view_format)) << 32) | host_swizzle;
+    {
+      std::lock_guard<std::mutex> lock(failed_view_mutex);
+      if (failed_views.insert(failed_view_key).second) {
+        XELOGW("Texture view failed: {} type {} swizzle {:03X}",
+               FormatInfo::GetName(key().format), uint32_t(view_type),
+               host_swizzle);
+      }
+    }
     // Returning a mismatched base type can trigger Metal validation asserts.
     return metal_texture_->textureType() == view_type ? metal_texture_
                                                       : nullptr;

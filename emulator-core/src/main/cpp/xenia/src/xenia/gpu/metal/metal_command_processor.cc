@@ -26,6 +26,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <unordered_set>
 #include <utility>
@@ -45,6 +46,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/format_info.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
@@ -2927,6 +2929,39 @@ bool MetalCommandProcessor::IssueDrawMsl(
       // deduplication.
       if (texture) {
         UseRenderEncoderResource(texture, MTL::ResourceUsageRead);
+      }
+    }
+
+    // Diagnostic: what the first draw of each pixel shader samples, so the
+    // font's binding can be identified from a device log while the menu text
+    // renders as solid quads.
+    if (is_pixel_stage) {
+      static std::mutex first_draw_mutex;
+      static std::unordered_set<uint64_t> first_draw_logged;
+      std::lock_guard<std::mutex> lock(first_draw_mutex);
+      if (first_draw_logged.insert(shader->ucode_data_hash()).second) {
+        std::string slots;
+        for (uint32_t slot = 0; slot < texture_count; ++slot) {
+          int32_t texture_binding_index = texture_binding_indices[slot];
+          if (texture_binding_index < 0 ||
+              size_t(texture_binding_index) >= texture_bindings.size()) {
+            continue;
+          }
+          const auto& binding = texture_bindings[size_t(texture_binding_index)];
+          const TextureCache::ActiveTextureInfo info =
+              texture_cache_->GetActiveTextureInfo(binding.fetch_constant);
+          slots += fmt::format(
+              " [slot={} fetch={} dim={} signed={} {} {}x{} tiled={} "
+              "base=0x{:08X} {}]",
+              slot, binding.fetch_constant, uint32_t(binding.dimension),
+              binding.is_signed,
+              info.valid ? FormatInfo::GetName(info.format) : "invalid",
+              info.valid ? info.width : 0, info.valid ? info.height : 0,
+              info.valid ? info.tiled : 0,
+              info.valid ? (info.base_page << 12) : 0,
+              textures[slot] ? "texture" : "null");
+        }
+        XELOGI("DrawTex shader={:016X}{}", shader->ucode_data_hash(), slots);
       }
     }
 

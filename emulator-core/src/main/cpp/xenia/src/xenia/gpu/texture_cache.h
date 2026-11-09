@@ -189,6 +189,30 @@ class TextureCache {
   uint32_t GetActiveTextureHostSwizzle(uint32_t fetch_constant_index) const {
     return texture_bindings_[fetch_constant_index].host_swizzle;
   }
+  // Diagnostic: a copy of the fields the Metal first-draw texture log needs.
+  // TextureKey itself stays protected, so the fields are copied out here.
+  struct ActiveTextureInfo {
+    bool valid;
+    xenos::TextureFormat format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t base_page;
+    bool tiled;
+  };
+  ActiveTextureInfo GetActiveTextureInfo(uint32_t fetch_constant_index) const {
+    ActiveTextureInfo info = {};
+    const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
+    if (!binding) {
+      return info;
+    }
+    info.valid = true;
+    info.format = binding->key.format;
+    info.width = binding->key.GetWidth();
+    info.height = binding->key.GetHeight();
+    info.base_page = binding->key.base_page;
+    info.tiled = binding->key.tiled != 0;
+    return info;
+  }
   uint8_t GetActiveTextureSwizzledSigns(uint32_t fetch_constant_index) const {
     const TextureBinding* binding =
         GetValidTextureBinding(fetch_constant_index);
