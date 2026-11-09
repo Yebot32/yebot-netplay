@@ -2952,13 +2952,15 @@ bool MetalCommandProcessor::IssueDrawMsl(
               texture_cache_->GetActiveTextureInfo(binding.fetch_constant);
           slots += fmt::format(
               " [slot={} fetch={} dim={} signed={} {} {}x{} tiled={} "
-              "base=0x{:08X} {}]",
+              "base=0x{:08X} swizzle={:03X} {}]",
               slot, binding.fetch_constant, uint32_t(binding.dimension),
               binding.is_signed,
               info.valid ? FormatInfo::GetName(info.format) : "invalid",
               info.valid ? info.width : 0, info.valid ? info.height : 0,
               info.valid ? info.tiled : 0,
               info.valid ? (info.base_page << 12) : 0,
+              texture_cache_->GetActiveTextureHostSwizzle(
+                  binding.fetch_constant),
               textures[slot] ? "texture" : "null");
         }
         XELOGI("DrawTex shader={:016X}{}", shader->ucode_data_hash(), slots);
