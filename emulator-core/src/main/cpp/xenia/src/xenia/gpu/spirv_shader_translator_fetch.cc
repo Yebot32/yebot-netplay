@@ -16,6 +16,7 @@
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/math.h"
+#include "xenia/base/platform.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/spirv_compatibility.h"
@@ -2797,6 +2798,26 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
   }
 
   // Store the needed components of the result.
+#if XE_PLATFORM_IOS
+  // Halo 3's UI text shader samples its glyph page as an ink mask, but the
+  // page is stored with the background white and the ink black, while the
+  // shader multiplies the sample into both the colour and the alpha directly.
+  // The menu text therefore draws as solid yellow quads with the letters
+  // punched out. The same shader hash is used for all of the title's text, and
+  // the sampled value feeds the glyph colour through the same components, so
+  // all used components are flipped rather than only the alpha. Gated to iOS
+  // so the Vulkan backend, which does not have this problem, is untouched.
+  if (current_shader().ucode_data_hash() == 0xF3436343ED668812ull) {
+    for (uint32_t result_component_index = 0; result_component_index < 4;
+         ++result_component_index) {
+      if (used_result_components & (UINT32_C(1) << result_component_index)) {
+        result[result_component_index] = builder_->createNoContractionBinOp(
+            spv::OpFSub, type_float_, builder_->makeFloatConstant(1.0f),
+            result[result_component_index]);
+      }
+    }
+  }
+#endif  // XE_PLATFORM_IOS
   spv::Id result_vector;
   if (used_result_component_count > 1) {
     id_vector_temp_.clear();
