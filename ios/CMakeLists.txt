@@ -195,7 +195,7 @@ set_target_properties(xenra-ios PROPERTIES
 set_target_properties(xenra-ios PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${_xe_ios_dir}/Info.plist"
   MACOSX_BUNDLE_SHORT_VERSION_STRING "0.5.0"
-  MACOSX_BUNDLE_BUNDLE_VERSION "44"
+  MACOSX_BUNDLE_BUNDLE_VERSION "45"
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "Mohammed.Xanite.ios"
   # A device build only. The simulator has no JIT story worth testing and no
   # real GPU, which are the two things this app exists to measure.

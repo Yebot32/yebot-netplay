@@ -145,12 +145,25 @@ inline bool hex_string_to_array(std::vector<uint8_t>& output_array,
 
 inline std::string BoolToString(bool value) { return value ? "true" : "false"; }
 
+inline bool IsTrimSpace(char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+         c == '\v';
+}
+
 inline std::string ltrim(const std::string& value) {
-  return std::regex_replace(value, std::regex("^\\s+"), std::string(""));
+  size_t begin = 0;
+  while (begin < value.size() && IsTrimSpace(value[begin])) {
+    ++begin;
+  }
+  return value.substr(begin);
 }
 
 inline std::string rtrim(const std::string& value) {
-  return std::regex_replace(value, std::regex("\\s+$"), std::string(""));
+  size_t end = value.size();
+  while (end > 0 && IsTrimSpace(value[end - 1])) {
+    --end;
+  }
+  return value.substr(0, end);
 }
 
 inline std::string trim(const std::string& value) {

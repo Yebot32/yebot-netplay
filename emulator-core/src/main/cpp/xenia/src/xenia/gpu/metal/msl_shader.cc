@@ -1221,8 +1221,6 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   if (entry_point_candidates.empty()) {
     entry_point_candidates.push_back("main0");
   }
-  AddEntryPointCandidatesFromMslSource(msl_source_, shader().type(),
-                                       &entry_point_candidates);
   entry_point_name_ = entry_point_candidates.front();
   XELOGD("MslShader: Compiled SPIR-V to MSL ({} bytes, entries: {})",
          msl_source_.size(), JoinStringList(entry_point_candidates));
@@ -1341,6 +1339,20 @@ bool MslShader::MslTranslation::CompileToMsl(MTL::Device* device, bool is_ios) {
   for (const auto& candidate : entry_point_candidates) {
     if (try_bind_function(candidate)) {
       break;
+    }
+  }
+  if (!metal_function_) {
+    // The source scan is the last resort for an entry point SPIRV-Cross named
+    // unexpectedly, and its two regular expressions are expensive on every
+    // translated shader. That cost belongs on the failure path only: the names
+    // above bind for virtually every shader, and the scan's candidates were
+    // always tried after them anyway.
+    AddEntryPointCandidatesFromMslSource(msl_source_, shader().type(),
+                                         &entry_point_candidates);
+    for (const auto& candidate : entry_point_candidates) {
+      if (try_bind_function(candidate)) {
+        break;
+      }
     }
   }
   if (!metal_function_) {
