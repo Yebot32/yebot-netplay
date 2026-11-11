@@ -19,7 +19,7 @@ cc() {  # source, extra flags
   clang++ -x objective-c++ $FLAGS $2 -c "$1" -o "build-ui/obj/$(basename "$1").o" || exit 1
 }
 for f in Ambient AppDelegate BladeView ContentInstall Covers DashboardController PadNav UiSounds \
-         GameController GameScanner JitProbe Language Netplay NetplayController Sampler LibraryController Logs Motion Settings SettingsController \
+         GameController GameScanner Insignia InsigniaController JitProbe Language Netplay NetplayController Sampler LibraryController Logs Motion Settings SettingsController \
          SetupController TouchPad UI Xemu; do
   cc "ios/src/Xenra$f.mm" -fobjc-arc &
 done

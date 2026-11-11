@@ -29,6 +29,8 @@ set(_xe_ios_arc_sources
   "${_xe_ios_dir}/src/XenraDashboardController.mm"
   "${_xe_ios_dir}/src/XenraGameController.mm"
   "${_xe_ios_dir}/src/XenraGameScanner.mm"
+  "${_xe_ios_dir}/src/XenraInsignia.mm"
+  "${_xe_ios_dir}/src/XenraInsigniaController.mm"
   "${_xe_ios_dir}/src/XenraJitProbe.mm"
   "${_xe_ios_dir}/src/XenraLanguage.mm"
   "${_xe_ios_dir}/src/XenraLogs.mm"
@@ -83,6 +85,7 @@ add_executable(xenra-ios MACOSX_BUNDLE
   "${_xe_ios_dir}/src/XenraCovers.h"
   "${_xe_ios_dir}/src/XenraGameProbe.hpp"
   "${_xe_ios_dir}/src/XenraGameScanner.h"
+  "${_xe_ios_dir}/src/XenraInsignia.h"
   "${_xe_ios_dir}/src/XenraMetalView.h"
   "${_xe_ios_dir}/src/XenraMetalView.mm"
   "${_xe_ios_dir}/src/XenraTheme.h"
@@ -192,7 +195,7 @@ set_target_properties(xenra-ios PROPERTIES
 set_target_properties(xenra-ios PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${_xe_ios_dir}/Info.plist"
   MACOSX_BUNDLE_SHORT_VERSION_STRING "0.5.0"
-  MACOSX_BUNDLE_BUNDLE_VERSION "43"
+  MACOSX_BUNDLE_BUNDLE_VERSION "44"
   XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "Mohammed.Xanite.ios"
   # A device build only. The simulator has no JIT story worth testing and no
   # real GPU, which are the two things this app exists to measure.

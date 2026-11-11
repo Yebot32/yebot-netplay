@@ -33,6 +33,10 @@ typedef NS_ENUM(NSInteger, XenraDashboardEntry) {
 @interface XenraNetplayController : UIViewController
 @end
 
+// InsigniaSetupActivity: the original Xbox's Xbox Live (Insignia) onboarding.
+@interface XenraInsigniaController : UIViewController
+@end
+
 @interface XenraSettingsController : UIViewController
 // Non-nil: Android's PerGameSettingsActivity for that game.
 @property(nonatomic, copy) NSString* game;

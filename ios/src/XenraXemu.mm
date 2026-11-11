@@ -11,6 +11,7 @@
 #include <vector>
 
 #import "XenraJitProbe.h"
+#import "XenraInsignia.h"
 #import "XenraScreens.h"
 #import "XenraSettings.h"
 
@@ -92,6 +93,10 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
                                            attributes:nil
                                                 error:nil];
   NSURL* eeprom = [XenraSettings urlForBookmark:@"eeprom"];
+  // Android boots the retail dashboard by clearing dvd_path before launch; the
+  // wizard's dashboard boot reaches the core the same way, through a marker
+  // path it recognises here.
+  const BOOL dashboard = [game isEqualToString:XenraInsigniaDashboardPath()];
   NSString* config =
       [NSString stringWithFormat:
                     @"[general]\nshow_welcome = false\n%@"
@@ -121,7 +126,7 @@ static NSString* WriteConfig(NSString* game, NSString* name) {
                     Quoted([XenraSettings urlForBookmark:@"mcpx"].path),
                     Quoted([XenraSettings urlForBookmark:@"flash"].path),
                     Quoted([XenraSettings urlForBookmark:@"hdd"].path),
-                    Quoted(game),
+                    dashboard ? Quoted(@"") : Quoted(game),
                     eeprom ? [NSString stringWithFormat:@"eeprom_path = %@\n",
                                                         Quoted(eeprom.path)]
                            : @""];

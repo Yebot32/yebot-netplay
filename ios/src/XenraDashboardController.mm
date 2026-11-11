@@ -96,7 +96,7 @@ void XenraApplyOrientation(UIViewController* controller) {
                                                         XenraConsole360) {
                                                       [weak showNetplay];
                                                     } else {
-                                                      [weak showOnlineNotice];
+                                                      [weak showInsignia];
                                                     }
                                                   }];
   XenraBladeButton* settings =
@@ -322,12 +322,12 @@ void XenraApplyOrientation(UIViewController* controller) {
   });
 }
 
-- (void)showOnlineNotice {
-  [XenraBladeSheet showIn:self.view
-                    title:onlineBlade_.title
-                  message:XS(@"Online play isn't available on iPad and iPhone yet. "
-                          "Everything else works without it.")
-                    items:@[]];
+- (void)showInsignia {
+  // InsigniaSetupActivity: the original Xbox's Xbox Live is alive again, so the
+  // blade goes to its setup screen instead of a notice.
+  [self.navigationController
+      pushViewController:[[XenraInsigniaController alloc] init]
+                animated:YES];
 }
 
 // --- Xbox 360 System Link ----------------------------------------------------
