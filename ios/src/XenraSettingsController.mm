@@ -337,10 +337,6 @@ static UIStackView* RowText(NSString* title, NSString* detail) {
 void XenraShowAbout(UIView* host) {
   NSString* version =
       NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"";
-  NSString* build =
-      NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"";
-  NSString* version_with_build =
-      [NSString stringWithFormat:@"%@ (%@)", version, build];
   NSMutableArray* items = [NSMutableArray array];
   NSArray* links = @[
     @[ @"Discord", @"https://discord.gg/U5kytJ4dub" ],
@@ -372,7 +368,7 @@ void XenraShowAbout(UIView* host) {
                                         XS(@"Version %@\n\nDeveloper and owner: yebot32\n"
                                          "Founder and previous owner: Ali Alsaadi\n\n"
                                          "Join the community:"),
-                                        version_with_build]
+                                        version]
                     items:items];
 }
 

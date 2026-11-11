@@ -205,8 +205,6 @@ static XenraSettingSection* TouchSection(void) {
 static XenraSettingSection* AppSection(void) {
   NSString* version =
       NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"";
-  NSString* build =
-      NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"";
   return Section(XS(@"App"), @[
     Action(@"cache.clear", XS(@"Clear shader cache"),
            XS(@"Games compile their shaders again on next launch.")),
@@ -215,7 +213,7 @@ static XenraSettingSection* AppSection(void) {
     // The version is the row's detail so it is visible without opening the
     // sheet; the sheet carries the credits and every community link.
     Action(@"about", XS(@"About Xenra"),
-           [NSString stringWithFormat:@"Version %@ (%@)", version, build]),
+           [NSString stringWithFormat:@"Version %@", version]),
   ]);
 }
 
