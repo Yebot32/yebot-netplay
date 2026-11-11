@@ -122,7 +122,7 @@ static NSString* DNSAtURL(NSURL* url) {
   NSData* data = [NSData dataWithContentsOfURL:url options:0 error:nil];
   if (scoped) [url stopAccessingSecurityScopedResource];
   if (data.length != kEepromSize) return nil;
-  const uint8_t* bytes = data.bytes;
+  const uint8_t* bytes = (const uint8_t*)data.bytes;
   return [NSString
       stringWithFormat:@"%u.%u.%u.%u", bytes[kXboxLiveDNSOffset],
                        bytes[kXboxLiveDNSOffset + 1],
@@ -159,7 +159,7 @@ BOOL XenraInsigniaApplyDNS(NSError** error) {
 
   uint8_t dns[4] = {46, 101, 64, 175};
   NSMutableData* edited = [data mutableCopy];
-  uint8_t* bytes = edited.mutableBytes;
+  uint8_t* bytes = (uint8_t*)edited.mutableBytes;
   if (memcmp(bytes + kXboxLiveDNSOffset, dns, sizeof(dns)) == 0) {
     if (scoped) [url stopAccessingSecurityScopedResource];
     return NO;

@@ -173,7 +173,7 @@ static UIView* Hairline(void) {
       initWithTitle:XS(@"Run setup again")
               style:XenraPillOutlined
              action:^{
-               [weak clearProgress];
+               [weak confirmClear];
              }];
   XenraPillButton* guide = [[XenraPillButton alloc]
       initWithTitle:XS(@"Read the full guide")
