@@ -821,15 +821,10 @@ static void ConsoleTour(NSString* console, NSString* online) {
 
   Tap(online);
   Both([NSString stringWithFormat:@"%@-online", console]);
-  if ([online isEqualToString:@"Netplay"]) {
-    // The 360 blade opens a screen now, not a notice sheet. Go back to the
-    // dashboard so the library steps below run where they expect to.
-    Pop();
-    Pause();
-  } else {
-    Tap(@"OK");
-    Pause();
-  }
+  // Both blades open a screen now, not a notice sheet. Go back to the dashboard
+  // so the library steps below run where they expect to.
+  Pop();
+  Pause();
 
   LongSheetTour(console);
   GalleryTour(console);
@@ -909,7 +904,7 @@ static void LanguageTour(NSString* code) {
   Pause();
   Tap(@"Xbox Live");
   shot(@"og-online");
-  Tap(XS(@"OK"));
+  Pop();
   Pause();
 
   Tap(XS(@"Game Library"));
