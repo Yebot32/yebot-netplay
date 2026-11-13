@@ -10,6 +10,13 @@
 
 #import <UIKit/UIKit.h>
 
+// JIT-less launches load the TCG-interpreter build of the core
+// (libxemu-ios-core-tci.dylib), which needs no debugger and no executable
+// memory. Set before XenraXemuAvailable/Prepare; the choice lasts the process.
+void XenraXemuSetJitless(BOOL jitless);
+BOOL XenraXemuIsJitless(void);
+
+// Whether the core for the current mode (JIT or JIT-less) is in the bundle.
 BOOL XenraXemuAvailable(void);
 
 // What the user still has to pick before a game can boot, or nil.

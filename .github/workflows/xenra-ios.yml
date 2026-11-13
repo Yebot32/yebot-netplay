@@ -259,7 +259,10 @@ jobs:
         tar -xzf core-artifact/xemu-ios-core.tar.gz -C core-artifact
         mkdir -p "$APP/Frameworks"
         cp -R core-artifact/core/. "$APP/Frameworks/"
-        install_name_tool -add_rpath @loader_path "$APP/Frameworks/libxemu-ios-core.dylib" || true
+        # The JIT build and, when the core run made one, the JIT-less (TCI) build.
+        for core in "$APP"/Frameworks/libxemu-ios-core*.dylib; do
+          install_name_tool -add_rpath @loader_path "$core" || true
+        done
         ls -la "$APP/Frameworks"
 
     # This produces an UNSIGNED ipa, and that is the default, not a failure

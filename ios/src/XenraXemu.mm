@@ -20,10 +20,18 @@ static void (*g_set_touch)(int, uint32_t, int16_t, int16_t, int16_t, int16_t,
                            int16_t, int16_t);
 static void (*g_shutdown)(void);
 static void (*g_reset)(int);
+// JIT-less launches load the TCG-interpreter build of the core instead of the
+// JIT build. Set once, before XenraXemuPrepare, by the launch gate.
+static BOOL g_jitless = NO;
+
+void XenraXemuSetJitless(BOOL jitless) { g_jitless = jitless; }
+BOOL XenraXemuIsJitless(void) { return g_jitless; }
 
 static NSString* CorePath(void) {
+  NSString* name =
+      g_jitless ? @"libxemu-ios-core-tci.dylib" : @"libxemu-ios-core.dylib";
   return [NSBundle.mainBundle.privateFrameworksPath
-      stringByAppendingPathComponent:@"libxemu-ios-core.dylib"];
+      stringByAppendingPathComponent:name];
 }
 
 
@@ -165,7 +173,10 @@ BOOL XenraXemuNeedsScript(void) {
 }
 
 NSString* XenraXemuFileProblem(void) {
-  if (!NeedsUniversalJit() && XenraJitChooseScheme() == XenraJitNone) {
+  // JIT-less never maps executable memory, so there is nothing to probe (and
+  // probing without CS_DEBUGGED is exactly what it must not do).
+  if (!g_jitless && !NeedsUniversalJit() &&
+      XenraJitChooseScheme() == XenraJitNone) {
     return XS(@"JIT is on, but iOS still refuses to run generated code. This iPad "
               "needs StikDebug's universal script: assign it to Xenra in StikDebug, "
               "then start the game again.");
@@ -231,9 +242,10 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
       dlsym(g_core, "xemu_ios_set_external_metal_layer"));
   if (!main) return -1;
 
-  const BOOL universal = NeedsUniversalJit();
+  const BOOL universal = g_jitless ? NO : NeedsUniversalJit();
   const XenraJitScheme scheme =
-      universal ? XenraJitRxFirst : XenraJitChooseScheme();
+      g_jitless ? XenraJitNone
+                : (universal ? XenraJitRxFirst : XenraJitChooseScheme());
   NSString* docs = NSSearchPathForDirectoriesInDomains(
                        NSDocumentDirectory, NSUserDomainMask, YES)
                        .firstObject;
@@ -302,8 +314,13 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
       setenv(name, "1", 1);
     }
   }
-  if (!universal && scheme == XenraJitRxFirst) setenv("XEMU_IOS_RX_FIRST", "1", 1);
-  if (!universal && scheme == XenraJitFlip) setenv("XEMU_IOS_JIT_FLIP", "1", 1);
+  if (g_jitless) {
+    // The TCI build interprets TCG; no executable memory, no JIT prepare.
+    setenv("XEMU_IOS_TCI", "1", 1);
+  } else {
+    if (!universal && scheme == XenraJitRxFirst) setenv("XEMU_IOS_RX_FIRST", "1", 1);
+    if (!universal && scheme == XenraJitFlip) setenv("XEMU_IOS_JIT_FLIP", "1", 1);
+  }
   ApplyPacing(layer);
   // Sound through the mute switch, and pads that keep working with our window
   // key rather than SDL's.

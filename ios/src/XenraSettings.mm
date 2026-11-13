@@ -177,6 +177,15 @@ static XenraSettingSection* LanguageSection(void) {
 
 static XenraSettingSection* JitSection(void) {
   return Section(@"JIT", @[
+    // Read at game open by XenraGameController; a game can keep its own.
+    PerGame(XS(@"Performance"),
+            Segment(@"cpu.mode", XS(@"CPU mode"),
+                    XS(@"JIT is fastest and needs StikDebug. JIT-less runs "
+                       "without a debugger but is much slower, and is a "
+                       "fallback for original Xbox games only for now."),
+                    @[ XS(@"JIT (recommended)"), XS(@"JIT-less (slower)"),
+                       XS(@"Ask each time") ],
+                    @[ @"jit", @"jitless", @"ask" ], @"jit")),
     Action(@"jit.enable", XS(@"Enable JIT"),
            XS(@"Opens StikDebug. Needed once per launch.")),
     Action(@"memory.limit", XS(@"Memory limit"),

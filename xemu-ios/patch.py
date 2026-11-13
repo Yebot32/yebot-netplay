@@ -52,6 +52,16 @@ replace(
     "    if (xemu_ios_universal_jit_is_enabled() || getenv(\"XEMU_IOS_RX_FIRST\")) {\n        void *buf_rw;\n",
 )
 
+# The JIT-less core is the same tree built with --enable-tcg-interpreter. TCI never
+# executes from the code buffer, so the iOS executable-region block above has no
+# place there, and host_prot_read_exec() it calls does not even exist under TCI.
+# Without it the buffer is plain read-write memory: nothing needs CS_DEBUGGED.
+replace(
+    "tcg/region.c",
+    "#ifdef CONFIG_IOS\n    if (xemu_ios_universal_jit_is_enabled() || getenv(\"XEMU_IOS_RX_FIRST\")) {\n",
+    "#if defined(CONFIG_IOS) && !defined(CONFIG_TCG_INTERPRETER)\n    if (xemu_ios_universal_jit_is_enabled() || getenv(\"XEMU_IOS_RX_FIRST\")) {\n",
+)
+
 # QEMU leaves SIGBUS blocked on every thread it starts. On Darwin a blocked
 # synchronous fault is not delivered: the thread retries the instruction for ever.
 # That was the "hang in the first translation block" with no signal, on the M1.

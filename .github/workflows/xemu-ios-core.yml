@@ -152,11 +152,38 @@ jobs:
           bash ios/scripts/build-core-ios.sh -k 0 2>&1 | tee "$HOME/core-build.log"
           test "${PIPESTATUS[0]}" = 0
 
+      # The JIT-less core: same tree, TCG interpreter instead of the AArch64
+      # backend. It never needs executable memory, so it runs with no debugger
+      # attached, roughly an order of magnitude slower. The interpreter is a
+      # build-time choice, so it is a second dylib the app picks at launch. A
+      # failure here does not lose the JIT core: Package ships it alone.
+      - name: Build JIT-less core
+        id: tci
+        continue-on-error: true
+        env:
+          XEMU_IOS_NINJA_TARGETS: libxemu-ios-core.dylib
+          XEMU_IOS_CONFIGURE_ARGS: --enable-lto --enable-tcg-interpreter
+          CCACHE_DIR: /Users/runner/.ccache-xemu
+        run: |
+          export XEMU_IOS_VCPKG_PREFIX="$HOME/vcpkg-prefix"
+          export XEMU_IOS_BUILD_DIR="$HOME/xemu/build-ios-arm64-tci"
+          cd "$HOME/xemu"
+          bash ios/scripts/build-core-ios.sh -k 0 2>&1 | tee "$HOME/core-build-tci.log"
+          test "${PIPESTATUS[0]}" = 0
+
       - name: Package
         run: |
           B="$HOME/xemu/build-ios-arm64"
           mkdir -p core
           cp "$B/libxemu-ios-core.dylib" core/
+          T="$HOME/xemu/build-ios-arm64-tci/libxemu-ios-core.dylib"
+          if [ -f "$T" ] && [ "${{ steps.tci.outcome }}" = success ]; then
+            cp "$T" core/libxemu-ios-core-tci.dylib
+            install_name_tool -id @rpath/libxemu-ios-core-tci.dylib core/libxemu-ios-core-tci.dylib
+            otool -L core/libxemu-ios-core-tci.dylib
+          else
+            echo "::warning::No JIT-less core in this build."
+          fi
           cp "$(find "$B/subprojects" -name 'libslirp.0.dylib' | head -1)" core/
           ditto "$MOLTENVK_FRAMEWORK" core/MoltenVK.framework
           otool -L core/libxemu-ios-core.dylib
@@ -177,6 +204,7 @@ jobs:
           name: xemu-ios-core-logs
           path: |
             ~/core-build.log
+            ~/core-build-tci.log
             ~/xemu/build-ios-arm64/config.log
             ~/xemu/build-ios-arm64/meson-logs/meson-log.txt
           if-no-files-found: ignore

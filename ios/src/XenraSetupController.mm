@@ -814,10 +814,12 @@ static CGAffineTransform AwayPage(CGSize size, NSInteger side) {
   XenraCardView* about = Card(16, 1.5, 16, 6, XenraSurfaceVariant());
   [about.body
       addArrangedSubview:
-          Paragraph(XS(@"Games need JIT, which iOS only allows while a debugger "
-                     "tool has attached to Xenra. That takes two things: an "
-                     "install signed with a development certificate, and JIT "
-                     "enabled for Xenra in StikDebug."),
+          Paragraph(XS(@"Games run best with JIT, which iOS only allows while a "
+                     "debugger tool has attached to Xenra. That takes two "
+                     "things: an install signed with a development "
+                     "certificate, and JIT enabled for Xenra in StikDebug. "
+                     "Original Xbox games can also run JIT-less (Settings, "
+                     "CPU mode) with no debugger, but much slower."),
                     14, XenraTextMuted(), 1.4, NSTextAlignmentNatural)];
   [stack addArrangedSubview:about];
   Gap(stack, 8);

@@ -129,6 +129,11 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   BOOL pausedForBackground_;
   // A physical pad was feeding the guest on the last tick.
   BOOL hadGamepad_;
+  // JIT or JIT-less is settled for this launch (from settings or the sheet).
+  BOOL modeDecided_;
+  BOOL jitless_;
+  // The JIT / JIT-less sheet is up.
+  BOOL choosingMode_;
 }
 
 + (instancetype)takePendingAfterJit {
@@ -292,7 +297,27 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
 - (void)viewDidAppear:(BOOL)animated {
   [super viewDidAppear:animated];
   [UIApplication.sharedApplication setIdleTimerDisabled:YES];
-  if (booted_ || jitTimer_) return;
+  if (booted_ || jitTimer_ || choosingMode_) return;
+  if (!modeDecided_) {
+    // Back from StikDebug, or a debugger already attached: JIT is there for
+    // free, so only an explicit JIT-less setting turns it down.
+    NSString* mode = resumed_ ? @"jit"
+                              : [XenraSettings valueForKey:@"cpu.mode"
+                                                      game:name_
+                                                  fallback:@"jit"];
+    if ([mode isEqual:@"ask"] && !XenraJitActive()) {
+      [self askCpuMode];
+      return;
+    }
+    modeDecided_ = YES;
+    jitless_ = [mode isEqual:@"jitless"];
+    XenraLog([NSString stringWithFormat:@"cpu mode: %@ (setting %@)",
+                                        jitless_ ? @"jitless" : @"jit", mode]);
+  }
+  if (jitless_) {
+    [self startJitless];
+    return;
+  }
   if (og_) {
     NSString* problem = XenraXemuPrepare();
     if (problem) {
@@ -324,6 +349,109 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
                                                 block:^(NSTimer*) {
                                                   [weak checkJit];
                                                 }];
+}
+
+// The CPU mode setting is on "Ask each time". JIT is offered first; JIT-less
+// only exists for the original Xbox so far (the 360 core has no interpreter).
+- (void)askCpuMode {
+  choosingMode_ = YES;
+  __weak XenraGameController* weak = self;
+  __block BOOL chosen = NO;
+  void (^pick)(BOOL, BOOL) = ^(BOOL jitless, BOOL remember) {
+    chosen = YES;
+    [weak chooseCpuMode:jitless remember:remember];
+  };
+  XenraBladeItem* jit = [XenraBladeItem title:XS(@"JIT (recommended)")
+                                       action:^{
+                                         pick(NO, NO);
+                                       }];
+  jit.subtitle = XS(@"Full speed. Opens StikDebug.");
+  jit.primary = YES;
+  XenraBladeItem* jitAlways = [XenraBladeItem title:XS(@"Always JIT for this game")
+                                             action:^{
+                                               pick(NO, YES);
+                                             }];
+  XenraBladeItem* jitless = nil;
+  XenraBladeItem* jitlessAlways = nil;
+  if (og_) {
+    jitless = [XenraBladeItem title:XS(@"JIT-less (slower)")
+                             action:^{
+                               pick(YES, NO);
+                             }];
+    jitless.subtitle = XS(@"No debugger needed, but many games run far below "
+                          "full speed. A fallback, not a performance mode.");
+    jitlessAlways = [XenraBladeItem title:XS(@"Always JIT-less for this game")
+                                   action:^{
+                                     pick(YES, YES);
+                                   }];
+  } else {
+    // Unavailable: the tap only dismisses, and onDismiss asks again.
+    jitless = [XenraBladeItem title:XS(@"JIT-less (coming later)")
+                             action:^{
+                             }];
+    jitless.subtitle = XS(@"Xbox 360 games need JIT for now.");
+    jitless.dimmed = YES;
+  }
+  NSMutableArray* items = [NSMutableArray arrayWithObjects:jit, jitless, nil];
+  [items addObject:jitAlways];
+  if (jitlessAlways) [items addObject:jitlessAlways];
+  XenraBladeSheet* sheet = [XenraBladeSheet showIn:self.view
+                                             title:XS(@"How should this game run?")
+                                           message:nil
+                                             items:items];
+  // Tapped away without a choice: this screen has no other way on, so ask
+  // again. A row dismisses first and runs its action after, hence the async.
+  sheet.onDismiss = ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
+      XenraGameController* strong = weak;
+      if (!strong || chosen || !strong->choosingMode_) return;
+      strong->choosingMode_ = NO;
+      [strong askCpuMode];
+    });
+  };
+  XenraPadNavScreenChanged();
+}
+
+- (void)chooseCpuMode:(BOOL)jitless remember:(BOOL)remember {
+  choosingMode_ = NO;
+  modeDecided_ = YES;
+  jitless_ = jitless;
+  if (remember) {
+    for (XenraSettingSection* section in [XenraSettings perGameSections]) {
+      for (XenraSettingRow* row in section.rows) {
+        if ([row.key isEqual:@"cpu.mode"]) {
+          [XenraSettings setValue:jitless ? @"jitless" : @"jit" row:row game:name_];
+        }
+      }
+    }
+  }
+  XenraLog([NSString stringWithFormat:@"cpu mode: %@ (asked%@)",
+                                      jitless ? @"jitless" : @"jit",
+                                      remember ? @", remembered" : @""]);
+  [self viewDidAppear:NO];
+}
+
+// No debugger and no executable memory: the OG core's TCG-interpreter build.
+// The 360 core has no interpreter yet, so it says so instead of hanging.
+- (void)startJitless {
+  if (!og_) {
+    [self showFailure:XS(@"JIT-less mode is not available for Xbox 360 games "
+                         "yet: the 360 core has no CPU interpreter. Set CPU mode "
+                         "to JIT in Settings (or for this game) and enable JIT "
+                         "with StikDebug.")];
+    return;
+  }
+  XenraXemuSetJitless(YES);
+  if (!XenraXemuAvailable()) {
+    [self showFailure:XS(@"This build of Xenra does not include the JIT-less "
+                         "original Xbox core. Set CPU mode to JIT in Settings.")];
+    return;
+  }
+  if (NSString* problem = XenraXemuPrepare()) {
+    [self showFailure:problem];
+    return;
+  }
+  [self boot];
 }
 
 // JIT came on without the script, so ask StikDebug to attach it to this process.
