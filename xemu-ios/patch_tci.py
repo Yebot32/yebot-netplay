@@ -982,6 +982,133 @@ replace(
 ''',
 )
 
+# Implicit per-access barriers. tcg_gen_req_mo puts a barrier before every
+# guest load and store so a weakly ordered host keeps x86's TSO order towards
+# other threads: 22.7M barriers/s on Smashing Drive, one per access. With one
+# vCPU (thread=single) the only other observers are device threads (nv2a
+# pfifo, APU, DMA), and they hand off with the vCPU through MMIO, which runs
+# under QEMU locks whose release/acquire already orders the stores before
+# them. JIT-less skips the implicit ones by default; explicit guest fences
+# (mfence/lfence/sfence, locked ops) still go through tcg_gen_mb untouched.
+# XEMU_IOS_TCI_STRICT_MO=1 restores them.
+replace(
+    "tcg/tcg-op-ldst.c",
+    "static void tcg_gen_req_mo(TCGBar type)\n{\n",
+    "#ifdef CONFIG_TCG_INTERPRETER\n"
+    "bool xemu_tci_relaxed_mo(void);\n"
+    "#endif\n\n"
+    "static void tcg_gen_req_mo(TCGBar type)\n{\n"
+    "#ifdef CONFIG_TCG_INTERPRETER\n"
+    "    if (xemu_tci_relaxed_mo()) {\n"
+    "        return;\n"
+    "    }\n"
+    "#endif\n",
+)
+replace(
+    "tcg/tci.c",
+    "static inline void tci_count_op(unsigned *prev, unsigned opc)\n",
+    r'''bool xemu_tci_relaxed_mo(void);
+bool xemu_tci_relaxed_mo(void)
+{
+    static int relaxed = -1;
+    if (unlikely(relaxed < 0)) {
+        const char *strict = getenv("XEMU_IOS_TCI_STRICT_MO");
+        relaxed = !(strict && strcmp(strict, "0"));
+        fprintf(stderr, "xemu-tci: implicit guest ld/st barriers %s\n",
+                relaxed ? "off (XEMU_IOS_TCI_STRICT_MO=1 restores)" : "on");
+    }
+    return relaxed;
+}
+
+static inline void tci_count_op(unsigned *prev, unsigned opc)
+''',
+)
+
+# Branch on a compare with a constant: tci_movi>tci_brcond32 was 2.6% of ops.
+# Same insn as tci_brcond, the constant in the next word. The 12-bit offset
+# is relative to the word after the insn (where patch_reloc measures from),
+# so the interpreter reads the constant without moving that base.
+replace(
+    "tcg/tci/tcg-target-con-set.h",
+    "C_O0_I2(ri, r)\n",
+    "C_O0_I2(ri, r)\nC_O0_I2(r, ri)\n",
+)
+replace(
+    "tcg/tci/tcg-target-opc.h.inc",
+    "DEF(tci_setcond64i, 1, 1, 2, TCG_OPF_NOT_PRESENT)\n",
+    "DEF(tci_setcond64i, 1, 1, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_brcond32i, 0, 1, 3, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_brcond64i, 0, 1, 3, TCG_OPF_NOT_PRESENT)\n",
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static const TCGOutOpBrcond outop_brcond = {\n"
+    "    .base.static_constraint = C_O0_I2(r, r),\n"
+    "    .out_rr = tgen_brcond,\n",
+    r'''static void tgen_brcondi(TCGContext *s, TCGType type, TCGCond cond,
+                         TCGReg arg0, tcg_target_long arg1, TCGLabel *l)
+{
+    tcg_insn_unit insn = 0;
+
+    if (type == TCG_TYPE_I32) {
+        arg1 = (int32_t)arg1;
+    } else if (arg1 != (int32_t)arg1) {
+        tcg_out_movi(s, type, TCG_REG_TMP, arg1);
+        tgen_brcond(s, type, cond, arg0, TCG_REG_TMP, l);
+        return;
+    }
+    tcg_out_reloc(s, s->code_ptr, 12, l, 0);
+    insn = deposit32(insn, 0, 8, type == TCG_TYPE_I32 ? INDEX_op_tci_brcond32i
+                                                      : INDEX_op_tci_brcond64i);
+    insn = deposit32(insn, 8, 4, arg0);
+    insn = deposit32(insn, 16, 4, cond);
+    tcg_out32(s, insn);
+    tcg_out32(s, (uint32_t)arg1);
+}
+
+static const TCGOutOpBrcond outop_brcond = {
+    .base.static_constraint = C_O0_I2(r, ri),
+    .out_rr = tgen_brcond,
+    .out_ri = tgen_brcondi,
+''',
+)
+replace(
+    "tcg/tci.c",
+    "        case INDEX_op_tci_setcond32i:\n",
+    r'''        case INDEX_op_tci_brcond32i:
+            ptr = (void *)((const char *)tb_ptr + sextract32(insn, 20, 12));
+            tmp32 = *tb_ptr++;
+            if (tci_compare32(regs[extract32(insn, 8, 4)], tmp32,
+                              extract32(insn, 16, 4))) {
+                tb_ptr = ptr;
+            }
+            break;
+        case INDEX_op_tci_brcond64i:
+            ptr = (void *)((const char *)tb_ptr + sextract32(insn, 20, 12));
+            tmp64 = (int64_t)(int32_t)*tb_ptr++;
+            if (tci_compare64(regs[extract32(insn, 8, 4)], tmp64,
+                              extract32(insn, 16, 4))) {
+                tb_ptr = ptr;
+            }
+            break;
+        case INDEX_op_tci_setcond32i:
+''',
+)
+replace(
+    "tcg/tci.c",
+    "    case INDEX_op_tci_setcond32i:\n    case INDEX_op_tci_setcond64i:\n",
+    r'''    case INDEX_op_tci_brcond32i:
+    case INDEX_op_tci_brcond64i:
+        info->fprintf_func(info->stream, "%-12s  %s, 0x%x, %s, %+d",
+                           op_name, str_r(extract32(insn, 8, 4)), *tb_ptr,
+                           str_c(extract32(insn, 16, 4)),
+                           sextract32(insn, 20, 12));
+        return 2 * sizeof(insn);
+    case INDEX_op_tci_setcond32i:
+    case INDEX_op_tci_setcond64i:
+''',
+)
+
 # Computed-goto dispatch. The profile put ~90% of JIT-less CPU time in the
 # interpreter loop at 7-10 cycles per op, and the single `switch` gives every
 # op one shared, bounds-checked indirect jump. Each case now ends in its own
