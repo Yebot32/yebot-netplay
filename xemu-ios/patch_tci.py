@@ -602,6 +602,193 @@ replace(
     "    ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);\n",
 )
 
+# Immediate operands. TCI had none: every constant was a tci_movi into a
+# register first (17% of all interpreted ops on Smashing Drive). Two places
+# produce most of them on an x86 guest:
+#  - stores of constants: syncing globals that hold a known value (eip,
+#    cc_op) and immediate call arguments go through tcg_out_sti, which TCI
+#    refused, and st/st8/st16/st32 ops with a constant value;
+#  - add of a constant (sub of a constant is canonicalised to add).
+# Store-immediate: insn = op | base << 8 | s20 offset << 12, then the value in
+# the next word (two words for a 64-bit store). An offset outside s20 goes
+# through TCG_REG_TMP exactly like tcg_out_ldst. Add-immediate uses the rrs
+# layout when the constant fits s16, else the old movi + add.
+replace(
+    "tcg/tci/tcg-target-con-set.h",
+    "C_O0_I2(r, r)\n",
+    "C_O0_I2(r, r)\nC_O0_I2(ri, r)\n",
+)
+replace(
+    "tcg/tci/tcg-target-con-set.h",
+    "C_O1_I2(r, r, r)\n",
+    "C_O1_I2(r, r, r)\nC_O1_I2(r, r, ri)\n",
+)
+replace(
+    "tcg/tci/tcg-target-opc.h.inc",
+    "DEF(tci_qemu_st_x, 0, 2, 0, TCG_OPF_NOT_PRESENT)\n",
+    "DEF(tci_qemu_st_x, 0, 2, 0, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_addi, 1, 1, 1, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_st8i, 0, 1, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_st16i, 0, 1, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_st32i, 0, 1, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_sti, 0, 1, 2, TCG_OPF_NOT_PRESENT)\n",
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "    tcg_out_op_rrs(s, op, val, base, offset);\n}\n",
+    r'''    tcg_out_op_rrs(s, op, val, base, offset);
+}
+
+static void tci_out_sti(TCGContext *s, TCGOpcode op, tcg_target_long val,
+                        TCGReg base, intptr_t offset)
+{
+    tcg_insn_unit insn = 0;
+
+    QEMU_BUILD_BUG_ON(TCG_TARGET_REG_BITS != 64);
+    stack_bounds_check(base, offset);
+    if (offset != sextract32(offset, 0, 20)) {
+        tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_TMP, offset);
+        tcg_out_op_rrr(s, INDEX_op_add, TCG_REG_TMP, TCG_REG_TMP, base);
+        base = TCG_REG_TMP;
+        offset = 0;
+    }
+    insn = deposit32(insn, 0, 8, op);
+    insn = deposit32(insn, 8, 4, base);
+    insn = deposit32(insn, 12, 20, offset);
+    tcg_out32(s, insn);
+    tcg_out32(s, (uint32_t)val);
+    if (op == INDEX_op_tci_sti) {
+        tcg_out32(s, (uint32_t)((uint64_t)val >> 32));
+    }
+}
+
+static void tgen_st8_i(TCGContext *s, TCGType type, tcg_target_long val,
+                       TCGReg base, intptr_t offset)
+{
+    tci_out_sti(s, INDEX_op_tci_st8i, val, base, offset);
+}
+
+static void tgen_st16_i(TCGContext *s, TCGType type, tcg_target_long val,
+                        TCGReg base, intptr_t offset)
+{
+    tci_out_sti(s, INDEX_op_tci_st16i, val, base, offset);
+}
+
+static void tgen_st_i(TCGContext *s, TCGType type, tcg_target_long val,
+                      TCGReg base, intptr_t offset)
+{
+    tci_out_sti(s, type == TCG_TYPE_I32 ? INDEX_op_tci_st32i
+                                        : INDEX_op_tci_sti,
+                val, base, offset);
+}
+''',
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static inline bool tcg_out_sti(TCGContext *s, TCGType type, TCGArg val,\n"
+    "                               TCGReg base, intptr_t ofs)\n"
+    "{\n    return false;\n}\n",
+    "static inline bool tcg_out_sti(TCGContext *s, TCGType type, TCGArg val,\n"
+    "                               TCGReg base, intptr_t ofs)\n"
+    "{\n"
+    "    if (type != TCG_TYPE_I32 && type != TCG_TYPE_I64) {\n"
+    "        return false;\n"
+    "    }\n"
+    "    tgen_st_i(s, type, val, base, ofs);\n"
+    "    return true;\n"
+    "}\n",
+)
+for _op, _out in (("st8", "tgen_st8"), ("st16", "tgen_st16"), ("st", "tcg_out_st")):
+    replace(
+        "tcg/tci/tcg-target.c.inc",
+        f"static const TCGOutOpStore outop_{_op} = {{\n"
+        f"    .base.static_constraint = C_O0_I2(r, r),\n"
+        f"    .out_r = {_out},\n",
+        f"static const TCGOutOpStore outop_{_op} = {{\n"
+        f"    .base.static_constraint = C_O0_I2(ri, r),\n"
+        f"    .out_r = {_out},\n"
+        f"    .out_i = {'tgen_st_i' if _op == 'st' else _out + '_i'},\n",
+    )
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static const TCGOutOpBinary outop_add = {\n"
+    "    .base.static_constraint = C_O1_I2(r, r, r),\n"
+    "    .out_rrr = tgen_add,\n",
+    r'''static void tgen_addi(TCGContext *s, TCGType type,
+                      TCGReg a0, TCGReg a1, tcg_target_long a2)
+{
+    if (type == TCG_TYPE_I32) {
+        /* Only the low 32 bits of an I32 result matter; movi sign-extends
+         * the same way, so -16 passed as 0xfffffff0 can still be an addi. */
+        a2 = (int32_t)a2;
+    }
+    if (a2 == sextract64(a2, 0, 16)) {
+        tcg_out_op_rrs(s, INDEX_op_tci_addi, a0, a1, a2);
+    } else {
+        tcg_out_movi(s, type, TCG_REG_TMP, a2);
+        tcg_out_op_rrr(s, INDEX_op_add, a0, a1, TCG_REG_TMP);
+    }
+}
+
+static const TCGOutOpBinary outop_add = {
+    .base.static_constraint = C_O1_I2(r, r, ri),
+    .out_rrr = tgen_add,
+    .out_rri = tgen_addi,
+''',
+)
+replace(
+    "tcg/tci.c",
+    "        case INDEX_op_tci_qemu_ld_x:\n            tci_args_rr(insn, &r0, &r1);\n",
+    r'''        case INDEX_op_tci_addi:
+            tci_args_rrs(insn, &r0, &r1, &ofs);
+            regs[r0] = regs[r1] + (tcg_target_long)ofs;
+            break;
+        case INDEX_op_tci_st8i:
+            ptr = (void *)(regs[extract32(insn, 8, 4)] +
+                           sextract32(insn, 12, 20));
+            *(uint8_t *)ptr = *tb_ptr++;
+            break;
+        case INDEX_op_tci_st16i:
+            ptr = (void *)(regs[extract32(insn, 8, 4)] +
+                           sextract32(insn, 12, 20));
+            *(uint16_t *)ptr = *tb_ptr++;
+            break;
+        case INDEX_op_tci_st32i:
+            ptr = (void *)(regs[extract32(insn, 8, 4)] +
+                           sextract32(insn, 12, 20));
+            *(uint32_t *)ptr = *tb_ptr++;
+            break;
+        case INDEX_op_tci_sti:
+            ptr = (void *)(regs[extract32(insn, 8, 4)] +
+                           sextract32(insn, 12, 20));
+            *(uint64_t *)ptr = tb_ptr[0] | ((uint64_t)tb_ptr[1] << 32);
+            tb_ptr += 2;
+            break;
+        case INDEX_op_tci_qemu_ld_x:
+            tci_args_rr(insn, &r0, &r1);
+''',
+)
+replace(
+    "tcg/tci.c",
+    "    case INDEX_op_tci_qemu_ld_x:\n    case INDEX_op_tci_qemu_st_x:\n",
+    r'''    case INDEX_op_tci_addi:
+        tci_args_rrs(insn, &r0, &r1, &s2);
+        info->fprintf_func(info->stream, "%-12s  %s, %s, %d",
+                           op_name, str_r(r0), str_r(r1), s2);
+        break;
+    case INDEX_op_tci_st8i:
+    case INDEX_op_tci_st16i:
+    case INDEX_op_tci_st32i:
+    case INDEX_op_tci_sti:
+        info->fprintf_func(info->stream, "%-12s  %s, %d, 0x%x",
+                           op_name, str_r(extract32(insn, 8, 4)),
+                           sextract32(insn, 12, 20), *tb_ptr);
+        return (op == INDEX_op_tci_sti ? 3 : 2) * sizeof(insn);
+    case INDEX_op_tci_qemu_ld_x:
+    case INDEX_op_tci_qemu_st_x:
+''',
+)
+
 # Computed-goto dispatch. The profile put ~90% of JIT-less CPU time in the
 # interpreter loop at 7-10 cycles per op, and the single `switch` gives every
 # op one shared, bounds-checked indirect jump. Each case now ends in its own
