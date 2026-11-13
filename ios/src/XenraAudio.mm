@@ -25,6 +25,26 @@ using xe::apu::AudioDriver;
 constexpr uint32_t kBufferCount = 4;
 constexpr uint32_t kFramesPerBuffer = 4;
 
+// Note on queue depth: frames_ needs no cap of its own. The producer only
+// submits against the client semaphore, which Fill releases one per frame
+// played, so the depth is already bounded by apu_max_queued_frames, and the
+// worker deliberately tops it up to half of that. Dropping frames here would
+// fight that rate control and underrun.
+
+class QueueDriver;
+
+// Every live driver, so an audio interruption (a call, Siri, an alarm) can
+// restart them all when it ends: iOS stops the queues and does not restart
+// them itself, and the guest would play silence until the next boot.
+std::mutex& DriversMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+std::vector<QueueDriver*>& Drivers() {
+  static std::vector<QueueDriver*> drivers;
+  return drivers;
+}
+
 class QueueDriver final : public AudioDriver {
  public:
   QueueDriver(xe::threading::Semaphore* semaphore, uint32_t frequency,
@@ -36,8 +56,29 @@ class QueueDriver final : public AudioDriver {
         // The media player submits kFrameSamplesMax floats whatever the count.
         channel_samples_(kFrameSamplesMax / channels),
         // 5.1 goes down to stereo here; tablets have nothing else to play it on.
-        out_channels_(channels == 6 && need_format_conversion ? 2 : channels) {}
-  ~QueueDriver() override { Shutdown(); }
+        out_channels_(channels == 6 && need_format_conversion ? 2 : channels) {
+    std::lock_guard<std::mutex> lock(DriversMutex());
+    Drivers().push_back(this);
+  }
+  ~QueueDriver() override {
+    {
+      std::lock_guard<std::mutex> lock(DriversMutex());
+      auto& drivers = Drivers();
+      drivers.erase(std::remove(drivers.begin(), drivers.end(), this),
+                    drivers.end());
+    }
+    Shutdown();
+  }
+
+  // After an interruption ends: start again, unless the core paused us.
+  void Recover() {
+    if (queue_ && !paused_.load()) {
+      OSStatus status = AudioQueueStart(queue_, nullptr);
+      if (status != noErr) {
+        XELOGW("iOS audio: restart after interruption failed: {}", int(status));
+      }
+    }
+  }
 
   bool Initialize() override {
     AudioStreamBasicDescription format = {};
@@ -85,9 +126,11 @@ class QueueDriver final : public AudioDriver {
   }
 
   void Pause() override {
+    paused_ = true;
     if (queue_) AudioQueuePause(queue_);
   }
   void Resume() override {
+    paused_ = false;
     if (queue_) AudioQueueStart(queue_, nullptr);
   }
   void SetVolume(float volume) override {
@@ -137,6 +180,7 @@ class QueueDriver final : public AudioDriver {
   uint32_t channel_samples_;
   uint32_t out_channels_;
   AudioQueueRef queue_ = nullptr;
+  std::atomic<bool> paused_{false};
   std::mutex mutex_;
   std::deque<std::vector<float>> frames_;
 };
@@ -148,6 +192,30 @@ class QueueAudioSystem final : public xe::apu::AudioSystem {
     AVAudioSession* session = AVAudioSession.sharedInstance;
     [session setCategory:AVAudioSessionCategoryPlayback error:nil];
     [session setActive:YES error:nil];
+    WatchInterruptions();
+  }
+
+  static void WatchInterruptions() {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      [NSNotificationCenter.defaultCenter
+          addObserverForName:AVAudioSessionInterruptionNotification
+                      object:nil
+                       queue:NSOperationQueue.mainQueue
+                  usingBlock:^(NSNotification* note) {
+                    const auto type = AVAudioSessionInterruptionType(
+                        [note.userInfo[AVAudioSessionInterruptionTypeKey]
+                            unsignedIntegerValue]);
+                    XELOGI("iOS audio: interruption {}",
+                           type == AVAudioSessionInterruptionTypeBegan
+                               ? "began"
+                               : "ended");
+                    if (type != AVAudioSessionInterruptionTypeEnded) return;
+                    [AVAudioSession.sharedInstance setActive:YES error:nil];
+                    std::lock_guard<std::mutex> lock(DriversMutex());
+                    for (QueueDriver* driver : Drivers()) driver->Recover();
+                  }];
+    });
   }
 
   std::string name() const override { return "AudioQueue"; }

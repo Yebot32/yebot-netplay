@@ -845,9 +845,13 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
 - (void)quit {
   XenraLogsEndSession();
   if (og_) {
-    // A clean stop flushes the hard disk image. Give it a moment, no more.
+    // A clean stop flushes the hard disk image. xemu_ios_main returns only
+    // after joining the QEMU thread, whose cleanup does that flush, and
+    // bootXemu exits the moment it returns: that is the real end. A fixed
+    // 3 s exit here could cut the flush short and truncate the HDD image;
+    // this is only the fallback for a core that never comes back.
     XenraXemuShutdown();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
                      exit(0);
                    });

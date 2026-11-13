@@ -81,6 +81,11 @@ DEFINE_int32(
     "multithreaded compilation.",
     "Metal");
 DEFINE_bool(
+    metal_pipeline_binary_archive, true,
+    "Keep compiled render pipelines in an MTLBinaryArchive per title, so the "
+    "next launch skips their GPU compile. Discarded after an OS update.",
+    "Metal");
+DEFINE_bool(
     metal_log_first_draw_bindings, false,
     "Log the texture bindings of each pixel shader's first draw (a Halo 3 font "
     "diagnostic). Off by default: it takes a global lock on every pixel draw.",
@@ -827,7 +832,7 @@ MTL::RenderPipelineState* MetalCommandProcessor::CreateMslPipelineState(
 
   NS::Error* error = nullptr;
   MTL::RenderPipelineState* pipeline =
-      device_->newRenderPipelineState(desc, &error);
+      pipeline_archive_.CreateRenderPipelineState(device_, desc, &error);
   desc->release();
 
   if (!pipeline && error_out && error) {
@@ -901,6 +906,9 @@ void MetalCommandProcessor::MslShaderCompileThread(size_t thread_index) {
       }
       if (pipeline_request.fragment_function) {
         pipeline_request.fragment_function->release();
+      }
+      if (compiled) {
+        pipeline_archive_.MaybeSerialize();
       }
 
       if (!compiled &&
@@ -1698,6 +1706,7 @@ void MetalCommandProcessor::ShutdownContext() {
     wait_shared_event_ = nullptr;
   }
 
+  pipeline_archive_.Close();
   ClearMslShaderSourceCacheDirectory();
 
   CommandProcessor::ShutdownContext();
@@ -1740,6 +1749,9 @@ void MetalCommandProcessor::InitializeShaderStorage(
     SetMslShaderSourceCacheDirectory(shader_storage_title_root / "msl_source");
   } else {
     SetMslShaderSourceCacheDirectory(shader_storage_title_root / "msl_source");
+  }
+  if (!ec && ::cvars::metal_pipeline_binary_archive) {
+    pipeline_archive_.Open(device_, shader_storage_title_root / "pipelines");
   }
 
   if (completion_callback) {

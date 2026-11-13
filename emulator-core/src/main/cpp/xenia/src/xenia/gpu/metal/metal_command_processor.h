@@ -31,6 +31,7 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
+#include "xenia/gpu/metal/metal_pipeline_archive.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
@@ -376,6 +377,8 @@ class MetalCommandProcessor : public CommandProcessor {
   std::atomic<int64_t> msl_pipeline_compile_failure_last_log_ns_{0};
   std::atomic<int64_t> msl_pipeline_pending_last_log_ns_{0};
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> msl_pipeline_cache_;
+  // Backend code of render pipelines kept across launches (per title, per GPU).
+  MetalPipelineArchive pipeline_archive_;
 
   // SPIRV-Cross tessellation support.
   MTL::ComputePipelineState* tess_factor_pipeline_tri_ = nullptr;
