@@ -262,3 +262,7 @@ replace(
     "    if (tb_ctx.tb_flush_count == tb_flush_count.host_int) {\n        tb_flush__exclusive_or_serial();\n    }\n",
     "    if (tb_ctx.tb_flush_count == tb_flush_count.host_int) {\n        fprintf(stderr, \"xemu-ios: code cache full, flush #%u\\n\",\n                tb_flush_count.host_int + 1);\n        tb_flush__exclusive_or_serial();\n    }\n",
 )
+
+# The JIT-less core's interpreter speed-ups and profiling live in their own file.
+exec(compile((pathlib.Path(__file__).parent / "patch_tci.py").read_text(),
+             "patch_tci.py", "exec"))

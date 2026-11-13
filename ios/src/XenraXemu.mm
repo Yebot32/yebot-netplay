@@ -337,7 +337,7 @@ int XenraXemuRun(NSString* game, NSString* name, CALayer* layer) {
   NSArray<NSString*>* arguments =
       @[ @"xemu-ios", @"-accel", accel, @"-name", @"xemu,debug-threads=on",
          @"-config_path", WriteConfig(game, name) ];
-  XenraLog([NSString stringWithFormat:@"xemu: %@ universal=%d traced=%d scheme=%d", accel,
+  XenraLog([NSString stringWithFormat:@"xemu: %@ jitless=%d universal=%d traced=%d scheme=%d", accel, g_jitless,
                                       universal, DebuggerAttached(), int(scheme)]);
   std::vector<char*> argv;
   for (NSString* argument in arguments) {

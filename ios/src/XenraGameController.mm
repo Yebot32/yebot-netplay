@@ -635,8 +635,14 @@ static void ApplyDeadzone(float zone, short* x, short* y) {
   NSString* line = XenraXemuStatsLine();
   if (!line) return;
   status_.text = nil;
+  // JIT-less is a different machine to measure: say so on screen and in the log,
+  // with Low Power Mode, which caps the CPU and would read as a slow interpreter.
+  if (og_ && XenraXemuIsJitless()) line = [@"JIT-less  ·  " stringByAppendingString:line];
   hud_.text = line;
-  if (hudTicks_ % 50 == 0) XenraLog(line);
+  if (hudTicks_ % 50 == 0) {
+    XenraLog([NSString stringWithFormat:@"%@  ·  lowpower=%d", line,
+                                        NSProcessInfo.processInfo.lowPowerModeEnabled]);
+  }
 }
 
 - (void)runXemu {
