@@ -881,23 +881,35 @@ class CommandProcessor {
   //
   // The rungs are the ones a display actually runs at; a limiter free to pick
   // any integer lands on rates that beat against the panel's refresh and look
-  // worse than a lower, steady one.
+  // worse than a lower, steady one. On 60 Hz Apple panels 45/90 are 3:2
+  // cadences that read as judder, so they are omitted there.
+#if defined(__APPLE__)
+  static constexpr uint32_t kAdaptiveRungs[] = {30, 60, 120};
+  static constexpr size_t kAdaptiveRungCount =
+      sizeof(kAdaptiveRungs) / sizeof(kAdaptiveRungs[0]);
+  // Start at 60 (index 1): the console's own rate and the answer for most
+  // titles that are not in trouble.
+  size_t adaptive_rung_ = 1;
+#else
   static constexpr uint32_t kAdaptiveRungs[] = {30, 45, 60, 90, 120};
   static constexpr size_t kAdaptiveRungCount =
       sizeof(kAdaptiveRungs) / sizeof(kAdaptiveRungs[0]);
-  // Start at 60: the console's own rate, and the answer for most titles that
-  // are not in trouble. The first few frames of a boot are not representative
-  // of anything, so starting high and settling down beats starting low and
-  // climbing through every rung on every launch.
+  // Start at 60 (index 2).
   size_t adaptive_rung_ = 2;
-  // Worst frame cost seen in the current window. The WORST, not the mean: a
-  // rate that only holds between hitches is not a rate the player experiences.
-  double adaptive_window_worst_ms_ = 0.0;
+#endif
+  // A window of recent frame costs (~1 s at 60). The summary statistic is the
+  // p95 by default (one compile hitch must not drop the rate); "worst" keeps
+  // the legacy single-worst-frame behaviour for A/B.
+  static constexpr size_t kAdaptiveWindowFrames = 60;
+  double adaptive_window_ms_[kAdaptiveWindowFrames] = {};
   uint32_t adaptive_window_frames_ = 0;
-  // Consecutive windows that had room for the next rung up. Stepping up needs
-  // several; stepping down needs one. Asymmetric on purpose - dropping a rate
-  // late is a stutter the player sees, raising it early is an oscillation.
+  // Consecutive windows with room for the next rung up / over the current
+  // budget. Asymmetric on purpose: dropping late is a visible stutter, raising
+  // early is an oscillation.
   uint32_t adaptive_headroom_windows_ = 0;
+  uint32_t adaptive_over_windows_ = 0;
+  // Minimum time between rung changes (anti-flap), except a panic drop.
+  uint64_t adaptive_last_change_ns_ = 0;
   uint32_t adaptive_last_logged_ = 0;
 
  private:

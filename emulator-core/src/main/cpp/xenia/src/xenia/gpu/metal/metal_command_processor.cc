@@ -38,6 +38,7 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/frame_stats.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
@@ -78,6 +79,11 @@ DEFINE_int32(
     "logical CPU cores), a positive number to specify the number of threads "
     "explicitly (up to the number of logical CPU cores), 0 to disable "
     "multithreaded compilation.",
+    "Metal");
+DEFINE_bool(
+    metal_log_first_draw_bindings, false,
+    "Log the texture bindings of each pixel shader's first draw (a Halo 3 font "
+    "diagnostic). Off by default: it takes a global lock on every pixel draw.",
     "Metal");
 
 namespace xe {
@@ -1817,6 +1823,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   LogMetalPerf();
   ProcessCompletedSubmissions();
   saw_swap_ = true;
+  // Guest-side present accounting (the Vulkan path records this in its swap);
+  // without it the iOS guest-FPS HUD and frame-time histogram stay empty.
+  xe::RecordGuestPresent();
   last_swap_ptr_ = frontbuffer_ptr;
   last_swap_width_ = frontbuffer_width;
   last_swap_height_ = frontbuffer_height;
@@ -2027,6 +2036,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  // Time every draw, including the early-outs below, so the GpuFrame breakdown
+  // reports real draws/draw-ms on iOS (it read 0 before this was wired).
+  struct DrawStatsScope {
+    MetalCommandProcessor* self;
+    uint64_t begin_ns;
+    explicit DrawStatsScope(MetalCommandProcessor* s)
+        : self(s), begin_ns(s->FrameStatsBegin()) {}
+    ~DrawStatsScope() { self->FrameStatsEndDraw(begin_ns); }
+  } draw_stats_scope(this);
+
   const RegisterFile& regs = *register_file_;
   uint32_t normalized_color_mask = 0;
 
@@ -2567,7 +2586,17 @@ bool MetalCommandProcessor::IssueDrawMsl(
     mtl_viewport.height = static_cast<double>(viewport_info.xy_extent[1]);
     mtl_viewport.znear = viewport_info.z_min;
     mtl_viewport.zfar = viewport_info.z_max;
-    current_render_encoder_->setViewport(mtl_viewport);
+    if (!msl_viewport_valid_ ||
+        msl_viewport_.originX != mtl_viewport.originX ||
+        msl_viewport_.originY != mtl_viewport.originY ||
+        msl_viewport_.width != mtl_viewport.width ||
+        msl_viewport_.height != mtl_viewport.height ||
+        msl_viewport_.znear != mtl_viewport.znear ||
+        msl_viewport_.zfar != mtl_viewport.zfar) {
+      current_render_encoder_->setViewport(mtl_viewport);
+      msl_viewport_ = mtl_viewport;
+      msl_viewport_valid_ = true;
+    }
 
     MTL::ScissorRect mtl_scissor;
     mtl_scissor.x = scissor.offset[0];
@@ -2934,8 +2963,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
 
     // Diagnostic: what the first draw of each pixel shader samples, so the
     // font's binding can be identified from a device log while the menu text
-    // renders as solid quads.
-    if (is_pixel_stage) {
+    // renders as solid quads. Gated: it takes a global lock per pixel draw.
+    if (is_pixel_stage && cvars::metal_log_first_draw_bindings) {
       static std::mutex first_draw_mutex;
       static std::unordered_set<uint64_t> first_draw_logged;
       std::lock_guard<std::mutex> lock(first_draw_mutex);
@@ -4799,7 +4828,10 @@ void MetalCommandProcessor::ApplyDepthStencilState(
     depth_stencil_state_cache_.emplace(key, state);
   }
 
-  current_render_encoder_->setDepthStencilState(state);
+  if (msl_depth_stencil_state_ != state) {
+    current_render_encoder_->setDepthStencilState(state);
+    msl_depth_stencil_state_ = state;
+  }
 
   if (depth_control.stencil_enable) {
     uint32_t ref_front = stencil_ref_mask_front.stencilref;
@@ -4820,7 +4852,11 @@ void MetalCommandProcessor::ApplyDepthStencilState(
             ref_front, ref_back);
       }
     }
-    current_render_encoder_->setStencilReferenceValue(ref);
+    if (!msl_stencil_reference_valid_ || msl_stencil_reference_ != ref) {
+      current_render_encoder_->setStencilReferenceValue(ref);
+      msl_stencil_reference_ = ref;
+      msl_stencil_reference_valid_ = true;
+    }
   }
 }
 
@@ -4832,6 +4868,9 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
   const RegisterFile& regs = *register_file_;
   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  // A fresh encoder starts at Metal's defaults; force a full set on the first
+  // draw of each encoder, then dedupe against the cached values.
+  const bool first = !msl_rasterizer_state_valid_;
 
   MTL::CullMode cull_mode = MTL::CullModeNone;
   if (primitive_polygonal) {
@@ -4843,11 +4882,18 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       cull_mode = MTL::CullModeBack;
     }
   }
-  current_render_encoder_->setCullMode(cull_mode);
+  if (first || msl_cull_mode_ != cull_mode) {
+    current_render_encoder_->setCullMode(cull_mode);
+    msl_cull_mode_ = cull_mode;
+  }
 
-  current_render_encoder_->setFrontFacingWinding(
-      pa_su_sc_mode_cntl.face ? MTL::WindingClockwise
-                              : MTL::WindingCounterClockwise);
+  const MTL::Winding winding = pa_su_sc_mode_cntl.face
+                                   ? MTL::WindingClockwise
+                                   : MTL::WindingCounterClockwise;
+  if (first || msl_winding_ != winding) {
+    current_render_encoder_->setFrontFacingWinding(winding);
+    msl_winding_ = winding;
+  }
 
   MTL::TriangleFillMode fill_mode = MTL::TriangleFillModeFill;
   if (primitive_polygonal &&
@@ -4865,7 +4911,10 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       fill_mode = MTL::TriangleFillModeLines;
     }
   }
-  current_render_encoder_->setTriangleFillMode(fill_mode);
+  if (first || msl_fill_mode_ != fill_mode) {
+    current_render_encoder_->setTriangleFillMode(fill_mode);
+    msl_fill_mode_ = fill_mode;
+  }
 
   float polygon_offset_scale = 0.0f;
   float polygon_offset = 0.0f;
@@ -4880,12 +4929,24 @@ void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
       polygon_offset_scale * xenos::kPolygonOffsetScaleSubpixelUnit *
       float(std::max(render_target_cache_->draw_resolution_scale_x(),
                      render_target_cache_->draw_resolution_scale_y()));
-  current_render_encoder_->setDepthBias(depth_bias_constant, depth_bias_slope,
-                                        0.0f);
+  if (first || msl_depth_bias_constant_ != depth_bias_constant ||
+      msl_depth_bias_slope_ != depth_bias_slope ||
+      msl_depth_bias_clamp_ != 0.0f) {
+    current_render_encoder_->setDepthBias(depth_bias_constant, depth_bias_slope,
+                                          0.0f);
+    msl_depth_bias_constant_ = depth_bias_constant;
+    msl_depth_bias_slope_ = depth_bias_slope;
+    msl_depth_bias_clamp_ = 0.0f;
+  }
 
-  current_render_encoder_->setDepthClipMode(pa_cl_clip_cntl.clip_disable
-                                                ? MTL::DepthClipModeClamp
-                                                : MTL::DepthClipModeClip);
+  const MTL::DepthClipMode clip_mode = pa_cl_clip_cntl.clip_disable
+                                           ? MTL::DepthClipModeClamp
+                                           : MTL::DepthClipModeClip;
+  if (first || msl_depth_clip_mode_ != clip_mode) {
+    current_render_encoder_->setDepthClipMode(clip_mode);
+    msl_depth_clip_mode_ = clip_mode;
+  }
+  msl_rasterizer_state_valid_ = true;
 }
 
 MTL::RenderPassDescriptor*

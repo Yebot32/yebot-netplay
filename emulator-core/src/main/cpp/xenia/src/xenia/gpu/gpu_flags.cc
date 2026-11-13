@@ -100,6 +100,15 @@ DEFINE_bool(
     "top rung), so there is still one place to say 'never above 60'.",
     "GPU");
 
+DEFINE_string(
+    framerate_limit_adaptive_policy, "percentile",
+    "How the adaptive limiter summarises a window of frame costs.\n"
+    "percentile (default): the 95th-percentile frame, so a single compile hitch "
+    "does not drop the rate but a genuinely overloaded scene does.\n"
+    "worst: the legacy single worst-frame statistic (drops on any one slow "
+    "frame). Kept for A/B and regression.",
+    "GPU");
+
 void SetFramerateLimit(uint32_t value) {
   OVERRIDE_uint32(framerate_limit, value);
 }

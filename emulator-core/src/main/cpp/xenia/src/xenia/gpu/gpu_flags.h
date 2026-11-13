@@ -23,6 +23,7 @@ DECLARE_int32(wait_reg_mem_backoff_max_us);
 
 DECLARE_uint32(framerate_limit);
 DECLARE_bool(framerate_limit_adaptive);
+DECLARE_string(framerate_limit_adaptive_policy);
 
 void SetGuestDisplayRefreshCap(bool value);
 void SetFramerateLimit(uint32_t value);
