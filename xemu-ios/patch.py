@@ -86,7 +86,11 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
 replace(
     "util/qemu-thread-posix.c",
     "    sigdelset(&set, SIGILL);\n    /* TODO avoid SIGBUS loss on macOS */\n",
-    "    sigdelset(&set, SIGILL);\n    sigdelset(&set, SIGBUS);\n",
+    # SIGTRAP and SIGABRT too: blocked, a brk or abort on a QEMU thread ended the
+    # process with nothing in Xenra's crash log (the JIT-less boot crash,
+    # 2026-11-13). Unblocked, the app's handler records where.
+    "    sigdelset(&set, SIGILL);\n    sigdelset(&set, SIGBUS);\n"
+    "    sigdelset(&set, SIGTRAP);\n    sigdelset(&set, SIGABRT);\n",
 )
 replace(
     "util/main-loop.c",

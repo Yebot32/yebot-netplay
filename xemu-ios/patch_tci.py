@@ -406,3 +406,41 @@ replace(
     switch (mop & MO_SIZE) {
 ''',
 )
+
+# Breadcrumbs for the first few translations and executions, so a JIT-less run
+# that dies early says at which stage. Only the TCI core prints them.
+replace(
+    "accel/tcg/translate-all.c",
+    "    return tcg_gen_code(tcg_ctx, tb, pc);\n}\n",
+    "#ifdef CONFIG_TCG_INTERPRETER\n"
+    "    static int xemu_tci_gen_logged;\n"
+    "    if (xemu_tci_gen_logged < 3) {\n"
+    "        fprintf(stderr, \"xemu-tci: gen #%d begin pc=0x%llx\\n\",\n"
+    "                xemu_tci_gen_logged + 1, (unsigned long long)pc);\n"
+    "    }\n"
+    "    int xemu_tci_gen_size = tcg_gen_code(tcg_ctx, tb, pc);\n"
+    "    if (xemu_tci_gen_logged < 3) {\n"
+    "        fprintf(stderr, \"xemu-tci: gen #%d end size=%d\\n\",\n"
+    "                ++xemu_tci_gen_logged, xemu_tci_gen_size);\n"
+    "    }\n"
+    "    return xemu_tci_gen_size;\n"
+    "#else\n"
+    "    return tcg_gen_code(tcg_ctx, tb, pc);\n"
+    "#endif\n"
+    "}\n",
+)
+replace(
+    "accel/tcg/cpu-exec.c",
+    "    qemu_thread_jit_execute();\n    ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);\n",
+    "    qemu_thread_jit_execute();\n"
+    "#ifdef CONFIG_TCG_INTERPRETER\n"
+    "    {\n"
+    "        static int xemu_tci_exec_logged;\n"
+    "        if (xemu_tci_exec_logged < 3) {\n"
+    "            fprintf(stderr, \"xemu-tci: exec #%d tb=%p\\n\",\n"
+    "                    ++xemu_tci_exec_logged, tb_ptr);\n"
+    "        }\n"
+    "    }\n"
+    "#endif\n"
+    "    ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);\n",
+)
