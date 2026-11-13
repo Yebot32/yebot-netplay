@@ -62,6 +62,24 @@ replace(
     "#if defined(CONFIG_IOS) && !defined(CONFIG_TCG_INTERPRETER)\n    if (xemu_ios_universal_jit_is_enabled() || getenv(\"XEMU_IOS_RX_FIRST\")) {\n",
 )
 
+# tcg.c's default case still calls the backend's tcg_out_op, which this tree's
+# TCI backend no longer defines: every scalar op is emitted from tcg.c itself, and
+# the AArch64 backend's version is only g_assert_not_reached(). Same stub here, or
+# the TCI dylib fails to link (undefined _tcg_out_op).
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static void tcg_out_mb(TCGContext *s, unsigned a0)\n",
+    """static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
+                       const TCGArg args[TCG_MAX_OP_ARGS],
+                       const int const_args[TCG_MAX_OP_ARGS])
+{
+    g_assert_not_reached();
+}
+
+static void tcg_out_mb(TCGContext *s, unsigned a0)
+""",
+)
+
 # QEMU leaves SIGBUS blocked on every thread it starts. On Darwin a blocked
 # synchronous fault is not delivered: the thread retries the instruction for ever.
 # That was the "hang in the first translation block" with no signal, on the M1.
