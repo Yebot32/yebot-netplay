@@ -16,6 +16,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,6 +29,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/frame_stats.h"
 #include "xenia/base/memory.h"
@@ -517,6 +519,29 @@ class IosEmuApp {
           fs->RegisterDevice(std::move(cache_device))) {
         fs->RegisterSymbolicLink("cache:", "\\CACHE");
       }
+    }
+    // As Android mounts them (xendroid_emu.cpp), but under the storage root:
+    // a relative path here would be the read-only app bundle.
+    auto mount = [&](const char* device, const char* link,
+                     const std::filesystem::path& path) {
+      std::error_code ec;
+      std::filesystem::create_directories(path, ec);
+      auto host = std::make_unique<xe::vfs::HostPathDevice>(device, path, false);
+      if (!host->Initialize()) {
+        XELOGE("iOS: unable to scan {}", xe::path_to_utf8(path));
+        return;
+      }
+      if (!fs->RegisterDevice(std::move(host))) {
+        XELOGE("iOS: unable to register {}", device);
+        return;
+      }
+      fs->RegisterSymbolicLink(link, device);
+    };
+    if (cvars::mount_scratch) {
+      mount("\\SCRATCH", "scratch:", emu_->storage_root() / "scratch");
+    }
+    if (cvars::mount_memory_unit) {
+      mount("\\MU", "MU:", emu_->storage_root() / "MU");
     }
   }
 
