@@ -479,23 +479,27 @@ replace(
     "            break;\n",
     r'''        case INDEX_op_mb:
 #if defined(__aarch64__)
-            /* The table tcg/aarch64 uses: only LD_LD/LD_ST -> ishld,
-             * ST_ST alone -> ishst, anything else -> full. */
-            switch (extract32(insn, 8, 4)) {
-            case TCG_MO_LD_LD:
-            case TCG_MO_LD_ST:
-            case TCG_MO_LD_LD | TCG_MO_LD_ST:
-                asm volatile("dmb ishld" ::: "memory");
-                tci_stats.mb_ld++;
-                break;
-            case TCG_MO_ST_ST:
-                asm volatile("dmb ishst" ::: "memory");
-                tci_stats.mb_st++;
-                break;
-            default:
+            /*
+             * Only store->load ordering needs a full dmb ish (it waits for
+             * the store buffer to drain). ishld orders earlier loads before
+             * later loads and stores; ishst orders stores before stores.
+             * x86 stores ask for LD_ST|ST_ST: ishld + ishst covers that,
+             * where tcg/aarch64 emits a full barrier.
+             */
+            tmp32 = extract32(insn, 8, 4);
+            if (tmp32 == 0 || (tmp32 & TCG_MO_ST_LD)) {
                 smp_mb();
                 tci_stats.mb_full++;
-                break;
+            } else {
+                if (tmp32 & (TCG_MO_LD_LD | TCG_MO_LD_ST)) {
+                    asm volatile("dmb ishld" ::: "memory");
+                }
+                if (tmp32 & TCG_MO_ST_ST) {
+                    asm volatile("dmb ishst" ::: "memory");
+                    tci_stats.mb_st++;
+                } else {
+                    tci_stats.mb_ld++;
+                }
             }
 #else
             smp_mb();
@@ -516,20 +520,67 @@ replace(
     "DEF(tci_qemu_ld_x, 1, 1, 0, TCG_OPF_NOT_PRESENT)\n"
     "DEF(tci_qemu_st_x, 0, 2, 0, TCG_OPF_NOT_PRESENT)\n",
 )
+#
+# A 32-bit guest address also cost an extract (zero-extend to 64 bits) before
+# every access: tci_extend_addr in tcg-op-ldst.c, 6.4% of all ops. The _x
+# form carries an "address is 32-bit" bit instead and the interpreter
+# zero-extends while loading the register. Only the i32/i64 load/store paths
+# drop the extend; the i128 paths keep it (they also feed helper calls).
 replace(
     "tcg/tci/tcg-target.c.inc",
+    "    if (oi & ~0xffff) {\n"
     "        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP, oi);\n"
     "        tcg_out_op_rrr(s, INDEX_op_tci_qemu_ld_rrr, data, addr, TCG_REG_TMP);\n",
-    "        tcg_out_op_rr(s, INDEX_op_tci_qemu_ld_x, data, addr);\n"
-    "        tcg_out32(s, oi);\n",
+    "    if ((oi & ~0xffff) || s->addr_type == TCG_TYPE_I32) {\n"
+    "        tci_out_ldst_x(s, INDEX_op_tci_qemu_ld_x, data, addr, oi);\n",
 )
 replace(
     "tcg/tci/tcg-target.c.inc",
+    "    if (oi & ~0xffff) {\n"
     "        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP, oi);\n"
     "        tcg_out_op_rrr(s, INDEX_op_tci_qemu_st_rrr, data, addr, TCG_REG_TMP);\n",
-    "        tcg_out_op_rr(s, INDEX_op_tci_qemu_st_x, data, addr);\n"
-    "        tcg_out32(s, oi);\n",
+    "    if ((oi & ~0xffff) || s->addr_type == TCG_TYPE_I32) {\n"
+    "        tci_out_ldst_x(s, INDEX_op_tci_qemu_st_x, data, addr, oi);\n",
 )
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static void tgen_qemu_ld(TCGContext *s, TCGType type, TCGReg data,\n",
+    r'''static void tci_out_ldst_x(TCGContext *s, TCGOpcode op, TCGReg data,
+                           TCGReg addr, MemOpIdx oi)
+{
+    tcg_insn_unit insn = 0;
+
+    insn = deposit32(insn, 0, 8, op);
+    insn = deposit32(insn, 8, 4, data);
+    insn = deposit32(insn, 12, 4, addr);
+    if (TCG_TARGET_REG_BITS == 64 && s->addr_type == TCG_TYPE_I32) {
+        insn |= TCI_X_ADDR32;
+    }
+    tcg_out32(s, insn);
+    tcg_out32(s, oi);
+}
+
+static void tgen_qemu_ld(TCGContext *s, TCGType type, TCGReg data,
+''',
+)
+replace(
+    "tcg/tci/tcg-target.h",
+    "#define TCG_TARGET_H\n",
+    "#define TCG_TARGET_H\n\n"
+    "/* xemu-ios: tci_qemu_{ld,st}_x flag, the guest address is 32-bit. */\n"
+    "#define TCI_X_ADDR32 (1u << 16)\n",
+)
+def _tci_drop_addr_extend():
+    path = root / "tcg/tcg-op-ldst.c"
+    text = path.read_text()
+    old = "\n    addr_new = tci_extend_addr(addr);\n"
+    if text.count(old) != 4:
+        sys.exit(f"tcg/tcg-op-ldst.c: expected 4 i32/i64 extend sites, "
+                 f"found {text.count(old)}")
+    path.write_text(text.replace(old, "\n    addr_new = addr;\n"))
+
+
+_tci_drop_addr_extend()
 replace(
     "tcg/tci.c",
     "        case INDEX_op_qemu_ld2:\n",
@@ -537,12 +588,18 @@ replace(
             tci_args_rr(insn, &r0, &r1);
             oi = *tb_ptr++;
             taddr = regs[r1];
+            if (insn & TCI_X_ADDR32) {
+                taddr = (uint32_t)taddr;
+            }
             regs[r0] = tci_qemu_ld(env, taddr, oi, tb_ptr);
             break;
         case INDEX_op_tci_qemu_st_x:
             tci_args_rr(insn, &r0, &r1);
             oi = *tb_ptr++;
             taddr = regs[r1];
+            if (insn & TCI_X_ADDR32) {
+                taddr = (uint32_t)taddr;
+            }
             tci_qemu_st(env, taddr, regs[r0], oi, tb_ptr);
             break;
 
@@ -786,6 +843,142 @@ replace(
         return (op == INDEX_op_tci_sti ? 3 : 2) * sizeof(insn);
     case INDEX_op_tci_qemu_ld_x:
     case INDEX_op_tci_qemu_st_x:
+''',
+)
+
+# Compare-and-branch in one op. TCI emitted brcond as setcond into TMP then
+# "branch if TMP != 0": tci_setcond32>brcond was the top op pair (4.5%).
+# tci_brcond{32,64}: op | a << 8 | b << 12 | cond << 16 | s12 byte offset <<
+# 20. The offset is a 12-bit relocation; a label further away than +-2 KB
+# makes patch_reloc fail, and TCG then retranslates the block with half the
+# guest instructions (the existing -2 path), so it is never miscompiled.
+# setcond also takes a constant: s12 in the same field, else movi + setcond.
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "    tcg_debug_assert(type == 20);\n",
+    "    tcg_debug_assert(type == 20 || type == 12);\n",
+)
+replace(
+    "tcg/tci/tcg-target-opc.h.inc",
+    "DEF(tci_sti, 0, 1, 2, TCG_OPF_NOT_PRESENT)\n",
+    "DEF(tci_sti, 0, 1, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_brcond32, 0, 2, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_brcond64, 0, 2, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_setcond32i, 1, 1, 2, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_setcond64i, 1, 1, 2, TCG_OPF_NOT_PRESENT)\n",
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static void tgen_brcond(TCGContext *s, TCGType type, TCGCond cond,\n"
+    "                        TCGReg arg0, TCGReg arg1, TCGLabel *l)\n"
+    "{\n"
+    "    tgen_setcond(s, type, cond, TCG_REG_TMP, arg0, arg1);\n"
+    "    tcg_out_op_rl(s, INDEX_op_brcond, TCG_REG_TMP, l);\n"
+    "}\n",
+    r'''static void tgen_brcond(TCGContext *s, TCGType type, TCGCond cond,
+                        TCGReg arg0, TCGReg arg1, TCGLabel *l)
+{
+    tcg_insn_unit insn = 0;
+
+    tcg_out_reloc(s, s->code_ptr, 12, l, 0);
+    insn = deposit32(insn, 0, 8, type == TCG_TYPE_I32 ? INDEX_op_tci_brcond32
+                                                      : INDEX_op_tci_brcond64);
+    insn = deposit32(insn, 8, 4, arg0);
+    insn = deposit32(insn, 12, 4, arg1);
+    insn = deposit32(insn, 16, 4, cond);
+    tcg_out32(s, insn);
+}
+''',
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static const TCGOutOpSetcond outop_setcond = {\n"
+    "    .base.static_constraint = C_O1_I2(r, r, r),\n"
+    "    .out_rrr = tgen_setcond,\n",
+    r'''static void tgen_setcondi(TCGContext *s, TCGType type, TCGCond cond,
+                          TCGReg dest, TCGReg arg1, tcg_target_long arg2)
+{
+    tcg_insn_unit insn = 0;
+
+    if (type == TCG_TYPE_I32) {
+        arg2 = (int32_t)arg2;
+    }
+    if (arg2 != sextract64(arg2, 0, 12)) {
+        tcg_out_movi(s, type, TCG_REG_TMP, arg2);
+        tgen_setcond(s, type, cond, dest, arg1, TCG_REG_TMP);
+        return;
+    }
+    insn = deposit32(insn, 0, 8, type == TCG_TYPE_I32
+                                 ? INDEX_op_tci_setcond32i
+                                 : INDEX_op_tci_setcond64i);
+    insn = deposit32(insn, 8, 4, dest);
+    insn = deposit32(insn, 12, 4, arg1);
+    insn = deposit32(insn, 16, 4, cond);
+    insn = deposit32(insn, 20, 12, arg2);
+    tcg_out32(s, insn);
+}
+
+static const TCGOutOpSetcond outop_setcond = {
+    .base.static_constraint = C_O1_I2(r, r, ri),
+    .out_rrr = tgen_setcond,
+    .out_rri = tgen_setcondi,
+''',
+)
+replace(
+    "tcg/tci.c",
+    "        case INDEX_op_tci_addi:\n",
+    r'''        case INDEX_op_tci_brcond32:
+            if (tci_compare32(regs[extract32(insn, 8, 4)],
+                              regs[extract32(insn, 12, 4)],
+                              extract32(insn, 16, 4))) {
+                tb_ptr = (const void *)((const char *)tb_ptr +
+                                        sextract32(insn, 20, 12));
+            }
+            break;
+        case INDEX_op_tci_brcond64:
+            if (tci_compare64(regs[extract32(insn, 8, 4)],
+                              regs[extract32(insn, 12, 4)],
+                              extract32(insn, 16, 4))) {
+                tb_ptr = (const void *)((const char *)tb_ptr +
+                                        sextract32(insn, 20, 12));
+            }
+            break;
+        case INDEX_op_tci_setcond32i:
+            regs[extract32(insn, 8, 4)] =
+                tci_compare32(regs[extract32(insn, 12, 4)],
+                              (uint32_t)sextract32(insn, 20, 12),
+                              extract32(insn, 16, 4));
+            break;
+        case INDEX_op_tci_setcond64i:
+            regs[extract32(insn, 8, 4)] =
+                tci_compare64(regs[extract32(insn, 12, 4)],
+                              (uint64_t)(int64_t)sextract32(insn, 20, 12),
+                              extract32(insn, 16, 4));
+            break;
+        case INDEX_op_tci_addi:
+''',
+)
+replace(
+    "tcg/tci.c",
+    "    case INDEX_op_tci_addi:\n        tci_args_rrs(insn, &r0, &r1, &s2);\n",
+    r'''    case INDEX_op_tci_brcond32:
+    case INDEX_op_tci_brcond64:
+        info->fprintf_func(info->stream, "%-12s  %s, %s, %s, %+d",
+                           op_name, str_r(extract32(insn, 8, 4)),
+                           str_r(extract32(insn, 12, 4)),
+                           str_c(extract32(insn, 16, 4)),
+                           sextract32(insn, 20, 12));
+        break;
+    case INDEX_op_tci_setcond32i:
+    case INDEX_op_tci_setcond64i:
+        info->fprintf_func(info->stream, "%-12s  %s, %s, %d, %s",
+                           op_name, str_r(extract32(insn, 8, 4)),
+                           str_r(extract32(insn, 12, 4)),
+                           sextract32(insn, 20, 12),
+                           str_c(extract32(insn, 16, 4)));
+        break;
+    case INDEX_op_tci_addi:
+        tci_args_rrs(insn, &r0, &r1, &s2);
 ''',
 )
 
