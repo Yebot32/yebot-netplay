@@ -93,7 +93,6 @@
 "Check this" = "確認してください";
 "Ready" = "準備完了";
 "Not set" = "未設定";
-"Games need JIT, which iOS only allows while a debugger tool has attached to Xenra. That takes two things: an install signed with a development certificate, and JIT enabled for Xenra in StikDebug." = "ゲームには JIT が必要です。iOS では、デバッガーツールが Xenra にアタッチしている間だけ JIT が許可されます。これには、開発用証明書で署名されたインストールと、StikDebug で Xenra の JIT を有効にすることの2つが必要です。";
 "Enable JIT" = "JIT を有効にする";
 "Enable it once per launch. Tapping a game does this for you." = "起動ごとに1回有効にしてください。ゲームをタップすると自動で行われます。";
 "Privacy Policy" = "プライバシーポリシー";
@@ -457,3 +456,18 @@
 "Xbox Live for the original Xbox was shut down in 2010. Insignia is a free, fan-run service that brings it back — online matches, friends and leaderboards in the games that supported them.\n\nIt takes about five minutes to set up. You only have to do this once." = "初代 Xbox の Xbox Live は 2010 年に終了しました。Insignia はそれを復活させる無料のファン運営サービスです — 対応していたゲームでオンライン対戦、フレンド、ランキングを利用できます。\n\nセットアップは約 5 分です。必要なのは一度だけです。";
 "You're all set" = "準備完了";
 "unknown error" = "不明なエラー";
+"Always JIT for this game" = "このゲームは常に JIT";
+"Always JIT-less for this game" = "このゲームは常に JIT なし";
+"Ask each time" = "毎回確認する";
+"CPU mode" = "CPU モード";
+"Full speed. Opens StikDebug." = "フルスピード。StikDebug を開きます。";
+"Games run best with JIT, which iOS only allows while a debugger tool has attached to Xenra. That takes two things: an install signed with a development certificate, and JIT enabled for Xenra in StikDebug. Original Xbox games can also run JIT-less (Settings, CPU mode) with no debugger, but much slower." = "ゲームは JIT で最もよく動作します。iOS では、デバッガーツールが Xenra にアタッチしている間だけ JIT が許可されます。これには、開発用証明書で署名されたインストールと、StikDebug で Xenra の JIT を有効にすることの2つが必要です。初代 Xbox のゲームは JIT なし（設定、CPU モード）でデバッガーなしでも動作しますが、大幅に遅くなります。";
+"How should this game run?" = "このゲームをどのように実行しますか？";
+"JIT (recommended)" = "JIT（推奨）";
+"JIT is fastest and needs StikDebug. JIT-less runs without a debugger but is much slower, and is a fallback for original Xbox games only for now." = "JIT が最も高速で、StikDebug が必要です。JIT なしはデバッガー不要ですが大幅に遅く、現時点では初代 Xbox ゲーム向けの代替手段です。";
+"JIT-less (coming later)" = "JIT なし（今後対応）";
+"JIT-less (slower)" = "JIT なし（低速）";
+"JIT-less mode is not available for Xbox 360 games yet: the 360 core has no CPU interpreter. Set CPU mode to JIT in Settings (or for this game) and enable JIT with StikDebug." = "JIT なしモードは Xbox 360 のゲームではまだ使えません。360 コアには CPU インタープリターがありません。設定（またはこのゲームの設定）で CPU モードを JIT にし、StikDebug で JIT を有効にしてください。";
+"No debugger needed, but many games run far below full speed. A fallback, not a performance mode." = "デバッガーは不要ですが、多くのゲームはフルスピードを大きく下回ります。代替手段であり、パフォーマンスモードではありません。";
+"This build of Xenra does not include the JIT-less original Xbox core. Set CPU mode to JIT in Settings." = "この Xenra ビルドには JIT なしの初代 Xbox コアが含まれていません。設定で CPU モードを JIT にしてください。";
+"Xbox 360 games need JIT for now." = "Xbox 360 のゲームには現在 JIT が必要です。";

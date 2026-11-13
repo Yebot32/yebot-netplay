@@ -93,7 +93,6 @@
 "Check this" = "À vérifier";
 "Ready" = "Prêt";
 "Not set" = "Non défini";
-"Games need JIT, which iOS only allows while a debugger tool has attached to Xenra. That takes two things: an install signed with a development certificate, and JIT enabled for Xenra in StikDebug." = "Les jeux ont besoin du JIT, qu'iOS n'autorise que lorsqu'un outil de débogage est attaché à Xenra. Il faut deux choses : une installation signée avec un certificat de développement, et le JIT activé pour Xenra dans StikDebug.";
 "Enable JIT" = "Activer le JIT";
 "Enable it once per launch. Tapping a game does this for you." = "À activer une fois par lancement. Appuyer sur un jeu le fait pour vous.";
 "Privacy Policy" = "Politique de confidentialité";
@@ -457,3 +456,18 @@
 "Xbox Live for the original Xbox was shut down in 2010. Insignia is a free, fan-run service that brings it back — online matches, friends and leaderboards in the games that supported them.\n\nIt takes about five minutes to set up. You only have to do this once." = "Xbox Live pour la Xbox d'origine a fermé en 2010. Insignia est un service gratuit géré par des fans qui le fait revivre — parties en ligne, amis et classements dans les jeux qui le prenaient en charge.\n\nL'installation prend environ cinq minutes. Vous ne devez le faire qu'une fois.";
 "You're all set" = "Tout est prêt";
 "unknown error" = "erreur inconnue";
+"Always JIT for this game" = "Toujours le JIT pour ce jeu";
+"Always JIT-less for this game" = "Toujours sans JIT pour ce jeu";
+"Ask each time" = "Demander à chaque fois";
+"CPU mode" = "Mode CPU";
+"Full speed. Opens StikDebug." = "Pleine vitesse. Ouvre StikDebug.";
+"Games run best with JIT, which iOS only allows while a debugger tool has attached to Xenra. That takes two things: an install signed with a development certificate, and JIT enabled for Xenra in StikDebug. Original Xbox games can also run JIT-less (Settings, CPU mode) with no debugger, but much slower." = "Les jeux fonctionnent mieux avec le JIT, qu'iOS n'autorise que lorsqu'un outil de débogage est attaché à Xenra. Il faut deux choses : une installation signée avec un certificat de développement, et le JIT activé pour Xenra dans StikDebug. Les jeux Xbox originale peuvent aussi tourner sans JIT (Réglages, Mode CPU) et sans débogueur, mais bien plus lentement.";
+"How should this game run?" = "Comment lancer ce jeu ?";
+"JIT (recommended)" = "JIT (recommandé)";
+"JIT is fastest and needs StikDebug. JIT-less runs without a debugger but is much slower, and is a fallback for original Xbox games only for now." = "Le JIT est le plus rapide et nécessite StikDebug. Sans JIT, le jeu tourne sans débogueur mais bien plus lentement ; c'est pour l'instant une solution de repli pour les jeux Xbox originale uniquement.";
+"JIT-less (coming later)" = "Sans JIT (bientôt)";
+"JIT-less (slower)" = "Sans JIT (plus lent)";
+"JIT-less mode is not available for Xbox 360 games yet: the 360 core has no CPU interpreter. Set CPU mode to JIT in Settings (or for this game) and enable JIT with StikDebug." = "Le mode sans JIT n'est pas encore disponible pour les jeux Xbox 360 : le cœur 360 n'a pas d'interpréteur CPU. Réglez le mode CPU sur JIT dans les Réglages (ou pour ce jeu) et activez le JIT avec StikDebug.";
+"No debugger needed, but many games run far below full speed. A fallback, not a performance mode." = "Aucun débogueur requis, mais beaucoup de jeux tournent bien en dessous de la pleine vitesse. Une solution de repli, pas un mode performance.";
+"This build of Xenra does not include the JIT-less original Xbox core. Set CPU mode to JIT in Settings." = "Cette version de Xenra n'inclut pas le cœur Xbox originale sans JIT. Réglez le mode CPU sur JIT dans les Réglages.";
+"Xbox 360 games need JIT for now." = "Les jeux Xbox 360 ont besoin du JIT pour l'instant.";
