@@ -57,8 +57,10 @@ replace(
 /*
  * xemu-ios JIT-less profile. The core runs thread=single under TCI, so one
  * thread owns all of this and plain counters are enough. Every line starts
- * with "xemu-tci:". XEMU_IOS_TCI_PROFILE=0 turns off the per-helper table
- * (the per-op counts are one increment and always on).
+ * with "xemu-tci:". XEMU_IOS_TCI_PROFILE=0 turns off the per-helper table.
+ * The per-op and op-pair histograms cost a memory increment per guest op, so
+ * they only run for a 1 s window in each 5 s report period; the rest of the
+ * time the interpreter runs uncounted.
  */
 void *xemu_tci_tlb_fast(CPUArchState *env, uint64_t addr, MemOpIdx oi,
                         int store);
@@ -68,13 +70,24 @@ typedef struct TciStats {
     uint64_t calls_direct, calls_ffi;
     uint64_t ld_fast, ld_slow, st_fast, st_slow;
     uint64_t goto_tb, goto_ptr, exits;
+    uint64_t mb_ld, mb_st, mb_full;
     uint64_t ops[256];
 } TciStats;
 static TciStats tci_stats;
+static uint32_t tci_pairs[256 * 256];
 static int tci_profile = -1;
+static bool tci_sample_ops;
+static uint64_t tci_sample_start_ns, tci_sample_ns;
 static uint64_t tci_stats_last_ns, tci_stats_start_ns;
 static double tci_stats_last_cpu;
 static size_t tci_stats_last_tbs;
+
+static inline void tci_count_op(unsigned *prev, unsigned opc)
+{
+    tci_stats.ops[opc]++;
+    tci_pairs[(*prev << 8) | opc]++;
+    *prev = opc;
+}
 
 #define TCI_HELPER_SLOTS 1024
 typedef struct TciHelperCount {
@@ -137,14 +150,26 @@ static __attribute__((noinline, cold)) void tci_stats_report(void)
         tci_stats_last_ns = tci_stats_start_ns = now;
         tci_stats_last_cpu = tci_thread_cpu_seconds();
         tci_stats_last_tbs = tcg_nb_tbs();
-        fprintf(stderr, "xemu-tci: profiling on (helpers %s)\n",
+        tci_sample_ops = true;
+        tci_sample_start_ns = now;
+        fprintf(stderr, "xemu-tci: profiling on (helpers %s, op sample 1s/5s,"
+                " computed-goto dispatch, typed barriers, oi word)\n",
                 tci_profile ? "on" : "off");
         return;
+    }
+    if (tci_sample_ops && now - tci_sample_start_ns >= 1000000000ull) {
+        tci_sample_ops = false;
+        tci_sample_ns += now - tci_sample_start_ns;
     }
     if (now - tci_stats_last_ns < 5000000000ull) {
         return;
     }
+    if (tci_sample_ops) {
+        tci_sample_ns += now - tci_sample_start_ns;
+        tci_sample_ops = false;
+    }
     double secs = (now - tci_stats_last_ns) / 1e9;
+    double sample_secs = tci_sample_ns ? tci_sample_ns / 1e9 : secs;
     double cpu = tci_thread_cpu_seconds();
     size_t tbs = tcg_nb_tbs();
     uint64_t ops = 0;
@@ -155,18 +180,22 @@ static __attribute__((noinline, cold)) void tci_stats_report(void)
     uint64_t lds = tci_stats.ld_fast + tci_stats.ld_slow;
     uint64_t sts = tci_stats.st_fast + tci_stats.st_slow;
     uint64_t execs = tci_stats.execs;
+    uint64_t mbs = tci_stats.mb_ld + tci_stats.mb_st + tci_stats.mb_full;
     fprintf(stderr,
-            "xemu-tci: t=%.0fs ops %.1fM/s tb-exec %.2fM/s ops/exec %.1f "
+            "xemu-tci: t=%.0fs ops %.1fM/s (in %.1fs sample) tb-exec %.2fM/s "
             "goto_tb %.2fM/s goto_ptr %.2fM/s exit %.2fM/s | "
             "calls %.2fM/s (ffi %.1f%%) | ld %.2fM/s slow %.1f%% | "
-            "st %.2fM/s slow %.1f%% | tbs %zu (+%zu) | vcpu-thread %.0f%%\n",
-            (now - tci_stats_start_ns) / 1e9, ops / secs / 1e6,
-            execs / secs / 1e6, execs ? (double)ops / execs : 0.0,
+            "st %.2fM/s slow %.1f%% | mb %.2fM/s (ld %.0f%% st %.0f%%) | "
+            "tbs %zu (+%zu) | vcpu-thread %.0f%%\n",
+            (now - tci_stats_start_ns) / 1e9, ops / sample_secs / 1e6,
+            sample_secs, execs / secs / 1e6,
             tci_stats.goto_tb / secs / 1e6, tci_stats.goto_ptr / secs / 1e6,
             tci_stats.exits / secs / 1e6, calls / secs / 1e6,
             calls ? 100.0 * tci_stats.calls_ffi / calls : 0.0,
             lds / secs / 1e6, lds ? 100.0 * tci_stats.ld_slow / lds : 0.0,
             sts / secs / 1e6, sts ? 100.0 * tci_stats.st_slow / sts : 0.0,
+            mbs / secs / 1e6, mbs ? 100.0 * tci_stats.mb_ld / mbs : 0.0,
+            mbs ? 100.0 * tci_stats.mb_st / mbs : 0.0,
             tbs, tbs >= tci_stats_last_tbs ? tbs - tci_stats_last_tbs : 0,
             100.0 * (cpu - tci_stats_last_cpu) / secs);
 
@@ -192,7 +221,29 @@ static __attribute__((noinline, cold)) void tci_stats_report(void)
                             100.0 * tci_stats.ops[best] / ops);
         }
         fprintf(stderr, "%s\n", line);
+
+        /* Adjacent op pairs: candidates for fused interpreter ops. */
+        len = snprintf(line, sizeof(line), "xemu-tci: top pairs");
+        for (int k = 0; k < 12 && len < (int)sizeof(line) - 80; k++) {
+            unsigned best = 0;
+            for (unsigned i = 1; i < 256 * 256; i++) {
+                if (tci_pairs[i] > tci_pairs[best]) {
+                    best = i;
+                }
+            }
+            if (!tci_pairs[best]) {
+                break;
+            }
+            unsigned a = best >> 8, b = best & 0xff;
+            len += snprintf(line + len, sizeof(line) - len, " %s>%s=%.1f%%",
+                            a < NB_OPS ? tcg_op_defs[a].name : "?",
+                            b < NB_OPS ? tcg_op_defs[b].name : "?",
+                            100.0 * tci_pairs[best] / ops);
+            tci_pairs[best] = 0;
+        }
+        fprintf(stderr, "%s\n", line);
     }
+    memset(tci_pairs, 0, sizeof(tci_pairs));
 
     /* The helpers called most, by name or by offset into the core dylib. */
     if (tci_profile && calls) {
@@ -223,6 +274,9 @@ static __attribute__((noinline, cold)) void tci_stats_report(void)
     tci_stats_last_cpu = cpu;
     tci_stats_last_tbs = tbs;
     memset(&tci_stats, 0, sizeof(tci_stats));
+    tci_sample_ns = 0;
+    tci_sample_ops = true;
+    tci_sample_start_ns = now;
 }
 
 #if defined(__aarch64__)
@@ -299,17 +353,14 @@ replace(
         tci_profile = !(env_profile && !strcmp(env_profile, "0"));
         tci_stats_report();
     }
-    if (unlikely((++tci_stats.execs & 0x3ffff) == 0)) {
+    if (unlikely((++tci_stats.execs & 0x3fff) == 0)) {
         tci_stats_report();
     }
+    /* Read once per entry: the sample window moves between entries only. */
+    const bool tci_prof = tci_sample_ops;
+    unsigned tci_prev = 0;
     regs[TCG_AREG0] = (tcg_target_ulong)env;
 ''',
-)
-replace(
-    "tcg/tci.c",
-    "        insn = *tb_ptr++;\n        opc = extract32(insn, 0, 8);\n",
-    "        insn = *tb_ptr++;\n        opc = extract32(insn, 0, 8);\n"
-    "        tci_stats.ops[opc]++;\n",
 )
 replace(
     "tcg/tci.c",
@@ -407,6 +458,112 @@ replace(
 ''',
 )
 
+# Barriers: TCI dropped the barrier kind and ran a full `dmb ish` for every
+# one. x86 guests put a load-load barrier before every guest load, and a full
+# barrier also waits for the store buffer to drain. Keep the kind in the insn
+# and pick the same instruction the AArch64 JIT backend does for it.
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "static void tcg_out_mb(TCGContext *s, unsigned a0)\n"
+    "{\n    tcg_out_op_v(s, INDEX_op_mb);\n}\n",
+    "static void tcg_out_mb(TCGContext *s, unsigned a0)\n"
+    "{\n"
+    "    tcg_out32(s, (uint8_t)INDEX_op_mb | ((a0 & TCG_MO_ALL) << 8));\n"
+    "}\n",
+)
+replace(
+    "tcg/tci.c",
+    "        case INDEX_op_mb:\n"
+    "            /* Ensure ordering for all kinds */\n"
+    "            smp_mb();\n"
+    "            break;\n",
+    r'''        case INDEX_op_mb:
+#if defined(__aarch64__)
+            /* The table tcg/aarch64 uses: only LD_LD/LD_ST -> ishld,
+             * ST_ST alone -> ishst, anything else -> full. */
+            switch (extract32(insn, 8, 4)) {
+            case TCG_MO_LD_LD:
+            case TCG_MO_LD_ST:
+            case TCG_MO_LD_LD | TCG_MO_LD_ST:
+                asm volatile("dmb ishld" ::: "memory");
+                tci_stats.mb_ld++;
+                break;
+            case TCG_MO_ST_ST:
+                asm volatile("dmb ishst" ::: "memory");
+                tci_stats.mb_st++;
+                break;
+            default:
+                smp_mb();
+                tci_stats.mb_full++;
+                break;
+            }
+#else
+            smp_mb();
+#endif
+            break;
+''',
+)
+
+# Guest loads and stores whose MemOpIdx does not fit the 16-bit field (on x86
+# that is every one carrying atomicity bits) cost a tci_movi of the MemOpIdx
+# into a temp before the access: one extra interpreted op per guest access.
+# Put the MemOpIdx in the word after the insn instead. ra still lands inside
+# the same guest insn: it points past the extra word, like the movi form.
+replace(
+    "tcg/tci/tcg-target-opc.h.inc",
+    "DEF(tci_qemu_st_rrr, 0, 3, 0, TCG_OPF_NOT_PRESENT)\n",
+    "DEF(tci_qemu_st_rrr, 0, 3, 0, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_qemu_ld_x, 1, 1, 0, TCG_OPF_NOT_PRESENT)\n"
+    "DEF(tci_qemu_st_x, 0, 2, 0, TCG_OPF_NOT_PRESENT)\n",
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP, oi);\n"
+    "        tcg_out_op_rrr(s, INDEX_op_tci_qemu_ld_rrr, data, addr, TCG_REG_TMP);\n",
+    "        tcg_out_op_rr(s, INDEX_op_tci_qemu_ld_x, data, addr);\n"
+    "        tcg_out32(s, oi);\n",
+)
+replace(
+    "tcg/tci/tcg-target.c.inc",
+    "        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_TMP, oi);\n"
+    "        tcg_out_op_rrr(s, INDEX_op_tci_qemu_st_rrr, data, addr, TCG_REG_TMP);\n",
+    "        tcg_out_op_rr(s, INDEX_op_tci_qemu_st_x, data, addr);\n"
+    "        tcg_out32(s, oi);\n",
+)
+replace(
+    "tcg/tci.c",
+    "        case INDEX_op_qemu_ld2:\n",
+    r'''        case INDEX_op_tci_qemu_ld_x:
+            tci_args_rr(insn, &r0, &r1);
+            oi = *tb_ptr++;
+            taddr = regs[r1];
+            regs[r0] = tci_qemu_ld(env, taddr, oi, tb_ptr);
+            break;
+        case INDEX_op_tci_qemu_st_x:
+            tci_args_rr(insn, &r0, &r1);
+            oi = *tb_ptr++;
+            taddr = regs[r1];
+            tci_qemu_st(env, taddr, regs[r0], oi, tb_ptr);
+            break;
+
+        case INDEX_op_qemu_ld2:
+''',
+)
+replace(
+    "tcg/tci.c",
+    "    case 0:\n        /* tcg_out_nop_fill uses zeros */\n",
+    r'''    case INDEX_op_tci_qemu_ld_x:
+    case INDEX_op_tci_qemu_st_x:
+        tci_args_rr(insn, &r0, &r1);
+        info->fprintf_func(info->stream, "%-12s  %s, %s, 0x%x",
+                           op_name, str_r(r0), str_r(r1), *tb_ptr);
+        return 2 * sizeof(insn);
+
+    case 0:
+        /* tcg_out_nop_fill uses zeros */
+''',
+)
+
 # Breadcrumbs for the first few translations and executions, so a JIT-less run
 # that dies early says at which stage. Only the TCI core prints them.
 replace(
@@ -444,3 +601,69 @@ replace(
     "#endif\n"
     "    ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);\n",
 )
+
+# Computed-goto dispatch. The profile put ~90% of JIT-less CPU time in the
+# interpreter loop at 7-10 cycles per op, and the single `switch` gives every
+# op one shared, bounds-checked indirect jump. Each case now ends in its own
+# copy of fetch/decode/jump, so the branch predictor sees the op that came
+# before. The switch is kept (never entered) so case code is unchanged; every
+# top-level `break;`/`continue;` of the case bodies becomes TCI_NEXT(). Must
+# run after every other tci.c edit above.
+def _tci_computed_goto():
+    import re
+
+    path = root / "tcg/tci.c"
+    text = path.read_text()
+    fn = text.index("uintptr_t QEMU_DISABLE_CFI tcg_qemu_tb_exec(")
+    head = "        switch (opc) {\n"
+    sw = text.index(head, fn)
+    tail = "        default:\n            g_assert_not_reached();\n        }\n    }\n}\n"
+    end = text.index(tail, sw)
+    body = text[sw + len(head):end]
+
+    table, out, nexts = [], [], 0
+    for line in body.split("\n"):
+        m = re.match(r"^        case (INDEX_op_\w+):(.*)$", line)
+        if m:
+            table.append(f"            [{m.group(1)}] = &&tci_L_{m.group(1)},")
+            line = f"        case {m.group(1)}: tci_L_{m.group(1)}:{m.group(2)}"
+        elif re.match(r"^#\s*(if|ifdef|ifndef|elif|else|endif)\b", line):
+            table.append(line)
+        elif line in ("            break;", "            continue;"):
+            line = "            TCI_NEXT();"
+            nexts += 1
+        out.append(line)
+    cases = sum(1 for t in table if t.startswith("            ["))
+    if cases < 80 or nexts < 80:
+        sys.exit(f"tcg/tci.c: computed goto found {cases} cases, {nexts} exits")
+
+    new_head = (
+        "        if (unlikely(tci_prof)) {\n"
+        "            tci_count_op(&tci_prev, opc);\n"
+        "        }\n"
+        "        static const void *const tci_dispatch[256] = {\n"
+        "            [0 ... 255] = &&tci_L_default,\n"
+        + "\n".join(table) + "\n"
+        "        };\n"
+        "        goto *tci_dispatch[opc];\n"
+        "        switch (opc) {\n"
+    )
+    new_tail = tail.replace("        default:\n",
+                            "        default: tci_L_default:\n", 1)
+    macro = (
+        "#define TCI_NEXT() do {                                   \\\n"
+        "        insn = *tb_ptr++;                                 \\\n"
+        "        opc = extract32(insn, 0, 8);                      \\\n"
+        "        if (unlikely(tci_prof)) {                         \\\n"
+        "            tci_count_op(&tci_prev, opc);                 \\\n"
+        "        }                                                 \\\n"
+        "        goto *tci_dispatch[opc];                          \\\n"
+        "    } while (0)\n\n"
+    )
+    text = (text[:fn] + macro + text[fn:sw] + new_head + "\n".join(out)
+            + new_tail + "#undef TCI_NEXT\n" + text[end + len(tail):])
+    path.write_text(text)
+    print(f"tcg/tci.c: computed goto, {cases} cases, {nexts} dispatch sites")
+
+
+_tci_computed_goto()
